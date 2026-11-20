@@ -297,7 +297,13 @@ else
     [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
   fi
   [ "$tier" != fast ] && in_scope os && suite_tools
-  suite_size
+  # The hosted CI definitions test themselves (every workflow parses).
+  if in_scope .github && [ -d "$(checkout_of .github)/tests" ]; then
+    for t in "$(checkout_of .github)"/tests/*.sh; do run_named .github "tests/${t##*/}" .github.tests; done
+  fi
+  # The budgets measure the kernel and the images: nothing to measure when
+  # neither is in scope (--repo idl, --repo .github).
+  if in_scope kernel || in_scope os || in_scope system; then suite_size; fi
   if [ "$tier" != fast ]; then
     suite_required_arch aarch64
     suite_required_arch riscv64
