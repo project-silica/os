@@ -87,21 +87,24 @@ build_image_tool() {
   echo "$(cache_of os)/target/release/silica-image"
 }
 
-# build_system_image <arch> <log> [cmdline]: the image whose root task is the
-# system repository's init, with every other program of that repository in the
-# ramdisk under its own name. Prints the image path (system.img).
+# build_system_image <arch> <log> [cmdline] [root]: the image whose root task
+# is the system repository's program <root> (default: init), with every other
+# program of that repository in the ramdisk under its own name. Prints the
+# image path (system.img, or system-<root>.img for another root task).
 build_system_image() {
-  local arch=$1 log=$2 cmdline=${3:-} k l t sys out f n
+  local arch=$1 log=$2 cmdline=${3:-} root=${4:-init} k l t sys out f n
   [ "$arch" = x86_64 ] || { echo "no image layout for $arch before B05" >"$log"; return 1; }
   k=$(build_kernel "$arch" "$log.kernel") || { cat "$log.kernel" >"$log"; return 1; }
   l=$(build_loader "$log.loader") || { cat "$log.loader" >"$log"; return 1; }
   sys=$(build_system "$arch" "$log.system") || { cat "$log.system" >"$log"; return 1; }
   t=$(build_image_tool "$log.tool") || { cat "$log.tool" >"$log"; return 1; }
   out=$(art_dir "$arch")/system.img
-  local -a entries=(--ramdisk-entry "root=$sys/init.elf") extra=()
+  [ "$root" = init ] || out=$(art_dir "$arch")/system-$root.img
+  [ -f "$sys/$root.elf" ] || { echo "the system repository has no program named $root" >"$log"; return 1; }
+  local -a entries=(--ramdisk-entry "root=$sys/$root.elf") extra=()
   for f in "$sys"/*.elf; do
     n=$(basename "$f" .elf)
-    case "$n" in init|*.debug) continue ;; esac
+    case "$n" in "$root"|*.debug) continue ;; esac
     entries+=(--ramdisk-entry "$n=$f")
   done
   if [ -n "$cmdline" ]; then

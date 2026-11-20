@@ -280,6 +280,7 @@ else
   # The system image: the kernel with the system repository's init as root task.
   if { in_scope kernel || in_scope os || in_scope system; } && [ -f "$(checkout_of system)/Cargo.toml" ]; then
     run_system x86_64 system.x86_64
+    [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
   fi
   [ "$tier" != fast ] && in_scope os && suite_tools
   suite_size

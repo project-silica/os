@@ -225,3 +225,27 @@ run_system() {
   record fail "$suite" boot "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   return 1
 }
+
+# run_systest <arch> <suite>: the tests of what programs do to each other
+# (root task: the system repository's systest) on eight processors. Each
+# `TEST <name> PASS` line is one result; an `ERROR: systest: <name>: ...`
+# line is that test's failure; a run that does not end with SYSTEST OK and
+# status 0 is a failure of its own.
+run_systest() {
+  local arch=$1 suite=$2 log img serial rc l name
+  log=$(logfile "$suite" build.systest)
+  img=$(build_system_image "$arch" "$log" "" systest) || { record fail "$suite" systest "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" systest)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 8 --timeout "${SILICA_SYSTEST_TIMEOUT:-600}" >"$serial.qemu" 2>&1
+  rc=$?
+  while IFS= read -r l; do
+    case "$l" in
+      "TEST "*" PASS") name=${l#TEST }; record pass "$suite" "${name% PASS}" ;;
+      "ERROR: systest: "*": "*) name=${l#ERROR: systest: }; record fail "$suite" "${name%%: *}" "${name#*: } (serial: $serial)" ;;
+    esac
+  done < <(tr -d '\r' <"$serial")
+  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'SYSTEST OK'; then return 0; fi
+  [ -x "$TOOLS/symbolize.sh" ] && "$TOOLS/symbolize.sh" --arch "$arch" "$serial" >"$serial.symbolized" 2>&1
+  record fail "$suite" systest "the run did not end with SYSTEST OK: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  return 1
+}
