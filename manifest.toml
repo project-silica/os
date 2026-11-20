@@ -10,6 +10,11 @@ url = "https://github.com/project-silica/kernel"
 milestone = 0
 commit = "0d4dd4df23caf13de7ee3274b613dd12d6b6d888"
 
+[repos.system]
+url = "https://github.com/project-silica/system"
+milestone = 2
+commit = ""
+
 [repos.".github"]
 url = "https://github.com/project-silica/.github"
 milestone = 0

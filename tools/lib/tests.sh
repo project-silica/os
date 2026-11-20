@@ -209,3 +209,19 @@ run_boot_error() {
   fi
   record pass "$suite" "$label"
 }
+
+# run_system <arch> <suite>: the system image (root task: the system
+# repository's init) boots on two processors, starts its programs and
+# reports BOOT OK through the debug-exit device.
+run_system() {
+  local arch=$1 suite=$2 log img serial rc
+  log=$(logfile "$suite" build.boot)
+  img=$(build_system_image "$arch" "$log") || { record fail "$suite" boot "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" boot)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'BOOT OK'; then record pass "$suite" boot; return 0; fi
+  [ -x "$TOOLS/symbolize.sh" ] && "$TOOLS/symbolize.sh" --arch "$arch" "$serial" >"$serial.symbolized" 2>&1
+  record fail "$suite" boot "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  return 1
+}

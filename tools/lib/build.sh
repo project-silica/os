@@ -47,6 +47,23 @@ build_root() { # the root task the kernel starts: the in-OS test program until t
   echo "$out/root.elf"
 }
 
+# build_system <arch> <log>: the system repository's programs for the user
+# target. Prints the directory holding one <name>.elf (stripped) per program,
+# with <name>.debug.elf beside it. The root task is init.elf.
+build_system() {
+  local arch=$1 log=$2 k s vend out n
+  k=$(checkout_of kernel); s=$(checkout_of system); out=$(art_dir "$arch")/system
+  [ -f "$s/Cargo.toml" ] || { echo "no checkout of the system repository" >"$log"; return 1; }
+  mkdir -p "$out"; vend=$(merged_vendor system)
+  cargo_run system "$log" build --release --workspace --bins --target "$k/targets/$arch-silica-user.json" \
+    -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
+  for n in $(cd "$s" && cargo metadata --no-deps --format-version 1 --offline 2>/dev/null | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name'); do
+    cp "$(cache_of system)/target/$arch-silica-user/release/$n" "$out/$n.debug.elf" || return 1
+    strip_debug "$out/$n.debug.elf" "$out/$n.elf" "$log" || return 1
+  done
+  echo "$out"
+}
+
 build_loader() {
   local log=$1 vend out e
   # lld-link stamps the PE header with the build time and, with debug info, a GUID
@@ -68,6 +85,33 @@ build_image_tool() {
   local log=$1
   cargo_run os "$log" build --release -q -p silica-image || return 1
   echo "$(cache_of os)/target/release/silica-image"
+}
+
+# build_system_image <arch> <log> [cmdline]: the image whose root task is the
+# system repository's init, with every other program of that repository in the
+# ramdisk under its own name. Prints the image path (system.img).
+build_system_image() {
+  local arch=$1 log=$2 cmdline=${3:-} k l t sys out f n
+  [ "$arch" = x86_64 ] || { echo "no image layout for $arch before B05" >"$log"; return 1; }
+  k=$(build_kernel "$arch" "$log.kernel") || { cat "$log.kernel" >"$log"; return 1; }
+  l=$(build_loader "$log.loader") || { cat "$log.loader" >"$log"; return 1; }
+  sys=$(build_system "$arch" "$log.system") || { cat "$log.system" >"$log"; return 1; }
+  t=$(build_image_tool "$log.tool") || { cat "$log.tool" >"$log"; return 1; }
+  out=$(art_dir "$arch")/system.img
+  local -a entries=(--ramdisk-entry "root=$sys/init.elf") extra=()
+  for f in "$sys"/*.elf; do
+    n=$(basename "$f" .elf)
+    case "$n" in init|*.debug) continue ;; esac
+    entries+=(--ramdisk-entry "$n=$f")
+  done
+  if [ -n "$cmdline" ]; then
+    printf '%s\n' "$cmdline" >"$(dirname "$out")/SYSTEM-CMDLINE.TXT" || return 1
+    extra=("SILICA/CMDLINE.TXT=$(dirname "$out")/SYSTEM-CMDLINE.TXT")
+  fi
+  cp "$t" "$(dirname "$out")/silica-image" || return 1
+  "$(dirname "$out")/silica-image" --out "$out" "EFI/BOOT/BOOTX64.EFI=$l" "SILICA/KERNEL.ELF=${k%.elf}.stripped" \
+    "${entries[@]}" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
+  echo "$out"
 }
 
 build_image() {

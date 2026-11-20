@@ -2,9 +2,13 @@
 # Dependency direction (spec/REPOSITORIES.md, Dependencies).
 #   check-deps.sh
 # idl depends on nothing; kernel only on idl; every other repository only on
-# idl and kernel's libsys; nothing depends on os or workshop. A Cargo path
-# dependency may not leave its own repository (cross-repo code comes through
-# git URLs of published repositories plus the generated path overrides).
+# idl and the kernel's interface crates (libsys, silica-formats); nothing
+# depends on os or workshop. Code of another repository is named by a path
+# into its checkout beside this one (the workshop layout is the build
+# layout: a git URL cannot be resolved offline even when it is overridden),
+# or by the git URL of the published repository; either way the direction
+# rules apply. A path dependency that leaves its repository for anywhere
+# else is an error.
 # Every Cargo manifest of a checkout counts, not only the root workspace
 # (fuzz targets and tools are workspaces of their own); vendor/ and target/
 # are not searched. Prints "CHECK-DEPS: OK" or one "ERROR: check-deps:" line
@@ -39,9 +43,16 @@ allowed() { # allowed <from repo> <to repo> <crate>
     kernel:idl) return 0 ;;
     kernel:*) return 1 ;;
     *:idl) return 0 ;;
-    *:kernel) [ "$3" = libsys ] ;;
+    *:kernel) [ "$3" = libsys ] || [ "$3" = silica-formats ] ;;
     *) return 1 ;;
   esac
+}
+repo_of_path() { # the repository whose checkout contains <path>, or nothing
+  local q dir
+  for q in $(all_repos); do
+    dir=$(realdir "$(checkout_of "$q")") || continue
+    case "$1/" in "$dir"/*) echo "$q"; return ;; esac
+  done
 }
 check_manifest() { # check_manifest <repo> <dir> <manifest> <root|nested>; adds the packages it saw to SEEN
   local r=$1 d=$2 mf=$3 kind=$4 meta
@@ -53,7 +64,14 @@ check_manifest() { # check_manifest <repo> <dir> <manifest> <root|nested>; adds 
   local pkg dep src path to
   while IFS=$'\t' read -r pkg dep src path; do
     if [ "$path" != - ]; then
-      case "$(realdir "$path" || echo "$path")/" in "$d"/*) ;; *) bad "$r/$pkg: path dependency $dep leaves the repository ($path)" ;; esac
+      path=$(realdir "$path" || echo "$path")
+      case "$path/" in
+        "$d"/*) ;;
+        *)
+          to=$(repo_of_path "$path")
+          if [ -z "$to" ]; then bad "$r/$pkg: path dependency $dep leaves the repository for a place that is no repository of the workshop ($path)"
+          elif ! allowed "$r" "$to" "$dep"; then bad "$r/$pkg depends on $to/$dep (not allowed: spec/REPOSITORIES.md, Dependencies)"; fi ;;
+      esac
     fi
     case "$src" in
       git+*)

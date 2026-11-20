@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Test for tools/check-deps.sh (component A11;
 # spec/REPOSITORIES.md, Dependencies): idl depends on nothing, kernel
-# only on idl, every other repository only on idl and kernel's libsys, nothing
-# on os or workshop, and no path dependency leaves its repository. A planted
+# only on idl, every other repository only on idl and the kernel's interface
+# crates, nothing on os or workshop; a path dependency into a sibling
+# checkout is judged by the same rules and one that leaves for anywhere else
+# is refused. A planted
 # violation is reported by name, in every dependency kind and every spelling of
 # the repository URL.
 #
@@ -142,6 +144,10 @@ allowed "kernel on idl" kernel "idl2 = { package = \"idlc\", git = \"$ORG/idl\",
 allowed "drivers on libsys" drivers "libsys = { git = \"$ORG/kernel.git\" }"
 allowed "a dependency on a foreign repository" drivers "o = { git = \"https://example.invalid/silica/os\" }
 w = \"2\""
+# By path into the checkout beside this one: the same rules.
+allowed "system on libsys by path" system "libsys3 = { package = \"libsys\", path = \"../kernel/libsys\" }"
+violation "system on kernel-core by path" system "kc = { package = \"kernel-core\", path = \"../kernel/kernel-core\" }" 'system.*kernel/kernel-core'
+violation "idl on kernel by path" idl "libsys = { path = \"../kernel/libsys\" }" 'idl.*kernel/libsys'
 violation "renamed dependency is judged by its package" system "lib2 = { package = \"kernel-core\", git = \"$ORG/kernel\" }" 'system.*kernel/kernel-core'
 
 # ---- 3. kinds and spellings --------------------------------------------------
@@ -165,16 +171,16 @@ violation "branch, tag and rev" system "tool = { git = \"$ORG/os\", tag = \"v1\"
 
 # ---- 4. path dependencies ----------------------------------------------------
 mkcrate "$FX/outside" outside
-violation "path to a sibling repository" system "other = { path = \"../idl\" }" 'system.*other.*leaves'
+allowed "path to a sibling repository it may use" system "other = { path = \"../idl\" }"
 violation "path outside the workspace" system "other = { path = \"$FX/outside\" }" 'system.*other.*leaves'
-violation "path with .." system "other = { path = \"crates/../../drivers\" }" 'system.*other.*leaves'
+violation "path with .. into a repository it may not use" system "other = { path = \"crates/../../drivers\" }" 'system.*drivers/other'
 ln -s "$FX/outside" "$WS/system/crates/link"
 violation "path through a symbolic link" system "other = { path = \"crates/link\" }" 'system.*other.*leaves'
 rm "$WS/system/crates/link"
 allowed "path inside the repository" system "again = { package = \"helper\", path = \"crates/helper\" }"
-violation "path leaving in a dev-dependency" kernel "
+violation "path into a forbidden repository in a dev-dependency" kernel "
 [dev-dependencies]
-other = { path = \"../idl\" }" 'kernel.*other.*leaves'
+other = { path = \"../system\" }" 'kernel.*system/other'
 
 # ---- 5. every manifest of a repository ---------------------------------------
 mkcrate "$WS/idl/fuzz" fuzz "[dependencies]
@@ -215,11 +221,11 @@ cp "$FX/drivers.toml" "$WS/drivers/Cargo.toml"
 # ---- 6. several violations, one line each ------------------------------------
 write idl "libsys = { git = \"$ORG/kernel\" }"
 write system "tool = { git = \"$ORG/os\" }"
-write drivers "other = { path = \"../idl\" }"
+write drivers "other = { path = \"../system\" }"
 run
 [ $RC = 1 ] || bad "three violations: exit $RC, want 1"
 [ "$(errs)" = 3 ] || bad "three violations: want 3 ERROR lines, got $(errs): $OUT"
-for pat in 'idl.*kernel/libsys' 'system.*os/tool' 'drivers.*other.*leaves'; do
+for pat in 'idl.*kernel/libsys' 'system.*os/tool' 'drivers.*system/other'; do
   printf '%s\n' "$OUT" | grep -q "^ERROR:.*$pat" || bad "three violations: no ERROR line for /$pat/: $OUT"
 done
 write idl ""; write system ""; write drivers ""
