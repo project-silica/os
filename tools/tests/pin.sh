@@ -182,4 +182,22 @@ mv "$WS/idl" "$FX/idl.away"; mkdir "$WS/idl"; G -C "$WS/idl" init -q -b main .; 
 run pin.sh --check; want_err "empty clone" '^ERROR: pin: idl'
 rm -rf "${WS:?}/idl"; mv "$FX/idl.away" "$WS/idl"
 
+# ===== 4. bootstrap.pins follows the manifest ================================
+setup
+printf '# pins\nspec %s\nidl %s\nos %s\nother keepme\n' "$ZERO40" "$ZERO40" "$ZERO40" >"$WS/bootstrap.pins"
+bp() { awk -v r="$1" '$1 == r { print $2 }' "$WS/bootstrap.pins"; }
+run pin.sh
+[ "$RC" = 0 ] && [ "$(nerr)" = 0 ] || bad "bootstrap: pin failed: $OUT"
+printf '%s\n' "$OUT" | grep -qx 'PIN: bootstrap.pins spec idl os' || bad "bootstrap: no line naming the moved pins: $OUT"
+for r in spec idl; do [ "$(bp "$r")" = "$(pinned "$r")" ] || bad "bootstrap: $r is $(bp "$r"), manifest pins $(pinned "$r")"; done
+[ "$(bp os)" = "$(G -C "$OS" rev-parse HEAD)" ] || bad "bootstrap: os is $(bp os), want the head of os"
+[ "$(bp other)" = keepme ] && grep -qx '# pins' "$WS/bootstrap.pins" || bad "bootstrap: unrelated lines were not kept"
+[ -z "$(bp .github)" ] || bad "bootstrap: a line was added for a repository that had none"
+run pin.sh --check; want_ok "bootstrap check" '^PIN: CHECK OK$'
+sed -i "s/^idl .*/idl $ZERO40/" "$WS/bootstrap.pins"; S=$(snap)
+run pin.sh --check; want_err "bootstrap stale" '^ERROR: pin: bootstrap.pins has idl'
+run pin.sh
+[ "$(bp idl)" = "$(pinned idl)" ] || bad "bootstrap: an unchanged manifest did not repair bootstrap.pins"
+echo x >"$WS/bootstrap.pins"
+
 [ "$fails" = 0 ]
