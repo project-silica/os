@@ -168,8 +168,9 @@ static void null_syscall(void)
 	report("null_syscall", SAMPLES, 1);
 }
 
-// Round trips per second of `pairs` independent pairs, one pair per processor.
-static unsigned long throughput(int pairs)
+// Round trips per second of `pairs` independent pairs, one pair per
+// processor, or with `cross` the client on one and the server on the next.
+static unsigned long throughput(int pairs, int cross)
 {
 	int done[2];
 	pipe(done);
@@ -178,10 +179,12 @@ static unsigned long throughput(int pairs)
 			int a[2], b[2];
 			char msg[32] = { 0 };
 			unsigned long count = 0;
-			pin(p);
+			pin(cross ? 2 * p : p);
 			pipe(a);
 			pipe(b);
 			if (fork() == 0) {
+				if (cross)
+					pin(2 * p + 1);
 				while (read(a[0], msg, sizeof(msg)) == sizeof(msg))
 					write(b[1], msg, sizeof(msg));
 				exit(0);
@@ -227,12 +230,21 @@ int main(void)
 	ctx_switch();
 	page_fault();
 	timer_overshoot();
-	unsigned long one = throughput(1);
+	unsigned long one = throughput(1, 0);
 	printf("BENCH ipc_pairs1 %lu ops/s\n", one);
 	if (ncpu >= 8) {
-		unsigned long eight = throughput(8);
+		unsigned long eight = throughput(8, 0);
 		printf("BENCH ipc_pairs8 %lu ops/s\n", eight);
 		printf("BENCH ipc_scaling %lu.%02lu x\n", eight / one, eight * 100 / one % 100);
+	}
+	if (ncpu >= 2) {
+		one = throughput(1, 1);
+		printf("BENCH ipc_cross_pairs1 %lu ops/s\n", one);
+		if (ncpu >= 8) {
+			unsigned long four = throughput(4, 1);
+			printf("BENCH ipc_cross_pairs4 %lu ops/s\n", four);
+			printf("BENCH ipc_cross_scaling %lu.%02lu x\n", four / one, four * 100 / one % 100);
+		}
 	}
 	printf("BENCH DONE\n");
 

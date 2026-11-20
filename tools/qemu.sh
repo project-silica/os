@@ -7,7 +7,9 @@
 # benchmarks. --stamp writes one line per serial line, "<host time in seconds
 # with microseconds> <text>", after a first line "<time> QEMU START", so boot
 # times are measured by the host.
-# Serial goes to a file; a hard timeout kills the guest. Exit status: 0 when
+# Serial goes to a file; a hard timeout kills the guest. The processors'
+# registers at every reset go to qemu-reset.log beside it, so a guest that
+# dies by triple fault says where. Exit status: 0 when
 # the guest wrote the success code to the debug-exit device, 1 for any other
 # exit code, 124 on timeout, 2 on a usage or setup error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
@@ -91,7 +93,7 @@ if [ -n "$stamp" ]; then
   printf '%s QEMU START\n' "$EPOCHREALTIME" >"$stamp"
 fi
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
-  cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none "${accel[@]}" -smp "$smp" -m "$mem" \
+  cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${accel[@]}" -smp "$smp" -m "$mem" \
   -serial "$serial_arg" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
   -drive "format=raw,file=$image,if=virtio,snapshot=on" "${vga[@]}" "${extra[@]}" ) 2>"$RUN/qemu.out" &
@@ -124,7 +126,12 @@ stop_shot
 # isa-debug-exit returns (value << 1) | 1; the success value is 0x10.
 if [ "$rc" != 33 ]; then
   if [ "$rc" != 1 ] && [ $((rc & 1)) = 1 ]; then why="guest exit code $((rc >> 1)) via debug-exit (exit status $rc)"
-  else why="qemu exited with status $rc, not through the debug-exit device: $(head -c 200 "$RUN/qemu.out" | tr '\n' ' ')"; fi
+  else
+    # A guest that reset itself (a triple fault): where each processor was
+    # is the last register dump of the reset log.
+    at=$(grep -a '^RIP=' "$RUN/qemu-reset.log" 2>/dev/null | tail -n "$smp" | awk '{ print $1 }' | sort | uniq -c | awk '{ printf "%s x%s ", $2, $1 }')
+    why="qemu exited with status $rc, not through the debug-exit device: $(head -c 200 "$RUN/qemu.out" | tr '\n' ' ')${at:+(the machine reset; processors at $at; registers: $RUN/qemu-reset.log)}"
+  fi
   echo "ERROR: qemu: $arch: $why (serial: $serial)"
   exit 1
 fi

@@ -42,6 +42,9 @@ ctx_switch ns lower le 1 2
 boot_userspace ms lower win 1 2
 timer_overshoot_p99 ns lower le 1 2
 ipc_scaling x higher min 7 2
+ipc_cross_pairs1 ops/s higher le 1 2
+ipc_cross_pairs4 ops/s higher le 1 2
+ipc_cross_scaling x higher none - 2
 page_fault ns lower none - 2
 null_syscall ns lower none - 2
 ipc_roundtrip_p99 ns lower none - 2

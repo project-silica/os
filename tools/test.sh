@@ -72,6 +72,20 @@ suite_builds() { # the kernel for all three targets and the UEFI loader
   else record fail "$s" loader "build failed: $(first_error "$log")"; fi
 }
 
+# inos_machine <arch> <test> <options> <manifest>: set INOS_QEMU to the
+# machine a test's line in the manifest names (smp=<processors> mem=<MiB>).
+inos_machine() {
+  local o
+  INOS_QEMU=()
+  for o in $3; do
+    case "$o" in
+      smp=*) INOS_QEMU+=(--smp "${o#smp=}") ;;
+      mem=*) INOS_QEMU+=(--mem "${o#mem=}") ;;
+      *) record fail "inos.$1" "$2" "unknown option $o in $4"; return 1 ;;
+    esac
+  done
+}
+
 suite_inos() { # in-OS tests on one architecture; --fast boots boot_ok only
   local a=$1 t opts o manifest
   manifest="$(checkout_of kernel)/tests/inos-$a.txt"
@@ -81,14 +95,7 @@ suite_inos() { # in-OS tests on one architecture; --fast boots boot_ok only
     # (smp=<processors> mem=<MiB>).
     while read -r t opts; do
       case "$t" in ""|"#"*|boot_ok) continue ;; esac
-      INOS_QEMU=()
-      for o in $opts; do
-        case "$o" in
-          smp=*) INOS_QEMU+=(--smp "${o#smp=}") ;;
-          mem=*) INOS_QEMU+=(--mem "${o#mem=}") ;;
-          *) record fail "inos.$a" "$t" "unknown option $o in $manifest"; continue 2 ;;
-        esac
-      done
+      inos_machine "$a" "$t" "$opts" "$manifest" || continue
       run_inos "$a" "inos.$a" "$t"
       # A test that names no machine runs on one processor above and on
       # four here: the same paths with other processors present.
@@ -265,7 +272,14 @@ suite_bench() {
 }
 
 if [ "${#guests[@]}" -gt 0 ]; then
-  for guest in "${guests[@]}"; do run_inos x86_64 inos.x86_64 "$guest"; done
+  # Each on the machine its line in the manifest names.
+  manifest="$(checkout_of kernel)/tests/inos-x86_64.txt"
+  for guest in "${guests[@]}"; do
+    opts=$(awk -v t="$guest" '$1 == t { $1 = ""; print; exit }' "$manifest" 2>/dev/null)
+    inos_machine x86_64 "$guest" "$opts" "$manifest" || continue
+    run_inos x86_64 inos.x86_64 "$guest"
+  done
+  INOS_QEMU=()
 else
   for r in $(all_repos); do
     in_scope "$r" || continue
