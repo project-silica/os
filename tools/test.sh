@@ -129,6 +129,24 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
   run_boot_error x86_64 $e error.root_not_elf 'ERROR: kernel: cannot start the root task: Image(NotElf)' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'root=$L'
 }
 
+# suite_arch_entry <arch>: before an architecture runs the in-OS tests, its
+# loader and kernel entry are tested on their own: the image boots from
+# firmware at EL1 and at EL2 to the kernel's report line, without a panic.
+suite_arch_entry() {
+  local a=$1 s="entry.$1" v log img
+  log=$(logfile "$s" build)
+  img=$(build_image "$a" "$log") || { record fail "$s" build "image build failed: $(first_error "$log")"; return; }
+  record pass "$s" build
+  for v in el1 el2; do
+    log=$(logfile "$s" "$v")
+    local -a at=(); [ "$v" = el2 ] && at=(--el2)
+    "$TOOLS/qemu.sh" --arch "$a" --image "$img" --serial "$log.serial" --timeout 60 "${at[@]+"${at[@]}"}" >"$log" 2>&1
+    if grep -aq "^silica: $a" "$log.serial" && ! grep -aq PANIC "$log.serial"; then record pass "$s" "$v"
+    else record fail "$s" "$v" "no kernel report line, or a panic (serial: $log.serial)"; fi
+  done
+  return 0
+}
+
 suite_required_arch() { # an architecture required by milestone that cannot boot is an error
   local a=$1
   case "$a" in
@@ -305,6 +323,7 @@ else
   # neither is in scope (--repo idl, --repo .github).
   if in_scope kernel || in_scope os || in_scope system; then suite_size; fi
   if [ "$tier" != fast ]; then
+    if { in_scope kernel || in_scope os; } && [ -f "$(checkout_of kernel)/targets/aarch64-silica.json" ]; then suite_arch_entry aarch64; fi
     suite_required_arch aarch64
     suite_required_arch riscv64
     if in_scope kernel; then suite_miri; suite_loom; fi

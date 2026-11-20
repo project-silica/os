@@ -142,7 +142,7 @@ echo ok_arm >"$K/tests/inos-aarch64.txt"
 run --full --repo os
 [ "$RC" != 0 ] && grep -q '^ERROR: inos.x86_64::fail_full:' <<<"$OUT" || bad "full omitted failing guest"
 grep -q $'pass\tinos.x86_64\tok_full' "$RES" || bad "full omitted passing guest"
-grep -q $'fail\tinos.aarch64\tok_arm' "$RES" || bad "full omitted required aarch64 guest"
+grep -qE $'^(pass|fail)\tinos.aarch64\tok_arm' "$RES" || bad "full omitted required aarch64 guest"
 echo 0 >"$WS/MILESTONE"
 
 [ "$fails" = 0 ]

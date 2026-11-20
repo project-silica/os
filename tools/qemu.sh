@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Headless QEMU boot (component A04).
-#   qemu.sh --image <disk.img> [--arch x86_64] [--serial <file>] [--timeout <s>]
+#   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--serial <file>] [--timeout <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>]
 # --pin runs the emulator on the given host processors (taskset), for
@@ -14,7 +14,7 @@
 # exit code, 124 on timeout, 2 on a usage or setup error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
-arch=x86_64 image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp=""
+arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp)
@@ -22,6 +22,7 @@ while [ $# -gt 0 ]; do
   esac
   case "$1" in
     --arch) arch=$2; shift 2 ;;
+    --el2) el2=1; shift ;;
     --image) image=$2; shift 2 ;;
     --serial) serial=$2; shift 2 ;;
     --timeout) timeout=$2; shift 2 ;;
@@ -72,7 +73,8 @@ case "$arch" in
     extra=(-device isa-debug-exit,iobase=0xf4,iosize=0x04) ;;
   aarch64)
     bin=qemu-system-aarch64
-    accel=(-machine virt -cpu max)
+    # --el2: the firmware runs at EL2, as on most servers; the loader drops to EL1.
+    accel=(-machine "virt,gic-version=3${el2:+,virtualization=on}" -cpu max)
     extra=(-semihosting-config enable=on,target=native) ;;
   *) die "unsupported architecture $arch" ;;
 esac

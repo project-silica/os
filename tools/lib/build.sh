@@ -1,7 +1,7 @@
 # Build helpers shared by test.sh, size.sh and qemu.sh. Sourced after common.sh.
 #
 # build_kernel <arch> <log>   kernel ELF for targets/<arch>-silica.json
-# build_loader <log>          the x86_64 UEFI loader (BOOTX64.EFI)
+# build_loader <log> [arch]   the UEFI loader (BOOTX64.EFI, BOOTAA64.EFI)
 # build_root <arch> <log>     the root task (root.elf), packed into the ramdisk as "root"
 # build_image <arch> <log> [cmdline]
 #                             GPT disk image with the loader and kernel; a
@@ -70,7 +70,8 @@ build_system() {
 }
 
 build_loader() {
-  local log=$1 vend out e
+  local log=$1 arch=${2:-x86_64} vend out e name
+  case $arch in x86_64) name=BOOTX64.EFI ;; aarch64) name=BOOTAA64.EFI ;; *) echo "error: no UEFI loader for $arch" >>"$log"; return 1 ;; esac
   # lld-link stamps the PE header with the build time and, with debug info, a GUID
   # that differs between builds even for identical code: no debug directory, fixed
   # timestamp. Added to RUSTFLAGS from the caller's CARGO_ENV, if any.
@@ -79,11 +80,11 @@ build_loader() {
     case $e in RUSTFLAGS=*) rf=${e#RUSTFLAGS=} ;; *) keep+=("$e") ;; esac
   done
   local -a CARGO_ENV=("${keep[@]+"${keep[@]}"}" "RUSTFLAGS=${rf:+$rf }-C link-arg=/debug:none -C link-arg=/timestamp:1")
-  vend=$(merged_vendor kernel); out=$(art_dir x86_64)
-  cargo_run kernel "$log" build --release -p boot-uefi --target x86_64-unknown-uefi \
+  vend=$(merged_vendor kernel); out=$(art_dir "$arch")
+  cargo_run kernel "$log" build --release -p boot-uefi --target "$arch-unknown-uefi" \
     "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
-  cp "$(cache_of kernel)/target/x86_64-unknown-uefi/release/boot-uefi.efi" "$out/BOOTX64.EFI" || return 1
-  echo "$out/BOOTX64.EFI"
+  cp "$(cache_of kernel)/target/$arch-unknown-uefi/release/boot-uefi.efi" "$out/$name" || return 1
+  echo "$out/$name"
 }
 
 build_image_tool() {
@@ -122,11 +123,20 @@ build_system_image() {
   echo "$out"
 }
 
+# The UEFI removable-media path of the loader for an architecture.
+loader_path() {
+  case $1 in x86_64) echo EFI/BOOT/BOOTX64.EFI ;; aarch64) echo EFI/BOOT/BOOTAA64.EFI ;; *) return 1 ;; esac
+}
+
 build_image() {
-  local arch=$1 log=$2 cmdline=${3:-} k l t r out
-  [ "$arch" = x86_64 ] || { echo "no image layout for $arch before B05" >"$log"; return 1; }
+  local arch=$1 log=$2 cmdline=${3:-} k l t r out lp
+  lp=$(loader_path "$arch") || { echo "no image layout for $arch (no UEFI loader)" >"$log"; return 1; }
+  # On aarch64 the test harness hears the exit status through semihosting,
+  # which the loader and kernel use only when told to (on hardware without
+  # a debugger the call is an exception).
+  [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
   k=$(build_kernel "$arch" "$log.kernel") || { cat "$log.kernel" >"$log"; return 1; }
-  l=$(build_loader "$log.loader") || { cat "$log.loader" >"$log"; return 1; }
+  l=$(build_loader "$log.loader" "$arch") || { cat "$log.loader" >"$log"; return 1; }
   # A kernel checkout with a user target spec has a root task to pack.
   local -a root=()
   if [ -f "$(checkout_of kernel)/targets/$arch-silica-user.json" ]; then
@@ -142,7 +152,7 @@ build_image() {
     extra=("SILICA/CMDLINE.TXT=$(dirname "$out")/CMDLINE.TXT")
   fi
   cp "$t" "$(dirname "$out")/silica-image" || return 1
-  "$(dirname "$out")/silica-image" --out "$out" "EFI/BOOT/BOOTX64.EFI=$l" "SILICA/KERNEL.ELF=${k%.elf}.stripped" \
+  "$(dirname "$out")/silica-image" --out "$out" "$lp=$l" "SILICA/KERNEL.ELF=${k%.elf}.stripped" \
     "${root[@]+"${root[@]}"}" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
   echo "$out"
 }
