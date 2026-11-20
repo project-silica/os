@@ -243,7 +243,7 @@ run_test --deep --repo os
 ENVX=()
 [ "$RC" = 0 ] && [ "$(nerr)" = 0 ] || bad "deep: exit $RC: $OUT"
 has '^fuzz: pass=1 fail=0 skipped=0$' || bad "deep: no fuzz suite line: $OUT"
-has '^deep: pass=0 fail=0 skipped=1$' || bad "deep: the not-yet-existing proofs and benchmarks must stay one skipped line: $OUT"
+has '^(deep|bench|kani): ' && bad "deep: with --repo os there is no kernel to benchmark or prove and nothing to report for either: $OUT"
 grep -q -- "-max_total_time=3" "$RUNS" || bad "deep: SILICA_FUZZ_TIME is not the time box: $(cat "$RUNS")"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 30 ] || bad "deep: more than 30 lines"
 echo "fn main() {}" >"$OS/fuzz/fuzz_targets/crash_root.rs"

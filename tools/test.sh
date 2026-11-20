@@ -249,7 +249,7 @@ suite_fuzz() {
 # Benchmarks against Linux (--deep): every metric bench.sh prints is one result
 # of suite bench. A gate missed before its milestone is a skip that says so.
 suite_bench() {
-  in_scope kernel || in_scope os || return 0
+  in_scope kernel || return 0   # the benchmarks boot the kernel
   local s=bench log l rest id rc n=0
   log=$(logfile "$s" run)
   "$TOOLS/bench.sh" >"$log" 2>&1; rc=$?

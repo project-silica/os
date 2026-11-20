@@ -119,7 +119,7 @@ run --full --repo os
 shape full
 run --deep --repo os
 [ "$RC" = 0 ] && [ "$(errs)" = 0 ] || bad "deep: exit $RC: $OUT"
-has '^deep: pass=0 fail=0 skipped=1$' || bad "deep: the not-yet-existing T3 part must be one skipped line: $OUT"
+has '^(deep|bench|kani): ' && bad "deep: with --repo os there is nothing to benchmark or prove and nothing to report for either: $OUT"
 [ "$(nlines)" -le 30 ] || bad "deep: $(nlines) lines, want at most 30"
 shape deep
 
