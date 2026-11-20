@@ -43,20 +43,20 @@ accel=tcg; [ -w /dev/kvm ] && accel=kvm
 
 # name unit direction limit kind from: the table of spec/TESTING.md section 4, written out independently.
 M='boot_userspace_ms ms lower 1 win 2
-ipc_roundtrip_ns ns lower 2 win 2
+ipc_roundtrip_ns ns lower 0.5 win 2
 ctx_switch_ns ns lower 1 le 2
 boot_network_ms ms lower 1 win 4
 idle_mem_kib KiB lower 0.25 le 4
-driver_recovery_blk_ms ms lower 1000 abs 3
-driver_recovery_net_ms ms lower 1000 abs 3
+driver_recovery_blk_ms ms lower 250 abs 3
+driver_recovery_net_ms ms lower 250 abs 3
 driver_lost_writes_blk count lower 0 abs 3
 driver_lost_writes_net count lower 0 abs 3
 sched_p99_us us lower 1 le 3
 tcp_mbit_s Mbit/s higher 1.25 le 4
 file_meta_ops_s ops/s higher 1.5 le 5
-blk_iops iops higher 1.25 le 5
+blk_iops iops higher 1.1 le 5
 app_cold_start_ms ms lower 1 win 6
-nvme_iops iops higher 1.25 le 8'
+nvme_iops iops higher 1.1 le 8'
 B=1200   # the Linux value of every metric in the fixture baseline
 unit_of() { echo "$M" | awk -v m="$1" '$1 == m { print $2 }'; }
 good_of() { # a passing value for <metric> against $B
@@ -193,11 +193,11 @@ serial silica.img ctx_switch_ns=1200; run --image "$IMG" --runs 1
 expect le-equal-passes 0 0
 serial silica.img idle_mem_kib=300; run --image "$IMG" --runs 1
 expect ratios-at-limit 0 0 'idle_mem_kib: ours 300 KiB, linux 1200 KiB, ratio 0\.25'
-# IPC is "under 2x" a Linux pipe ping-pong: strict, so exactly 2x fails and just under passes.
-serial silica.img ipc_roundtrip_ns=2400; run --image "$IMG" --runs 1
-expect ipc-equal-fails 1 1 'bench::ipc_roundtrip_ns.*ratio 2 \(limit < 2\)'
-serial silica.img ipc_roundtrip_ns=2399; run --image "$IMG" --runs 1
-expect ipc-under-limit-passes 0 0 'ipc_roundtrip_ns: .*\(limit < 2\)'
+# IPC is "under half" a Linux pipe ping-pong: strict, so exactly half fails and just under passes.
+serial silica.img ipc_roundtrip_ns=600; run --image "$IMG" --runs 1
+expect ipc-equal-fails 1 1 'bench::ipc_roundtrip_ns.*ratio 0\.5 \(limit < 0\.5\)'
+serial silica.img ipc_roundtrip_ns=599; run --image "$IMG" --runs 1
+expect ipc-under-limit-passes 0 0 'ipc_roundtrip_ns: .*\(limit < 0\.5\)'
 serial silica.img tcp_mbit_s=960; run --image "$IMG" --runs 1
 expect higher-at-limit 0 0 'tcp_mbit_s: .*ratio 1\.25'
 serial silica.img tcp_mbit_s=959; run --image "$IMG" --runs 1
@@ -218,7 +218,7 @@ mkbase
 # Driver recovery is gated on the absolute limit even when the baseline lacks it (Linux recorded, not gated).
 jq 'del(.metrics.driver_recovery_blk_ms)' "$OS/bench/linux-baseline.json" >"$FX/b.json" && cp "$FX/b.json" "$OS/bench/linux-baseline.json"
 serial silica.img; ms 9; run --image "$IMG" --runs 1
-expect abs-without-linux-value 0 0 '^bench: driver_recovery_blk_ms: ours 999 ms \(limit <= 1000\)$'
+expect abs-without-linux-value 0 0 '^bench: driver_recovery_blk_ms: ours 249 ms \(limit <= 250\)$'
 mkbase
 # Acceleration mismatch: timings are not comparable.
 other=kvm; [ "$accel" = kvm ] && other=tcg
@@ -246,12 +246,12 @@ expect qemu-setup-error 2 1 'qemu.sh setup error'
 
 # ---- 9. median over runs; the default image path; results file ----------------------------
 rm -f "$SER"/silica.img.*; serial silica.img
-for i in 1 2 3; do serial "silica.img.$i" ctx_switch_ns=$((i == 1 ? 100 : i == 2 ? 1100 : 300)) driver_recovery_blk_ms=$((i * 100)); done
+for i in 1 2 3; do serial "silica.img.$i" ctx_switch_ns=$((i == 1 ? 100 : i == 2 ? 1100 : 300)) driver_recovery_blk_ms=$((i * 50)); done
 OUTJ=$FX/res.json
 ms 9; run --image "$IMG" --out "$OUTJ"
 expect median 0 0 "results in $OUTJ"
 [ "$(jq -r .metrics.ctx_switch_ns.value "$OUTJ" 2>/dev/null)" = 300 ] || bad "median: ctx median of 100,1100,300 is not 300: $(jq -c .metrics.ctx_switch_ns "$OUTJ" 2>/dev/null)"
-[ "$(jq -r .metrics.driver_recovery_blk_ms.value "$OUTJ" 2>/dev/null)" = 300 ] || bad "median: abs metric must take the worst run (300)"
+[ "$(jq -r .metrics.driver_recovery_blk_ms.value "$OUTJ" 2>/dev/null)" = 150 ] || bad "median: abs metric must take the worst run (150)"
 [ "$(jq -r '"\(.schema) \(.milestone)"' "$OUTJ" 2>/dev/null)" = "1 9" ] || bad "median: results file lacks schema and milestone"
 rm -f "$SER"/silica.img.*
 mkdir -p "$ART"; : >"$ART/bench.img"; cp "$SER/silica.img" "$SER/bench.img"
@@ -264,10 +264,10 @@ PREV=$FX/prev.json
 mkprev() { # mkprev <metric> <value> <unit>
   jq -n --arg n "$1" --argjson v "$2" --arg u "$3" '{schema:1, milestone:9, metrics:{($n):{value:$v, unit:$u}}}' >"$PREV"
 }
-serial silica.img ipc_roundtrip_ns=1000; ms 9
-mkprev ipc_roundtrip_ns 953 ns;  run --image "$IMG" --runs 1 --previous "$PREV"
+serial silica.img ipc_roundtrip_ns=500; ms 9
+mkprev ipc_roundtrip_ns 477 ns;  run --image "$IMG" --runs 1 --previous "$PREV"
 expect regress-lower-under-5pct 0 0
-mkprev ipc_roundtrip_ns 940 ns;  run --image "$IMG" --runs 1 --previous "$PREV"
+mkprev ipc_roundtrip_ns 470 ns;  run --image "$IMG" --runs 1 --previous "$PREV"
 expect regress-lower-over-5pct 1 1 'bench::ipc_roundtrip_ns: regression over 5%'
 mkprev ipc_roundtrip_ns 2000 ns; run --image "$IMG" --runs 1 --previous "$PREV"
 expect regress-improved 0 0

@@ -33,24 +33,24 @@ start=$SECONDS
 export LC_ALL=C
 
 # name unit direction(lower|higher) limit kind(win|le|abs) from-milestone
-#   win: ratio to Linux strictly below limit ("faster", "under 2x"); le: ratio at most limit;
+#   win: ratio to Linux strictly below limit ("faster", "under half"); le: ratio at most limit;
 #   abs: our value at most limit (Linux recorded, not gated). Ratio is ours/linux for
 #   "lower is better" metrics and linux/ours for "higher is better" ones.
 METRICS='boot_userspace_ms ms lower 1 win 2
-ipc_roundtrip_ns ns lower 2 win 2
+ipc_roundtrip_ns ns lower 0.5 win 2
 ctx_switch_ns ns lower 1 le 2
 boot_network_ms ms lower 1 win 4
 idle_mem_kib KiB lower 0.25 le 4
-driver_recovery_blk_ms ms lower 1000 abs 3
-driver_recovery_net_ms ms lower 1000 abs 3
+driver_recovery_blk_ms ms lower 250 abs 3
+driver_recovery_net_ms ms lower 250 abs 3
 driver_lost_writes_blk count lower 0 abs 3
 driver_lost_writes_net count lower 0 abs 3
 sched_p99_us us lower 1 le 3
 tcp_mbit_s Mbit/s higher 1.25 le 4
 file_meta_ops_s ops/s higher 1.5 le 5
-blk_iops iops higher 1.25 le 5
+blk_iops iops higher 1.1 le 5
 app_cold_start_ms ms lower 1 win 6
-nvme_iops iops higher 1.25 le 8'
+nvme_iops iops higher 1.1 le 8'
 
 parse_checkouts "$@"
 set -- "${ARGS[@]+"${ARGS[@]}"}"
