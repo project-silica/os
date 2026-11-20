@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The toolchain image and the compiler cache of the hosted lanes
-# (spec/CI_RELEASE.md section 2: every job uses a shared compiler cache and a
-# prebuilt toolchain image, so a cold build never happens in the pre-merge lane).
+# (every job uses a shared compiler cache and a prebuilt toolchain image, so a
+# cold build never happens in the pre-merge lane).
 #   toolchain-image.sh check               tools/image/Containerfile against the pins
 #   toolchain-image.sh tag                 the image tag: 12 hex of the Containerfile's hash
 #   toolchain-image.sh key <repo>          the cache key of <repo>:

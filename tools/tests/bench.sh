@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test for tools/bench.sh (component A02, feature A02.05; spec/TESTING.md section 4).
+# Test for tools/bench.sh (component A02; spec/TESTING.md section 4).
 # Runs a private copy of the tool suite in a disposable fake workshop whose
 # tools/qemu.sh is replaced by a stub that "boots" an image by copying a canned
 # serial transcript, so every gate, the baseline build, the baseline unavailable reports,
@@ -16,7 +16,7 @@ bad() { echo "ERROR: bench-test: $1"; fails=$((fails + 1)); }
 command -v jq >/dev/null || { echo "ERROR: bench-test: jq is not installed"; exit 2; }
 
 WS=$FX/ws; OS=$WS/os; K=$WS/kernel; SER=$FX/serials; SRCDIR=$FX/linux-src
-mkdir -p "$WS/state" "$OS/tools" "$K" "$SER" "$FX/img" "$SRCDIR"
+mkdir -p "$OS/tools" "$K" "$SER" "$FX/img" "$SRCDIR"
 echo x >"$WS/bootstrap.pins"
 cp -r "$SRC/lib" "$SRC/bench.sh" "$OS/tools/"
 printf '# fake manifest\n' >"$OS/manifest.toml"

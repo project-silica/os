@@ -73,7 +73,7 @@ suite_builds() { # the kernel for all three targets and the UEFI loader
   else record fail "$s" loader "build failed: $(first_error "$log")"; fi
 }
 
-suite_inos() { # in-OS tests on one architecture; --fast runs the deterministic sample
+suite_inos() { # in-OS tests on one architecture; --fast boots boot_ok only
   local a=$1 t manifest
   manifest="$(checkout_of kernel)/tests/inos-$a.txt"
   run_inos "$a" "inos.$a" boot_ok
@@ -104,7 +104,7 @@ suite_size() {
   [ $rc = 0 ] && record pass "$s" size
 }
 
-suite_tools() { # harness self-tests (os/tools/tests/*.sh): T2, so --full and --deep only (spec/adr/0007)
+suite_tools() { # tool self-tests (os/tools/tests/*.sh): they take minutes, so --full and --deep only
   local s=os.tools t
   for t in "$(checkout_of os)"/tools/tests/*.sh; do
     [ -f "$t" ] || continue

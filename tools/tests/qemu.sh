@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test for tools/qemu.sh (component A04, feature A04.01). Runs a private copy of
+# Test for tools/qemu.sh (component A04). Runs a private copy of
 # the tool suite in a disposable fake workshop with a fake firmware tree and a
 # fake `qemu-system-x86_64` first on PATH, so every outcome (success, guest
 # failure, silent exit, hang, screendump) is exercised without a guest. A last
@@ -15,7 +15,7 @@ fails=0
 bad() { echo "ERROR: qemu-test: $1"; fails=$((fails + 1)); }
 
 WS=$FX/ws; OS=$WS/os; BIN=$FX/bin; FW=$FX/fw
-mkdir -p "$WS/state" "$OS/tools" "$BIN"
+mkdir -p "$OS/tools" "$BIN"
 echo x >"$WS/bootstrap.pins"
 cp -r "$SRC/lib" "$SRC/qemu.sh" "$OS/tools/"
 printf '# fake manifest\n' >"$OS/manifest.toml"

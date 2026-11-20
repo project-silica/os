@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Test for tools/sync.sh (component A11, feature A11.01; spec/REPOSITORIES.md
-# sections 2 and 3): sync clones missing repositories at their pin, never
+# Test for tools/sync.sh (component A11): sync clones missing repositories at their pin, never
 # resets an existing clone, honours the milestone, and writes the Cargo [patch]
 # path overrides for the local clones. Also checks the real manifest: every M0
 # repository other than os is pinned, and has a README at its pin.
@@ -22,7 +21,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.invalid GIT_COMMITTER_NAME=t GIT_C
 git() { command git -c protocol.file.allow=always -c init.defaultBranch=main -c core.hooksPath=/dev/null "$@"; }
 
 WS=$FX/ws; OS=$WS/os; R=$FX/remotes
-mkdir -p "$WS/state" "$OS/tools" "$R" "$FX/home"
+mkdir -p "$OS/tools" "$R" "$FX/home"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/sync.sh" "$OS/tools/"
 
@@ -167,7 +166,7 @@ run --bogus
 
 # ---- 10. the real manifest -----------------------------------------------------
 M=$OSDIR/manifest.toml
-for r in spec idl kernel .github; do
+for r in idl kernel .github; do
   grep -qF "[repos.$r]" "$M" || grep -qF "[repos.\"$r\"]" "$M" || { bad "real manifest does not pin $r"; continue; }
   sec=$(awk -v r="$r" '/^\[/ { cur = $0; gsub(/^\[repos\.|"|\]$/, "", cur) } cur == r { print }' "$M")
   pin=$(printf '%s\n' "$sec" | sed -n 's/^commit = "\(.*\)"/\1/p')

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Clone or update every repository in os/manifest.toml next to the workshop,
-# then generate the local Cargo path overrides (spec/REPOSITORIES.md section 2,
-# rules 4 and 5). Called by bootstrap.sh on a fresh clone.
+# then generate the local Cargo path overrides. Called by bootstrap.sh on a
+# fresh clone.
 #   sync.sh            clone missing repos at their pinned commit; existing
 #                      clones are left on their branch (never reset)
 #   sync.sh --update   also fetch existing clones (needs the network)

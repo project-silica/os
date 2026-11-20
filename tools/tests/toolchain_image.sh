@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test for tools/toolchain-image.sh and tools/image/Containerfile (component
-# A12, feature A12.02; spec/CI_RELEASE.md section 2: every job uses a shared
+# A12): every hosted job uses a shared
 # compiler cache and a prebuilt toolchain image, so no pre-merge job builds
 # cold).
 #
@@ -29,7 +29,7 @@ bad() { echo "ERROR: toolchain-image-test: $1"; fails=$((fails + 1)); }
 
 WS=$FX/ws; OS=$WS/os; KERNEL=$WS/kernel; IDL=$WS/idl; CF=$OS/tools/image/Containerfile
 CHANNEL=nightly-2026-10-01
-mkdir -p "$WS/state" "$OS/tools/image" "$KERNEL" "$IDL"
+mkdir -p "$OS/tools/image" "$KERNEL" "$IDL"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cat >"$OS/manifest.toml" <<'EOF'
 [repos.kernel]

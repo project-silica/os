@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test for tools/repro.sh against a real nondeterministic image builder
-# (component A10, feature A10.02; spec/ARCHITECTURE.md section 11 "Builds are
+# (component A10; spec/ARCHITECTURE.md section 16 "Builds are
 # reproducible"). tools/tests/repro.sh checks repro.sh against fakes; this one
 # runs the real tools/repro.sh, with the real builds, in a disposable workshop:
 #   1. a scratch os checkout whose image builder takes the disk GUID from the

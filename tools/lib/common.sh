@@ -82,9 +82,9 @@ export_checkouts() {
   for r in "${!CHECKOUT[@]}"; do s+="$r=${CHECKOUT[$r]}"$'\n'; done
   export SILICA_CHECKOUTS=$s
 }
-check_checkout() { # the directory must be a worktree of the canonical repo
+check_checkout() { # the directory must be a worktree of the workshop's clone
   local repo=$1 dir=$2 want got
-  [ -d "$WS/$repo/.git" ] || [ -f "$WS/$repo/.git" ] || die "--checkout $repo: no canonical repository $WS/$repo"
+  [ -d "$WS/$repo/.git" ] || [ -f "$WS/$repo/.git" ] || die "--checkout $repo: no clone at $WS/$repo"
   want=$(realdir "$(g -C "$WS/$repo" rev-parse --path-format=absolute --git-common-dir)")
   got=$(g -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || die "--checkout $repo: $dir is not a Git checkout"
   got=$(realdir "$got")
@@ -116,11 +116,11 @@ cache_of() { # build cache for one checkout of one repo (keyed by real path)
   echo "$OUTBASE/cache/$1-$(printf '%s' "$d" | sha256sum | cut -c1-16)"
 }
 
-# ---- sandbox for candidate code -------------------------------------------
+# ---- sandbox for builds and tests -----------------------------------------
 # No network, empty environment and home (no credentials), filesystem
 # read-only except the given output directories.
-# The sandbox hides $HOME, so the checkouts in use, the tool suite, spec/ and
-# state/ are bound read-only; the rw directories must not lie inside them.
+# The sandbox hides $HOME, so the checkouts in use, the tool suite and spec/
+# are bound read-only; the rw directories must not lie inside them.
 sandboxed() { # sandboxed <rwdir>... -- <command...>
   local a=() r d seen=" "
   while [ $# -gt 0 ] && [ "$1" != -- ]; do a+=(--rwdir "$1"); shift; done

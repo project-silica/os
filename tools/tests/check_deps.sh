@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Test for tools/check-deps.sh (component A11, feature A11.02;
-# spec/REPOSITORIES.md section 2, rules 1 and 2): idl depends on nothing, kernel
+# Test for tools/check-deps.sh (component A11;
+# spec/REPOSITORIES.md, Dependencies): idl depends on nothing, kernel
 # only on idl, every other repository only on idl and kernel's libsys, nothing
 # on os or workshop, and no path dependency leaves its repository. A planted
 # violation is reported by name, in every dependency kind and every spelling of
@@ -23,7 +23,7 @@ git() { command git -c core.hooksPath=/dev/null -c init.defaultBranch=main "$@";
 
 WS=$FX/ws; OS=$WS/os
 ORG=https://github.com/project-silica
-mkdir -p "$WS/state" "$OS/tools" "$FX/home"
+mkdir -p "$OS/tools" "$FX/home"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/check-deps.sh" "$OS/tools/"
 cat >"$OS/manifest.toml" <<EOF2

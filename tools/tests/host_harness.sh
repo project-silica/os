@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Test for the host harness of kernel-core (component A05, feature A05.01;
-# spec/TESTING.md sections 1 and 2): kernel-core builds and tests on the host
+# Test for the host harness of kernel-core (component A05;
+# spec/TESTING.md section 3): kernel-core builds and tests on the host
 # with std for tests; `test.sh --full` runs Miri on it and every loom model
 # (tests that exist only under cfg(loom)), each as its own suite with the
 # standard output rules (one summary line per suite, one ERROR line per
@@ -24,7 +24,7 @@ bad() { echo "ERROR: host-harness: $1"; fails=$((fails + 1)); }
 REAL_CARGO=$(command -v cargo) || { echo "ERROR: host-harness: no cargo on PATH"; exit 2; }
 RUSTUP_HOME=${RUSTUP_HOME:-${HOME:-/root}/.rustup}
 WS=$FX/ws; OS=$WS/os; K=$WS/kernel; CALLS=$FX/calls.log
-mkdir -p "$FX/bin" "$WS/state" "$OS/tools" "$K/kernel-core/src" "$K/kernel-core/tests"
+mkdir -p "$FX/bin" "$OS/tools" "$K/kernel-core/src" "$K/kernel-core/tests"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/test.sh" "$SRC/size.sh" "$SRC/qemu.sh" "$OS/tools/"
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"

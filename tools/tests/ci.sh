@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Test for tools/ci.sh (component A08, feature A08.01; spec/CI_RELEASE.md
-# section 2): the fast tier runs test.sh --fast and check-deps.sh, the nightly
+# Test for tools/ci.sh (component A08): the fast tier runs test.sh --fast and check-deps.sh, the nightly
 # tier runs test.sh --deep, both exactly the commands the hosted lanes run;
 # every step runs even when an earlier one failed; failures keep their ERROR
 # lines, full output goes to target/logs/ci/; usage errors exit 2.
@@ -17,7 +16,7 @@ fails=0
 bad() { echo "ERROR: ci-test: $1"; fails=$((fails + 1)); }
 
 WS=$FX/ws; OS=$WS/os; CALLS=$FX/calls.log
-mkdir -p "$WS/state" "$OS/tools" "$WS/target"
+mkdir -p "$OS/tools" "$WS/target"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"
 git init -q "$OS" || exit 2

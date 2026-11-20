@@ -21,7 +21,7 @@
 #   The baseline records the QEMU configuration (smp, memory, acceleration); a run
 #   uses the same smp and memory and refuses to compare across a different acceleration.
 #   An existing baseline is replaced only with --force ("built once").
-# Gates: each metric has a limit against Linux and a "from" milestone (state/MILESTONE).
+# Gates: each metric has a limit against Linux and a "from" milestone (the MILESTONE file in the workshop root).
 #   Before it a violation or a missing value is a SKIP line, from it an ERROR.
 #   --previous <results.json>: any tracked metric more than 5% worse than in that
 #   earlier results file is an ERROR (the nightly regression rule).

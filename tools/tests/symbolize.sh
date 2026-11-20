@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test for tools/symbolize.sh (component A09, feature A09.01): addresses in a
+# Test for tools/symbolize.sh (component A09): addresses in a
 # serial log (panic messages, register dumps, backtraces) decode to function,
 # file and line using the kernel ELF test.sh booted.
 #
@@ -18,7 +18,7 @@ fails=0
 bad() { echo "ERROR: symbolize-test: $1"; fails=$((fails + 1)); }
 
 WS=$FX/ws; OS=$WS/os; K=$WS/kernel
-mkdir -p "$WS/state" "$OS/tools" "$K"
+mkdir -p "$OS/tools" "$K"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/symbolize.sh" "$OS/tools/"
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"

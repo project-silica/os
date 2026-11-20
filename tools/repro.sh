@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Reproducible builds check (spec/ARCHITECTURE.md section 11 "Builds are
-# reproducible", spec/CI_RELEASE.md section 2 nightly lane; component A10).
+# Reproducible builds check (spec/ARCHITECTURE.md section 16 "Builds are
+# reproducible"; component A10).
 #   repro.sh [--checkout <repo> <absolute-dir>]...
 # Builds the x86_64 kernel, the UEFI loader and the disk image twice, each time
 # from its own copy of the kernel and os checkouts (tracked files and files not

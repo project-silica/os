@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Test for tools/test.sh tiers and output rules (component A02, feature A02.02;
-# spec/TESTING.md sections 1 and 2). Runs a private copy of the tool suite
-# inside a disposable fake workshop (fake os repository, fake feature list,
+# Test for tools/test.sh tiers and output rules (component A02). Runs a private copy of the tool suite
+# inside a disposable fake workshop (fake os repository,
 # pass-through sandbox), so nothing real is built, booted or changed and the
 # test cannot recurse into the real test.sh. One "ERROR:" line per failed check.
 set -uo pipefail
@@ -14,7 +13,7 @@ bad() { echo "ERROR: output-test: $1"; fails=$((fails + 1)); }
 
 WS=$FX/ws
 OS=$WS/os
-mkdir -p "$FX/bin" "$WS/state" "$OS/tools/tests"
+mkdir -p "$FX/bin" "$OS/tools/tests"
 echo x >"$WS/bootstrap.pins"
 echo 0 >"$WS/MILESTONE"
 # Private copy of the tool suite under test (the files test.sh reads).

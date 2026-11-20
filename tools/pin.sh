@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Pin the system (spec/REPOSITORIES.md section 2, rule 4).
-#   pin.sh           set every pin in os/manifest.toml to that repository's
-#                    last verified commit (the head of its canonical main,
-#                    which only the integration tools advance) and commit
-#                    exactly manifest.toml in os; an error changes nothing
+# Pin the component revisions the system image is built from.
+#   pin.sh           set every pin in os/manifest.toml to the head of that
+#                    repository's local main and commit exactly manifest.toml
+#                    in os; an error changes nothing. Run it once the
+#                    integrated build passes with those revisions, then move
+#                    the same lines in the workshop's bootstrap.pins
 #   pin.sh --check   exit non-zero unless every clone is at its pinned commit
 #                    with no modified or untracked files; changes nothing
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
@@ -53,7 +54,7 @@ printf '%s\n' "$new" >"$MANIFEST"
 for r in "${changed[@]}"; do
   [ "$(manifest_get "$r" commit)" = "$(g -C "$WS/$r" rev-parse refs/heads/main)" ] || { undo; die "cannot set the pin of $r in the manifest"; }
 done
-g -C "$OS" add manifest.toml && g -C "$OS" commit -q -m "os: pin ${changed[*]} [A11]" -- manifest.toml ||
+g -C "$OS" add manifest.toml && g -C "$OS" commit -q -m "Pin ${changed[*]}" -- manifest.toml ||
   { undo; die "commit in os failed; manifest unchanged"; }
 rm -f "${saved:?}"
 echo "PIN: ${changed[*]}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixture for the host harness (feature A05.01; run by `test.sh --full` only,
+# Fixture for the host harness (component A05; run by `test.sh --full` only,
 # because the real Miri interpreter and its sysroot build take a while).
 # tools/tests/host_harness.sh checks the harness logic against a cargo shim;
 # this one runs the real thing on a tiny kernel-core in a disposable fake
@@ -21,7 +21,7 @@ TOOLCHAIN=${SILICA_WS:+$SILICA_WS/kernel/rust-toolchain.toml}
 [ -f "$TOOLCHAIN" ] || { echo "ERROR: host-fixture: no kernel rust-toolchain.toml to take the pinned nightly from"; exit 2; }
 RUSTUP_HOME=${RUSTUP_HOME:-${HOME:-/root}/.rustup}
 WS=$FX/ws; OS=$WS/os; K=$WS/kernel
-mkdir -p "$FX/bin" "$WS/state" "$OS/tools" "$K/kernel-core/src"
+mkdir -p "$FX/bin" "$OS/tools" "$K/kernel-core/src"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/test.sh" "$SRC/size.sh" "$SRC/qemu.sh" "$OS/tools/"
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"

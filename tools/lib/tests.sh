@@ -1,20 +1,20 @@
-# Test ids (the strings features name in "tests"):
+# Test ids:
 #   <crate dir>/<target source>::<test path>   a Rust test, for example
 #       kernel-core/tests/stub.rs::banner_is_boot_ok   (integration test file)
 #       kernel-core/src/lib.rs::cap::tests::derive     (unit test in the lib)
 #   inos/<arch>::<name>                          an in-OS test booted in QEMU
-#   tools/tests/<name>.sh                        a harness test script in os
-# Paths are relative to the root of the feature's repository.
+#   tools/tests/<name>.sh                        a tool self-test script in os
+# Paths are relative to the root of the test's repository.
 
 # Results are appended to $RES as "<status>\t<suite>\t<test>\t<reason>",
-# status one of pass, fail, skip, pending.
+# status one of pass, fail, skip.
 record() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" >>"$RES"; }
 logfile() {
   local suite=$1 filename link_dir
   filename="$(printf '%s' "$2" | tr '/: ' '___').log"
   mkdir -p "$LOGS/$suite"
   if [ "$LOGS" != "$OUTBASE/logs" ]; then
-    # Compatibility link for readers. Verifiers always open their private path.
+    # Stable path to the latest log; each run also keeps its own private copy.
     link_dir=$OUTBASE/logs/$suite
     mkdir -p "$link_dir"
     ln -sfnT "$LOGS/$suite/$filename" "$link_dir/$filename"

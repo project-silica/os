@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Test for tools/fuzz.sh (component A07, feature A07.01; spec/TESTING.md
-# sections 1 and 3): target discovery, time-boxed runs, reproducers kept under
+# Test for tools/fuzz.sh (component A07; spec/TESTING.md
+# section 3): target discovery, time-boxed runs, reproducers kept under
 # target/fuzz/, replay of stored reproducers, coverage report, the hard time
 # limit, build failures, usage errors, and `test.sh --deep` calling it.
 #
@@ -20,7 +20,7 @@ fails=0
 bad() { echo "ERROR: fuzz-test: $1"; fails=$((fails + 1)); }
 
 WS=$FX/ws; OS=$WS/os; K=$WS/kernel; BIN=$FX/bin; RUNS=$FX/runs.log; BUILDS=$FX/builds.log
-mkdir -p "$BIN" "$WS/state" "$OS/tools" "$K"
+mkdir -p "$BIN" "$OS/tools" "$K"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/fuzz.sh" "$SRC/test.sh" "$SRC/size.sh" "$SRC/qemu.sh" "$OS/tools/"
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"

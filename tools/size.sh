@@ -3,7 +3,7 @@
 #   size.sh [--checkout <repo> <absolute-dir>]...
 # Measures the artifacts test.sh builds and boots (the kernel checkout's
 # artifact cache). A missing artifact is one SKIP: line before its
-# "Required from" milestone (state/MILESTONE) and one ERROR: line from then on.
+# "Required from" milestone (the MILESTONE file in the workshop root; absent means 0) and one ERROR: line from then on.
 # Conventions the kernel follows so the counts are mechanical:
 #   syscalls      variants of `enum Syscall` in kernel-core/src
 #   object types  variants of `enum ObjectType` in kernel-core/src

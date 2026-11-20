@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test for tools/init.sh (component A02, feature A02.01). Runs init.sh against a
+# Test for tools/init.sh (component A02). Runs init.sh against a
 # disposable fake environment: a private PATH holding symlinks to the real
 # basic utilities plus stubs for the checked tools, a fake workshop with fake
 # repositories, and a fake firmware tree (SILICA_FW_ROOT). Nothing is
@@ -21,7 +21,7 @@ REAL_UTILS="bash env dirname basename readlink sed awk cat mkdir grep git head t
 stub() { printf '#!/bin/bash\nexit 0\n' >"$1"; chmod +x "$1"; }
 mkenv() { # mkenv <name> [milestone]  (everything present, aarch64 included)
   local e=$FX/$1 t r
-  mkdir -p "$e/bin" "$e/ws/state" "$e/ws/kernel" "$e/fw/usr/share/OVMF" "$e/fw/usr/share/AAVMF"
+  mkdir -p "$e/bin" "$e/ws/kernel" "$e/fw/usr/share/OVMF" "$e/fw/usr/share/AAVMF"
   for t in $REAL_UTILS; do p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$e/bin/$t"; done
   for t in bwrap cargo size nm socat qemu-system-x86_64 qemu-system-aarch64; do stub "$e/bin/$t"; done
   cat >"$e/bin/rustup" <<'EOF'

@@ -11,7 +11,7 @@ bad() { echo "ERROR: pin-test: $1"; fails=$((fails + 1)); }
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t.invalid
 G() { git -c core.hooksPath=/dev/null -c commit.gpgsign=false "$@"; }
 
-WS=$FX/ws; OS=$WS/os; ST=$WS/state; MF=$OS/manifest.toml
+WS=$FX/ws; OS=$WS/os; ST=$WS/elsewhere; MF=$OS/manifest.toml
 mkdir -p "$ST" "$OS/tools"
 echo x >"$WS/bootstrap.pins"
 cp -r "$SRC/lib" "$SRC/pin.sh" "$OS/tools/"
@@ -54,13 +54,13 @@ run() { # run <script> <args...>: OUT and RC; the tools are reached through the 
 run_locked() { # like run, while another process holds the pin lock
   ( exec 9>"$WS/target/.pin.lock"; flock -n 9 && { run "$@"; echo "$RC" >"$FX/rc"; printf '%s\n' "$OUT" >"$FX/out"; } ) 2>/dev/null
   RC=$(cat "$FX/rc" 2>/dev/null || echo 0); OUT=$(cat "$FX/out" 2>/dev/null)
-  rm -f "${ST:?}/.orchestrator.lock" "$FX/rc" "$FX/out"
+  rm -f "$FX/rc" "$FX/out"
 }
 snap() { # everything that must not change on an error or a read-only run
   (for d in "$WS"/*/ "$WS"/.github/; do [ -e "$d/.git" ] || continue
      echo "$d"; G -C "$d" rev-parse HEAD refs/heads/main 2>&1; G -C "$d" for-each-ref 2>&1; G -C "$d" status --porcelain --untracked-files=all 2>&1
      (cd "$d" && find . -path ./.git -prune -o -type f -print0 | sort -z | xargs -0 sha256sum 2>/dev/null); done
-   ls -A "$ST" | grep -v '^\.orchestrator\.lock$') | sha256sum
+   ls -A "$ST") | sha256sum
 }
 nerr() { printf '%s\n' "$OUT" | grep -c '^ERROR:'; }
 want_err() { # want_err <label> <regex>: nonzero, an ERROR: line matches, nothing changed ($S)
@@ -90,7 +90,7 @@ diff <(sed 's/commit = "[0-9a-f]*"/commit = X/' "$FX/manifest.before") <(sed 's/
 grep -q 'commit = "[0-9a-f]*"  # old' "$MF" || bad "pin: a comment after a pin was lost"
 [ "$(stat -c %a "$MF")" = 644 ] || bad "pin: manifest mode is $(stat -c %a "$MF"), want 644"
 [ "$(nc)" = $((N + 1)) ] || bad "pin: want one new commit in os, got $(($(nc) - N))"
-G -C "$OS" log -1 --format=%s | grep -qE '^os: pin ' || bad "pin: commit subject '$(G -C "$OS" log -1 --format=%s)'"
+G -C "$OS" log -1 --format=%s | grep -qE '^Pin ' || bad "pin: commit subject '$(G -C "$OS" log -1 --format=%s)'"
 [ "$(G -C "$OS" show --name-only --format= HEAD | tr '\n' ' ')" = "manifest.toml " ] || bad "pin: commit touches $(G -C "$OS" show --name-only --format= HEAD | tr '\n' ' ')"
 [ "$(G -C "$OS" diff --name-only | tr '\n' ' ')" = "README " ] || bad "pin: unrelated dirty file was committed or reset"
 [ "$(G -C "$OS" diff --cached --name-only | tr '\n' ' ')" = "staged.txt " ] || bad "pin: another staged file was committed or unstaged"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dependency direction (spec/REPOSITORIES.md section 2, rules 1 and 2).
+# Dependency direction (spec/REPOSITORIES.md, Dependencies).
 #   check-deps.sh [--checkout <repo> <absolute-dir>]...
 # idl depends on nothing; kernel only on idl; every other repository only on
 # idl and kernel's libsys; nothing depends on os or workshop. A Cargo path
@@ -60,7 +60,7 @@ check_manifest() { # check_manifest <repo> <dir> <manifest> <root|nested>; adds 
       git+*)
         to=$(repo_of_url "$src")
         [ -n "$to" ] || continue
-        allowed "$r" "$to" "$dep" || bad "$r/$pkg depends on $to/$dep (not allowed: spec/REPOSITORIES.md section 2)" ;;
+        allowed "$r" "$to" "$dep" || bad "$r/$pkg depends on $to/$dep (not allowed: spec/REPOSITORIES.md, Dependencies)" ;;
     esac
   done < <(jq -r '.packages[] | .name as $p | .dependencies[] | [$p, .name, (.source // "-"), (.path // "-")] | @tsv' <<<"$meta")
 }

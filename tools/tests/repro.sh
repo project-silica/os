@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Test for tools/repro.sh (component A10, feature A10.01; spec/ARCHITECTURE.md
-# section 11 "Builds are reproducible"): the kernel, the loader and the disk
+# Test for tools/repro.sh (component A10; spec/ARCHITECTURE.md
+# section 16 "Builds are reproducible"): the kernel, the loader and the disk
 # image are built twice in different directories (copies of the checkouts, own
 # caches, original untouched, uncommitted work included, ignored files not),
 # and the tool fails with the first differing artifact unless every artifact
@@ -21,7 +21,7 @@ fails=0
 bad() { echo "ERROR: repro-test: $1"; fails=$((fails + 1)); }
 
 WS=$FX/ws; OS=$WS/os; K=$WS/kernel; CALLS=$FX/calls.log
-mkdir -p "$WS/state" "$OS/tools" "$K/kernel/src" "$K/target" "$FX/bin" "$FX/home"
+mkdir -p "$OS/tools" "$K/kernel/src" "$K/target" "$FX/bin" "$FX/home"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"
 cp -r "$SRC/lib" "$SRC/repro.sh" "$OS/tools/"

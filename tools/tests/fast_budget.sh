@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Budget test for tools/test.sh --fast (feature A02.02;
-# spec/adr/0007-harness-self-tests-are-t2.md, spec/TESTING.md section 1).
+# Budget test for tools/test.sh --fast (component A02): the fast tier stays
+# under a minute, which is why the tool self-tests run only in --full and --deep.
 # Runs this tool suite's test.sh --fast twice on the workshop, with the os
 # checkout that holds this test (other overrides pass through
 # SILICA_CHECKOUTS when the environment carries them), and fails if the second run's

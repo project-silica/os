@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test for tools/size.sh (component A02, feature A02.04; spec/ARCHITECTURE.md
+# Test for tools/size.sh (component A02; spec/ARCHITECTURE.md
 # section 2). Runs a private copy of the tool suite in a disposable fake
 # workshop with a fake kernel repository, fake ELF/image artifacts and fake
 # kernel sources, and checks every budget and bloat ceiling at, just under and
@@ -15,7 +15,7 @@ fails=0
 bad() { echo "ERROR: size-test: $1"; fails=$((fails + 1)); }
 
 WS=$FX/ws; OS=$WS/os; K=$WS/kernel
-mkdir -p "$WS/state" "$OS/tools" "$K"
+mkdir -p "$OS/tools" "$K"
 echo x >"$WS/bootstrap.pins"
 cp -r "$SRC/lib" "$SRC/size.sh" "$OS/tools/"
 printf '# fake manifest\n' >"$OS/manifest.toml"

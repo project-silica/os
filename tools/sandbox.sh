@@ -36,13 +36,13 @@ for p in "${ro[@]}"; do
 done
 [ "$net" = 1 ] && b+=(--share-net)
 
-# Agent commits carry the identity configured for the human who runs the build.
+# Commits made inside the sandbox carry the identity of whoever runs the build.
 name=$(git config user.name || true)
 email=$(git config user.email || true)
 
 exec env -i \
   PATH="$home/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
-  HOME="$home" USER="${USER:-agent}" LANG="${LANG:-C.UTF-8}" TERM=dumb \
+  HOME="$home" USER="${USER:-silica}" LANG="${LANG:-C.UTF-8}" TERM=dumb \
   RUSTUP_HOME="$home/.rustup" CARGO_HOME=/tmp/cargo-home CARGO_NET_OFFLINE=true \
   GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" \
   GIT_COMMITTER_NAME="$name" GIT_COMMITTER_EMAIL="$email" \

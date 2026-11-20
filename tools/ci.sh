@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs locally exactly what the hosted lanes run (spec/CI_RELEASE.md section 2),
+# Runs locally exactly what the hosted lanes run,
 # so local and hosted results match. The hosted workflows call this script.
 #   ci.sh fast    [--repo <repo>] [--checkout <repo> <absolute-dir>]...
 #   ci.sh nightly [--repo <repo>] [--checkout <repo> <absolute-dir>]...
@@ -52,7 +52,7 @@ case "$tier" in
     step deps "$TOOLS/check-deps.sh"
     budget=${SILICA_CI_FAST_BUDGET:-300}
     if [ $((SECONDS - start)) -gt "$budget" ]; then
-      echo "WARNING: ci: the fast tier took $((SECONDS - start))s, over the ${budget}s pre-merge budget (spec/CI_RELEASE.md section 2)"
+      echo "WARNING: ci: the fast tier took $((SECONDS - start))s, over the ${budget}s pre-merge budget"
     fi ;;
   nightly)
     step test "$TOOLS/test.sh" --deep ${repo:+--repo "$repo"} ;;

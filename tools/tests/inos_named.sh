@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Test for named in-OS tests (component A04, feature A04.02; spec/TESTING.md
-# sections 1 and 2). Runs a private copy of the tool suite in a disposable
+# Test for named in-OS tests (component A04). Runs a private copy of the tool suite in a disposable
 # fake workshop. Not under test and replaced: the cargo builds (the kernel,
 # loader and image tool are placeholders) and QEMU. The fake image tool
 # stores every `<path>=<file>` argument of the real build_image call in a
@@ -19,7 +18,7 @@ bad() { echo "ERROR: inos-named-test: $1"; fails=$((fails + 1)); }
 WS=$FX/ws
 OS=$WS/os
 K=$WS/kernel
-mkdir -p "$FX/bin" "$WS/state" "$OS/tools/tests" "$K/targets"
+mkdir -p "$FX/bin" "$OS/tools/tests" "$K/targets"
 echo x >"$WS/bootstrap.pins"
 echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/test.sh" "$SRC/size.sh" "$OS/tools/"

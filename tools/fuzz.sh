@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Coverage-guided fuzzing of any repository (spec/TESTING.md sections 1 and 3;
+# Coverage-guided fuzzing of any repository (spec/TESTING.md section 3;
 # test.sh --deep calls this).
 #   fuzz.sh [--repo <repo>]... [--target <id|name>]... [--time <seconds>]
 #           [--unit-timeout <seconds>] [--list | --report]
