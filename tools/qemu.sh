@@ -58,7 +58,8 @@ done
 case "$arch" in
   x86_64)
     bin=qemu-system-x86_64
-    accel=(-machine q35); [ -w /dev/kvm ] && accel=(-machine q35,accel=kvm -cpu host)
+    # TCG needs -cpu max: the kernel requires x2APIC, the TSC-deadline timer and XSAVE.
+    accel=(-machine q35 -cpu max); [ -w /dev/kvm ] && [ -z "${SILICA_NO_KVM:-}" ] && accel=(-machine q35,accel=kvm -cpu host)
     extra=(-device isa-debug-exit,iobase=0xf4,iosize=0x04) ;;
   aarch64)
     bin=qemu-system-aarch64

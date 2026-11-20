@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
-# Build the current x86_64 image and print the guest's serial output.
+# Build the x86_64 image and boot it in QEMU, serial console to standard output.
+#   boot.sh [--cmdline "<kernel command line>"] [--test <in-OS test>] [--smp <n>] [--mem <MiB>] [--timeout <s>]
+# --test NAME is short for --cmdline test=NAME. Exit status is qemu.sh's:
+# 0 when the guest reported success through the debug-exit device.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
+cmdline="" pass=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cmdline) [ $# -ge 2 ] || die "--cmdline needs a value"; cmdline=$2; shift 2 ;;
+    --test) [ $# -ge 2 ] || die "--test needs a name"; cmdline="test=$2"; shift 2 ;;
+    --smp|--mem|--timeout) [ $# -ge 2 ] || die "$1 needs a value"; pass+=("$1" "$2"); shift 2 ;;
+    *) die "unknown argument $1" ;;
+  esac
+done
 new_run
-image=$(build_image x86_64 "$RUN/build.log") || { cat "$RUN/build.log" >&2; exit 1; }
-"$TOOLS/qemu.sh" --arch x86_64 --image "$image" --serial "$RUN/serial.log"
-rc=$?
-[ ! -f "$RUN/serial.log" ] || cat "$RUN/serial.log"
-exit "$rc"
+log=$RUN/build.log
+img=$(build_image x86_64 "$log" "$cmdline") || {
+  for f in "$log" "$log".*; do [ -f "$f" ] && grep -E -A12 '^(error|warning)' "$f" | head -80; done
+  die "image build failed (logs: $log*)"
+}
+"$TOOLS/qemu.sh" --image "$img" --serial "$RUN/serial.log" "${pass[@]+"${pass[@]}"}"; rc=$?
+cat "$RUN/serial.log"
+exit $rc

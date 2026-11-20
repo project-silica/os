@@ -5,8 +5,8 @@
 # artifact cache). A missing artifact is one SKIP: line before its
 # "Required from" milestone (the MILESTONE file in the workshop root; absent means 0) and one ERROR: line from then on.
 # Conventions the kernel follows so the counts are mechanical:
-#   syscalls      variants of `enum Syscall` in kernel-core/src
-#   object types  variants of `enum ObjectType` in kernel-core/src
+#   syscalls      variants of `enum Syscall` in abi/src (every kernel operation is its own syscall)
+#   object types  variants of `enum ObjectType` in abi/src
 #   fast path     ELF sections named .text.fast* in the x86_64 kernel
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
@@ -55,15 +55,15 @@ rs_lines() { # non-blank, non-comment lines of Rust under the given paths, tests
 }
 if [ -d "$K" ]; then
   src=()
-  for d in "$K/kernel-core/src" "$K/kernel/src"; do [ -d "$d" ] && src+=("$d"); done
+  for d in "$K/abi/src" "$K/kernel-core/src" "$K/kernel/src"; do [ -d "$d" ] && src+=("$d"); done
   check "kernel source lines (no tests, no arch)" "$(rs_lines "${src[@]}")" 12000 1
   for a in "$K"/kernel/arch/*/; do
     [ -d "$a" ] || continue
     n=$(find "$a" -type f \( -name '*.rs' -o -name '*.S' -o -name '*.s' \) -print0 | xargs -0r cat | grep -cvE '^[[:space:]]*($|//)')
     check "arch $(basename "$a") lines" "$n" 4000 1
   done
-  variants() { # variants <enum name>: count variants of that enum in kernel-core/src
-    { find "$K/kernel-core/src" -name '*.rs' -print0 2>/dev/null | xargs -0r cat; } | awk -v e="$1" '
+  variants() { # variants <enum name>: count variants of that enum in abi/src and kernel-core/src
+    { find "$K/abi/src" "$K/kernel-core/src" -name '*.rs' -print0 2>/dev/null | xargs -0r cat; } | awk -v e="$1" '
       $0 ~ "enum[ \t]+" e "[ \t]*\\{" { inside = 1; depth = 0 }
       inside { t = $0; o = gsub(/\{/, "{", t); c = gsub(/\}/, "}", t)
         if (depth == 1 && $0 ~ /^[ \t]*[A-Z][A-Za-z0-9_]*[ \t]*([,=({]|$)/) n++

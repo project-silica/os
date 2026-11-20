@@ -2,6 +2,7 @@
 #
 # build_kernel <arch> <log>   kernel ELF for targets/<arch>-silica.json
 # build_loader <log>          the x86_64 UEFI loader (BOOTX64.EFI)
+# build_root <arch> <log>     the root task (root.elf), packed into the ramdisk as "root"
 # build_image <arch> <log> [cmdline]
 #                             GPT disk image with the loader and kernel; a
 #                             cmdline (kernel command line, one line) is stored
@@ -21,6 +22,16 @@ build_kernel() {
     -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
   cp "$(cache_of kernel)/target/$arch-silica/release/kernel" "$out/kernel.elf" || return 1
   echo "$out/kernel.elf"
+}
+
+build_root() { # the root task the kernel starts: the in-OS test program until the system repository exists
+  local arch=$1 log=$2 dir vend out
+  dir=$(checkout_of kernel); vend=$(merged_vendor kernel); out=$(art_dir "$arch")
+  [ -f "$dir/targets/$arch-silica-user.json" ] || { echo "no target spec targets/$arch-silica-user.json" >"$log"; return 1; }
+  cargo_run kernel "$log" build --release -p roottest --target "$dir/targets/$arch-silica-user.json" \
+    -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
+  cp "$(cache_of kernel)/target/$arch-silica-user/release/roottest" "$out/root.elf" || return 1
+  echo "$out/root.elf"
 }
 
 build_loader() {
@@ -47,10 +58,11 @@ build_image_tool() {
 }
 
 build_image() {
-  local arch=$1 log=$2 cmdline=${3:-} k l t out
+  local arch=$1 log=$2 cmdline=${3:-} k l t r out
   [ "$arch" = x86_64 ] || { echo "no image layout for $arch before B05" >"$log"; return 1; }
   k=$(build_kernel "$arch" "$log.kernel") || { cat "$log.kernel" >"$log"; return 1; }
   l=$(build_loader "$log.loader") || { cat "$log.loader" >"$log"; return 1; }
+  r=$(build_root "$arch" "$log.root") || { cat "$log.root" >"$log"; return 1; }
   t=$(build_image_tool "$log.tool") || { cat "$log.tool" >"$log"; return 1; }
   out=$(art_dir "$arch")/disk.img
   local -a extra=()
@@ -61,6 +73,6 @@ build_image() {
   fi
   cp "$t" "$(dirname "$out")/silica-image" || return 1
   "$(dirname "$out")/silica-image" --out "$out" "EFI/BOOT/BOOTX64.EFI=$l" "SILICA/KERNEL.ELF=$k" \
-    "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
+    --ramdisk-entry "root=$r" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
   echo "$out"
 }
