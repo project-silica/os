@@ -56,7 +56,13 @@ parse_cargo_list() { # parse_cargo_list <crate dir> <log>
     /: test$/ { name = $0; sub(/: test$/, "", name); print cd "/" t "::" name }' "$2"
 }
 
-first_error() { grep -m1 -E '^(error|ERROR)|panicked|assertion' "$1" | cut -c1-160; }
+# The first line of a log that says what failed; failing that, its last line.
+first_error() {
+  local l
+  l=$(grep -m1 -E '^(error|ERROR)|panicked|assertion' "$1")
+  [ -n "$l" ] || l=$(grep -v '^[[:space:]]*$' "$1" | tail -n 1)
+  printf '%s\n' "$l" | cut -c1-160
+}
 
 # TEST_ARGS: extra `cargo test` arguments for run_named (loom models run with --release).
 TEST_ARGS=()

@@ -14,13 +14,18 @@ BUILD_STD=(-Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-buil
 
 # strip_debug <in> <out> <log>: the copy that goes into the image. The file
 # with debug information stays beside it for symbolize.sh.
+# The objcopy of the kernel's pinned toolchain (llvm-tools) reads every
+# target; a distribution's binutils objcopy often reads only the host's.
 strip_debug() {
-  local t
-  for t in llvm-objcopy objcopy; do
+  local t sysroot host
+  sysroot=$(cd "$(checkout_of kernel)" && rustc --print sysroot 2>/dev/null)
+  host=$(cd "$(checkout_of kernel)" && rustc -vV 2>/dev/null | sed -n 's/^host: //p')
+  for t in "$sysroot/lib/rustlib/$host/bin/rust-objcopy" llvm-objcopy; do
     command -v "$t" >/dev/null 2>&1 || continue
-    "$t" --strip-debug "$1" "$2" >>"$3" 2>&1; return
+    # The toolchain's tools find its libLLVM only through the library path.
+    LD_LIBRARY_PATH="$sysroot/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$t" --strip-debug "$1" "$2" >>"$3" 2>&1; return
   done
-  echo "error: neither llvm-objcopy nor objcopy is installed" >>"$3"; return 1
+  echo "error: no objcopy that reads every target: install the toolchain's llvm-tools component (rustup component add llvm-tools) or llvm-objcopy" >>"$3"; return 1
 }
 
 art_dir() { local d; d=$(cache_of kernel)/artifacts/$1; mkdir -p "$d"; echo "$d"; }
