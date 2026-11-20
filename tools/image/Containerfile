@@ -1,0 +1,33 @@
+# Toolchain image for the hosted lanes (spec/CI_RELEASE.md section 2): the pinned
+# nightly with its components, QEMU, both firmwares and the tools every
+# tools/*.sh script needs, built once and reused by every job so that no
+# pre-merge job installs or builds the toolchain cold. It holds tools only: the
+# sources of a repository arrive with the job, never with the image.
+#
+# `tools/toolchain-image.sh check` keeps this file equal to the pins in every
+# rust-toolchain.toml; `tools/toolchain-image.sh tag` names the image after the
+# hash of this file, and `tools/toolchain-image.sh key <repo>` names the
+# compiler cache (target/cache) after the lock files, the pins and that tag.
+FROM ubuntu:24.04
+
+# Moved together with rust-toolchain.toml in os and kernel, nowhere else.
+ARG RUST_CHANNEL=nightly-2026-10-01
+# rust-src: -Zbuild-std for the custom targets. miri: the T2 runs.
+# llvm-tools: symbolization and size checks.
+ARG RUST_COMPONENTS=rust-src,miri,clippy,rustfmt,llvm-tools
+
+# bubblewrap: the sandbox every tool runs commands in. qemu-system-*, ovmf and
+# qemu-efi-aarch64: the emulators and their UEFI firmware. mtools: the FAT
+# images. python3 and python3-yaml: the workflow and schema checks.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       bubblewrap build-essential ca-certificates git jq mtools ovmf \
+       python3 python3-yaml qemu-efi-aarch64 qemu-system-arm qemu-system-x86 \
+       rustup socat \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup toolchain install "$RUST_CHANNEL" --profile minimal --component "$RUST_COMPONENTS" \
+    && rustup default "$RUST_CHANNEL"
+
+# Sources come only from vendor/ (spec/ARCHITECTURE.md section 12).
+ENV CARGO_NET_OFFLINE=true
