@@ -60,7 +60,7 @@ build_image() {
     extra=("SILICA/CMDLINE.TXT=$(dirname "$out")/CMDLINE.TXT")
   fi
   cp "$t" "$(dirname "$out")/silica-image" || return 1
-  sandboxed "$(dirname "$out")" -- "$(dirname "$out")/silica-image" --out "$out" "EFI/BOOT/BOOTX64.EFI=$l" "SILICA/KERNEL.ELF=$k" \
+  "$(dirname "$out")/silica-image" --out "$out" "EFI/BOOT/BOOTX64.EFI=$l" "SILICA/KERNEL.ELF=$k" \
     "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
   echo "$out"
 }

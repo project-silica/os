@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible builds check (spec/ARCHITECTURE.md section 16 "Builds are
 # reproducible"; component A10).
-#   repro.sh [--checkout <repo> <absolute-dir>]...
+#   repro.sh
 # Builds the x86_64 kernel, the UEFI loader and the disk image twice, each time
 # from its own copy of the kernel and os checkouts (tracked files and files not
 # ignored, so uncommitted work is checked too) in a different directory with its
@@ -16,8 +16,7 @@
 # Exit 0 reproducible, 1 not reproducible or a build failed, 2 usage error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
-parse_checkouts "$@"; set -- "${ARGS[@]+"${ARGS[@]}"}"
-[ $# = 0 ] || die "unknown argument $1 (usage: repro.sh [--checkout <repo> <absolute-dir>]...)"
+[ $# = 0 ] || die "unknown argument $1 (usage: repro.sh)"
 for r in kernel os; do [ -d "$(checkout_of "$r")" ] || die "no checkout of $r"; done
 
 new_run
@@ -34,16 +33,15 @@ first_error() { # first error-looking line of a log, trimmed
 }
 copy_tree() { # copy_tree <checkout> <dir>: the working tree without ignored files and without .git
   mkdir -p "$2"
-  g -C "$1" ls-files -z --cached --others --exclude-standard |
+  git -C "$1" ls-files -z --cached --others --exclude-standard |
     tar -C "$1" --null -T - --ignore-failed-read -cf - 2>/dev/null | tar -C "$2" -xf -
 }
 
 # build <n> <dir-name>: builds in $RUN/<dir-name> and keeps the artifacts in $RUN/out<n>.
 build() {
   local n=$1 base=$RUN/$2 sysroot flags p f
-  CHECKOUT[kernel]=$base/kernel; CHECKOUT[os]=$base/os
+  SRC[kernel]=$base/kernel; SRC[os]=$base/os
   copy_tree "$KSRC" "$base/kernel"; copy_tree "$OSRC" "$base/os"
-  export_checkouts
   sysroot=$(cd "$KSRC" && rustc --print sysroot 2>/dev/null)
   # Everything that differs between the two builds is mapped to the same name.
   # rustc uses the last matching mapping, so the broad ones come first.

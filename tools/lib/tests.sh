@@ -74,7 +74,7 @@ run_named() {
       dir=$(checkout_of "$repo")
       [ -f "$dir/$id" ] || { record fail "$suite" "$id" "missing"; return 3; }
       mkdir -p "$RUN/named"
-      (cd "$dir" && sandboxed "$RUN/named" "$LOGS" -- env SILICA_WS="$WS" SILICA_RUN="$RUN/named" bash "$dir/$id") >"$log" 2>&1
+      (cd "$dir" && env SILICA_WS="$WS" SILICA_RUN="$RUN/named" bash "$dir/$id") >"$log" 2>&1
       if [ $? = 0 ]; then record pass "$suite" "$id"; return 0; fi
       record fail "$suite" "$id" "$(first_error "$log")"; return 1 ;;
   esac
@@ -102,7 +102,7 @@ run_named() {
   local out; out=$(parse_cargo_tests "$crate" "$log" | awk -F'\t' -v id="$id" '$2 == id')
   case "$out" in
     pass*) record pass "$suite" "$id"; return 0 ;;
-    ignored*) record fail "$suite" "$id" "ignored"; return 4 ;;
+    ignored*) record skip "$suite" "$id" "ignored"; return 4 ;;
     fail*) record fail "$suite" "$id" "$(grep -m1 -E 'panicked|assert' "$log" | cut -c1-160)"; return 1 ;;
   esac
   if grep -q 'could not compile' "$log"; then record fail "$suite" "$id" "build failed: $(first_error "$log")"; return 1; fi

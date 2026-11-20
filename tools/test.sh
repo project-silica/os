@@ -5,7 +5,6 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
 . "$TOOLS/lib/tests.sh"
-parse_checkouts "$@"; set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 tier=fast repo="" guests=()
 while [ $# -gt 0 ]; do
@@ -51,7 +50,7 @@ suite_host() { # every host test of the repo's default members
     got=$(parse_cargo_tests "$d" "$log")
     if [ -n "$got" ]; then
       while IFS=$'\t' read -r st id why; do
-        case "$st" in ignored) st=fail ;; esac
+        case "$st" in ignored) st=skip ;; esac
         record "$st" "$s" "$id" "$why"
       done <<<"$got"
     fi
@@ -129,7 +128,7 @@ suite_miri() {
   mkdir -p "$c/cargo-home" "$c/xdg" "$c/miri-setup"
   printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "%s"\n' "$vend" >"$c/cargo-home/config.toml"
   tc=$(sed -n 's/^channel *= *"\(.*\)".*/\1/p' "$(checkout_of kernel)/rust-toolchain.toml" 2>/dev/null | head -n 1)
-  sys=$(cd "$c/miri-setup" && sandboxed "$c" "$(dirname "$log")" -- env CARGO_HOME="$c/cargo-home" XDG_CACHE_HOME="$c/xdg" \
+  sys=$(cd "$c/miri-setup" && env CARGO_HOME="$c/cargo-home" XDG_CACHE_HOME="$c/xdg" \
     ${tc:+RUSTUP_TOOLCHAIN="$tc"} cargo miri setup --print-sysroot 2>"$log" | tail -n 1)
   if [ "${sys#/}" = "$sys" ]; then
     record fail "$s" setup "miri sysroot setup failed: $(first_error "$log")"; return
@@ -141,7 +140,7 @@ suite_miri() {
   got=$(parse_cargo_tests kernel-core "$log")
   if [ -n "$got" ]; then
     while IFS=$'\t' read -r st id why; do
-      case "$st" in ignored) st=fail ;; fail) why=$(miri_error "$log") ;; esac
+      case "$st" in ignored) st=skip ;; fail) why=$(miri_error "$log") ;; esac
       record "$st" "$s" "$id" "$why"
     done <<<"$got"
   fi

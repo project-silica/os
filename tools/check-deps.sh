@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dependency direction (spec/REPOSITORIES.md, Dependencies).
-#   check-deps.sh [--checkout <repo> <absolute-dir>]...
+#   check-deps.sh
 # idl depends on nothing; kernel only on idl; every other repository only on
 # idl and kernel's libsys; nothing depends on os or workshop. A Cargo path
 # dependency may not leave its own repository (cross-repo code comes through
@@ -10,8 +10,7 @@
 # are not searched. Prints "CHECK-DEPS: OK" or one "ERROR: check-deps:" line
 # per violation, naming the repository, the package and what it depends on.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
-parse_checkouts "$@"
-[ ${#ARGS[@]} = 0 ] || { echo "usage: check-deps.sh [--checkout <repo> <absolute-dir>]..."; die "unknown argument: ${ARGS[0]}"; }
+[ $# = 0 ] || { echo "usage: check-deps.sh"; die "unknown argument: $1"; }
 fail=0
 bad() { echo "ERROR: check-deps: $*"; fail=1; }
 

@@ -3,7 +3,6 @@
 # backtraces into function, file and line (component A09).
 #   symbolize.sh [--arch <arch>] [--elf <file>] [--bias <hex>] [<log> | -]
 #   symbolize.sh [--arch <arch>] [--elf <file>] [--bias <hex>] --addr <hex>...
-#                [--checkout <repo> <absolute-dir>]...
 # Log mode copies the log (a file, or standard input for "-" or no argument)
 # to standard output unchanged and puts one decoded line after every line that
 # names an address:
@@ -24,7 +23,6 @@
 # Exit 0 when the log was processed, 2 on a usage error, a missing ELF or a
 # missing addr2line.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
-parse_checkouts "$@"; set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 usage="usage: symbolize.sh [--arch <arch>] [--elf <file>] [--bias <hex>] [<log> | -] | --addr <hex>..."
 arch=x86_64 elf="" bias=0 log="" mode=log addrs=()

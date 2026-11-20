@@ -225,35 +225,15 @@ done
 write idl ""; write system ""; write drivers ""
 run; [ $RC = 0 ] || bad "after the violations were removed: exit $RC: $OUT"
 
-# ---- 7. checkouts ------------------------------------------------------------
-# --checkout names the tree to check instead of the canonical clone
-for r in system idl; do (cd "$WS/$r" && git init -q . && git add -A && git commit -qm base) || { echo "ERROR: deps-test: cannot create the fake repositories"; exit 2; }; done
-git -C "$WS/system" worktree add -q -b topic "$FX/system-wt" 2>/dev/null || { echo "ERROR: deps-test: cannot create a worktree"; exit 2; }
-printf '\ntool = { git = "%s/os" }\n' "$ORG" >>"$FX/system-wt/Cargo.toml"
-run
-[ $RC = 0 ] || bad "canonical clone is clean but the check failed (exit $RC): $OUT"
-run --checkout system "$FX/system-wt"
-[ $RC = 1 ] && [ "$(errs)" = 1 ] && printf '%s\n' "$OUT" | grep '^ERROR:' | grep -q 'system.*os/tool' || bad "--checkout: want the violation of the checkout (exit 1, 1 ERROR), got exit $RC: $OUT"
-git -C "$FX/system-wt" checkout -q -- Cargo.toml
-run --checkout system "$FX/system-wt"
-[ $RC = 0 ] && ok_line || bad "--checkout of a clean worktree: exit $RC: $OUT"
-run --checkout system "relative/dir"
-[ $RC = 2 ] && [ "$(errs)" = 1 ] || bad "relative --checkout: want exit 2 and 1 ERROR line, got exit $RC: $OUT"
-run --checkout nosuch "$FX/system-wt"
-[ $RC != 0 ] || bad "--checkout of an unknown repository: exit 0"
-
 # ---- 8. usage ----------------------------------------------------------------
 run bogus
 [ $RC = 2 ] || bad "unknown argument: exit $RC, want 2: $OUT"
 [ "$(errs)" = 1 ] && printf '%s\n' "$OUT" | grep -q 'bogus' || bad "unknown argument: want 1 ERROR line naming it: $OUT"
 ok_line && bad "unknown argument: printed 'CHECK-DEPS: OK'"
-run --checkout system
-[ $RC = 2 ] || bad "--checkout without arguments: exit $RC, want 2: $OUT"
 
 # ---- 9. the real repositories ------------------------------------------------
 if [ -x "$SRC/check-deps.sh" ] && command -v cargo >/dev/null 2>&1; then
-  REAL_OS=$(cd "$SRC/.." && pwd -P)
-  OUT=$("$SRC/check-deps.sh" --checkout os "$REAL_OS" 2>&1); RC=$?
+  OUT=$("$SRC/check-deps.sh" 2>&1); RC=$?
   [ $RC = 0 ] || bad "real repositories: exit $RC, want 0: $(printf '%s\n' "$OUT" | head -n 5 | tr '\n' ' ')"
   ok_line || bad "real repositories: no 'CHECK-DEPS: OK' line"
 fi

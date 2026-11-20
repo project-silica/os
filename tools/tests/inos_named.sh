@@ -24,14 +24,6 @@ echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/test.sh" "$SRC/size.sh" "$OS/tools/"
 printf '# fake manifest: no pinned repositories\n' >"$OS/manifest.toml"
 for a in x86_64 aarch64 riscv64; do echo '{}' >"$K/targets/$a-silica.json"; done
-cat >"$FX/bin/sandbox.sh" <<'EOF'
-#!/bin/bash
-while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
-shift
-exec "$@"
-EOF
-printf '#!/bin/bash\nexit 0\n' >"$FX/bin/bwrap"
-chmod +x "$FX/bin/sandbox.sh" "$FX/bin/bwrap"
 
 # Builds are not under test: the kernel, the loader and the image tool are
 # placeholders, appended to the real build.sh so the real build_image runs.
@@ -91,7 +83,7 @@ for r in "$OS" "$K"; do
     { echo "ERROR: inos-named-test: cannot create the fake repository $r"; exit 2; }
 done
 
-CLEAN=(env -i PATH="$FX/bin:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS" SILICA_SANDBOX="$FX/bin/sandbox.sh")
+CLEAN=(env -i PATH="$FX/bin:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS")
 # run <args...>: a real test.sh run; OUT, RC and the results file RES
 run() {
   : >"$FX/cmdlines.log"

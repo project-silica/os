@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Test for tools/test.sh tiers and output rules (component A02). Runs a private copy of the tool suite
-# inside a disposable fake workshop (fake os repository,
-# pass-through sandbox), so nothing real is built, booted or changed and the
+# inside a disposable fake workshop (fake os repository), so nothing real is built, booted or changed and the
 # test cannot recurse into the real test.sh. One "ERROR:" line per failed check.
 set -uo pipefail
 SRC=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd -P)
@@ -19,15 +18,6 @@ echo 0 >"$WS/MILESTONE"
 # Private copy of the tool suite under test (the files test.sh reads).
 cp -r "$SRC/lib" "$SRC/test.sh" "$SRC/size.sh" "$SRC/qemu.sh" "$OS/tools/"
 printf '# fake manifest: no repositories besides os\n' >"$OS/manifest.toml"
-# Pass-through sandbox: drops its own arguments and runs the command.
-cat >"$FX/bin/sandbox.sh" <<'EOF'
-#!/bin/bash
-while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
-shift
-exec "$@"
-EOF
-printf '#!/bin/bash\nexit 0\n' >"$FX/bin/bwrap"
-chmod +x "$FX/bin/sandbox.sh" "$FX/bin/bwrap"
 
 T=$OS/tools/tests
 printf '#!/bin/bash\necho fine\nexit 0\n' >"$T/pass_a.sh"
@@ -40,7 +30,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.invalid GIT_COMMITTER_NAME=t GIT_C
 run() {
   local t0=$SECONDS
   OUT=$(cd "$FX" && env -i PATH="$FX/bin:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" \
-    SILICA_WS="$WS" SILICA_SANDBOX="$FX/bin/sandbox.sh" \
+    SILICA_WS="$WS" \
     bash "$OS/tools/test.sh" "$@" 2>&1)
   RC=$?; SECS=$((SECONDS - t0))
 }
@@ -138,17 +128,6 @@ run --bogus
 [ "$RC" != 0 ] && [ "$(errs)" = 1 ] || bad "bogus: want one ERROR and non-zero exit, got $(errs) (exit $RC): $OUT"
 run --fast --repo nosuchrepo
 [ "$RC" != 0 ] && [ "$(errs)" = 1 ] || bad "repo: unknown repository must be one ERROR, got $(errs) (exit $RC): $OUT"
-
-# ---- 8. --checkout selects the tree whose tests run --------------------------
-CO=$FX/co
-(cd "$OS" && git worktree add -q -b co "$CO") || bad "checkout: cannot create a second worktree"
-printf '#!/bin/bash\necho "assertion failed: only in the checkout"\nexit 1\n' >"$CO/tools/tests/fail_co.sh"
-run --full --repo os
-[ "$RC" = 0 ] || bad "checkout: the canonical tree has no failing test, exit $RC: $OUT"
-run --full --repo os --checkout os "$CO"
-[ "$RC" != 0 ] && [ "$(errs)" = 1 ] && has 'fail_co\.sh' || bad "checkout: --checkout os <dir> did not run that tree's tests, got $(errs) ERROR (exit $RC): $OUT"
-run --full --repo os --checkout os "tools/relative"
-[ "$RC" != 0 ] && has '^ERROR:.*absolute' || bad "checkout: a relative path must be refused with an ERROR: $OUT"
 
 [ $fails = 0 ] && echo "test-output-test: ok"
 exit $((fails > 0))

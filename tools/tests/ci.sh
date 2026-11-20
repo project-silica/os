@@ -24,11 +24,11 @@ git init -q "$WS/kernel" || exit 2
 cp -r "$SRC/lib" "$SRC/ci.sh" "$OS/tools/"
 : >"$CALLS"
 
-# Fakes: record the arguments and the checkout list, then behave as told by
+# Fakes: record the arguments, then behave as told by
 # FAKE_TEST_RC / FAKE_DEPS_RC (default 0) and FAKE_TEST_SLEEP.
 cat >"$OS/tools/test.sh" <<'EOF2'
 #!/bin/bash
-echo "test.sh $* | checkouts=$(printf '%s' "${SILICA_CHECKOUTS:-}" | tr '\n' ' ') | fuzz=${SILICA_FUZZ_TIME:-}" >>"$FAKE_FX/calls.log"
+echo "test.sh $* | fuzz=${SILICA_FUZZ_TIME:-}" >>"$FAKE_FX/calls.log"
 sleep "${FAKE_TEST_SLEEP:-0}"
 echo "os.tools: pass=3 fail=0 skipped=0"
 if [ "${FAKE_TEST_RC:-0}" != 0 ]; then echo "ERROR: os.tools::tools/tests/x.sh: boom in test"; echo "RESULT: pass=3 fail=1 skipped=0 time=1"; exit 1; fi
@@ -36,7 +36,7 @@ echo "RESULT: pass=3 fail=0 skipped=0 time=1"
 EOF2
 cat >"$OS/tools/check-deps.sh" <<'EOF2'
 #!/bin/bash
-echo "check-deps.sh $* | checkouts=$(printf '%s' "${SILICA_CHECKOUTS:-}" | tr '\n' ' ')" >>"$FAKE_FX/calls.log"
+echo "check-deps.sh $*" >>"$FAKE_FX/calls.log"
 if [ "${FAKE_DEPS_RC:-0}" != 0 ]; then echo "ERROR: check-deps: kernel/x depends on os/y"; exit 1; fi
 echo "CHECK-DEPS: OK"
 EOF2
@@ -86,11 +86,11 @@ ENVX=(FAKE_TEST_RC=1); run nightly; ENVX=()
 ENVX=(SILICA_FUZZ_TIME=7); run nightly; ENVX=()
 grep -q 'fuzz=7' "$CALLS" || bad "SILICA_FUZZ_TIME does not reach test.sh --deep"
 
-# 6. --repo goes to test.sh only; --checkout reaches both steps.
-run fast --repo kernel --checkout kernel "$WS/kernel"
-[ $RC = 0 ] || bad "fast --repo kernel --checkout: exit $RC; $OUT"
-grep -q '^test.sh --fast --repo kernel | checkouts=kernel='"$WS"'/kernel ' "$CALLS" || bad "test.sh did not get --repo kernel and the checkout: $(cat "$CALLS")"
-grep -q '^check-deps.sh  | checkouts=kernel='"$WS"'/kernel ' "$CALLS" || bad "check-deps.sh did not get the checkout or got extra arguments: $(cat "$CALLS")"
+# 6. --repo goes to test.sh only.
+run fast --repo kernel
+[ $RC = 0 ] || bad "fast --repo kernel: exit $RC; $OUT"
+grep -q '^test.sh --fast --repo kernel ' "$CALLS" || bad "test.sh did not get --repo kernel: $(cat "$CALLS")"
+grep -qx 'check-deps.sh ' "$CALLS" || bad "check-deps.sh got extra arguments: $(cat "$CALLS")"
 run nightly --repo kernel
 grep -q '^test.sh --deep --repo kernel ' "$CALLS" || bad "nightly --repo not passed: $(cat "$CALLS")"
 

@@ -8,7 +8,6 @@
 #                                          silica-<repo>-<arch>-<tag>-<16 hex>
 #   toolchain-image.sh restore-key <repo>  silica-<repo>-<arch>-<tag>-, the prefix a
 #                                          fallback restore may use
-#   (each also takes --checkout <repo> <absolute-dir>, repeatable)
 # check: the base image is pinned (a tag other than latest, or a digest); the
 # channel and components of the image equal what every rust-toolchain.toml of
 # a repository asks for (plus llvm-tools); the packages every tools/ script
@@ -20,11 +19,10 @@
 # by path and content, and the tag, so the cache is new exactly when a
 # dependency, the pin or the image changes. Exit 2 on a usage error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
-parse_checkouts "$@"; set -- "${ARGS[@]+"${ARGS[@]}"}"
 
-USAGE="usage: toolchain-image.sh check | tag | key <repo> | restore-key <repo> [--checkout <repo> <absolute-dir>]..."
+USAGE="usage: toolchain-image.sh check | tag | key <repo> | restore-key <repo>"
 CF=$(checkout_of os)/tools/image/Containerfile
-REQUIRED_PKGS="bubblewrap ca-certificates git jq mtools ovmf python3 python3-yaml qemu-efi-aarch64 qemu-system-arm qemu-system-x86 rustup socat"
+REQUIRED_PKGS="ca-certificates git jq mtools ovmf python3 python3-yaml qemu-efi-aarch64 qemu-system-arm qemu-system-x86 rustup socat"
 EXTRA_COMPONENTS="llvm-tools"
 
 need_cf() { [ -f "$CF" ] || { err "$CF: Containerfile is missing"; exit 1; }; }

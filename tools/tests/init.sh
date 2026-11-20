@@ -17,13 +17,13 @@ REAL_WS=${SILICA_WS:-$(cd "$SRC/../.." && pwd -P)}
 
 # ---- build a fake environment: $FX/<name>/{bin,ws,fw} ----------------------
 # Real utilities init.sh and its library need, linked into the private PATH.
-REAL_UTILS="bash env dirname basename readlink sed awk cat mkdir grep git head tr sort cut wc rm mktemp date sleep jq sha256sum flock find ls id uname true false test printf tee xargs"
+REAL_UTILS="bash env dirname basename readlink sed awk cat mkdir grep git head tr sort cut wc rm mktemp date sleep jq sha256sum find ls id uname true false test printf tee xargs"
 stub() { printf '#!/bin/bash\nexit 0\n' >"$1"; chmod +x "$1"; }
 mkenv() { # mkenv <name> [milestone]  (everything present, aarch64 included)
   local e=$FX/$1 t r
   mkdir -p "$e/bin" "$e/ws/kernel" "$e/fw/usr/share/OVMF" "$e/fw/usr/share/AAVMF"
   for t in $REAL_UTILS; do p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$e/bin/$t"; done
-  for t in bwrap cargo size nm socat qemu-system-x86_64 qemu-system-aarch64; do stub "$e/bin/$t"; done
+  for t in cargo size nm socat qemu-system-x86_64 qemu-system-aarch64; do stub "$e/bin/$t"; done
   cat >"$e/bin/rustup" <<'EOF'
 #!/bin/bash
 # fake: rustup component list --installed --toolchain <tc>
@@ -88,7 +88,7 @@ mkenv m2q 2; rm -f "$FX/m2q/bin/qemu-system-aarch64"
 expect_one_error m2q aarch64 'aarch64'
 
 # ---- 3. one ERROR line, with the fix, per missing piece ---------------------
-for tool in git jq bwrap cargo rustup sha256sum flock size nm socat; do
+for tool in git jq cargo rustup sha256sum size nm socat; do
   mkenv "no-$tool"; rm -f "$FX/no-$tool/bin/$tool"
   case $tool in git | jq | sha256sum) # also used by the library or the test shell; init.sh must still report it
     run "no-$tool"

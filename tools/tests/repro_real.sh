@@ -3,10 +3,10 @@
 # (component A10; spec/ARCHITECTURE.md section 16 "Builds are
 # reproducible"). tools/tests/repro.sh checks repro.sh against fakes; this one
 # runs the real tools/repro.sh, with the real builds, in a disposable workshop:
-#   1. a scratch os checkout whose image builder takes the disk GUID from the
+#   1. an os checkout whose image builder takes the disk GUID from the
 #      clock must give "REPRO: FAILED", one ERROR line naming disk.img, and
 #      identical kernel and loader;
-#   2. the same checkout unplanted must give "REPRO: OK" and three identical
+#   2. the same checkout with the plant removed must give "REPRO: OK" and three identical
 #      artifacts.
 # Both runs build twice (about a minute each, so --fast does not run this test;
 # see suite_tools in test.sh). Nothing outside the disposable workshop is
@@ -23,11 +23,9 @@ find_ws() {
   return 1
 }
 REAL_WS=$(find_ws) || { echo "ERROR: repro-real: cannot find the workshop root"; exit 2; }
-# The kernel to build: the checkout named in SILICA_CHECKOUTS, else the canonical one.
-SRC_KERNEL=$(printf '%s\n' "${SILICA_CHECKOUTS:-}" | sed -n 's/^kernel=//p' | head -n 1)
-[ -n "$SRC_KERNEL" ] || SRC_KERNEL=$REAL_WS/kernel
+SRC_KERNEL=$REAL_WS/kernel
 [ -d "$SRC_KERNEL" ] || { echo "ERROR: repro-real: no kernel checkout at $SRC_KERNEL"; exit 2; }
-BASE=${SILICA_RUN:-$REAL_WS/target}; mkdir -p "$BASE"   # not /tmp: the sandbox hides it
+BASE=${SILICA_RUN:-$REAL_WS/target}; mkdir -p "$BASE"
 FX=$(mktemp -d "$BASE/reproreal.XXXX") || exit 2
 FX=$(cd "$FX" && pwd -P)
 trap 'rm -rf "${FX:?}"' EXIT
@@ -50,24 +48,22 @@ copy_repo "$SRC_KERNEL" "$W/kernel"
 { [ -f "$W/os/tools/repro.sh" ] && [ -f "$W/os/image-builder/src/lib.rs" ] && [ -f "$W/kernel/Cargo.toml" ]; } ||
   { echo "ERROR: repro-real: cannot create the disposable workshop"; exit 2; }
 
-# The scratch os checkout with the planted nondeterminism: the disk GUID from the clock.
-P=$FX/os-planted
-gx -C "$W/os" worktree add -q --detach "$P" >/dev/null 2>&1 || { echo "ERROR: repro-real: cannot create the scratch os checkout"; exit 2; }
-LIB=$P/image-builder/src/lib.rs
+# The planted nondeterminism: the disk GUID from the clock.
+LIB=$W/os/image-builder/src/lib.rs
 CLOCK='\&std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_le_bytes()'
 sed -i "s|copy_from_slice(&DISK_GUID);|copy_from_slice($CLOCK);|" "$LIB"
 grep -q 'SystemTime::now' "$LIB" || { echo "ERROR: repro-real: the plant did not apply to image-builder/src/lib.rs"; exit 2; }
-[ -n "$(gx -C "$W/os" status --porcelain)" ] && bad "the unplanted os checkout was changed"
 
 repro() { # repro <out file> [args]: the real repro.sh of the disposable workshop; status in <out file>.rc
   local out=$1; shift
-  # HOME stays: the sandbox binds the toolchain below it.
-  (cd "$FX" && env -u SILICA_CHECKOUTS -u SILICA_PROBE -u SILICA_FEATURE TMPDIR="$FX" SILICA_WS="$W" \
+  (cd "$FX" && env TMPDIR="$FX" SILICA_WS="$W" \
     bash "$W/os/tools/repro.sh" "$@" >"$out" 2>&1; echo $? >"$out.rc")
 }
 # One after the other: both runs keep their logs under the workshop's target/logs/repro.
-repro "$FX/planted.out" --checkout os "$P"
+repro "$FX/planted.out"
 cp -r "$W/target/logs/repro" "$FX/planted-logs" 2>/dev/null
+gx -C "$W/os" checkout -q -- image-builder/src/lib.rs
+[ -z "$(gx -C "$W/os" status --porcelain)" ] || bad "the plant was not removed from the os checkout"
 repro "$FX/clean.out"
 
 # ---- 1. the planted nondeterministic image builder ------------------------------------------

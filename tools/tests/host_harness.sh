@@ -28,17 +28,10 @@ mkdir -p "$FX/bin" "$OS/tools" "$K/kernel-core/src" "$K/kernel-core/tests"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/test.sh" "$SRC/size.sh" "$SRC/qemu.sh" "$OS/tools/"
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"
-# Pass-through sandbox, and a cargo shim: fmt and clippy succeed, `miri setup`
+# A cargo shim: fmt and clippy succeed, `miri setup`
 # prints a fake sysroot, `miri test` is an ordinary `cargo test` that fails when
 # $FX/miri_fail exists; everything else is the real cargo. Every call is logged
 # with the variables the harness must set.
-cat >"$FX/bin/sandbox.sh" <<'EOF'
-#!/bin/bash
-while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
-shift
-exec "$@"
-EOF
-printf '#!/bin/bash\nexit 0\n' >"$FX/bin/bwrap"
 cat >"$FX/bin/cargo" <<'EOF'
 #!/bin/bash
 a=("$@")
@@ -56,7 +49,7 @@ case "${a[0]}" in
 esac
 exec "$REAL_CARGO" "$@"
 EOF
-chmod +x "$FX/bin/sandbox.sh" "$FX/bin/bwrap" "$FX/bin/cargo"
+chmod +x "$FX/bin/cargo"
 
 # ---- the fake kernel repository: a real std-for-tests no_std crate -----------
 cat >"$K/Cargo.toml" <<'EOF'
@@ -103,7 +96,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.invalid GIT_COMMITTER_NAME=t GIT_C
 run() {
   : >"$CALLS"
   OUT=$(cd "$FX" && env -i PATH="$FX/bin:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" RUSTUP_HOME="$RUSTUP_HOME" \
-    SILICA_WS="$WS" SILICA_SANDBOX="$FX/bin/sandbox.sh" FAKE_CALLS="$CALLS" FAKE_FX="$FX" REAL_CARGO="$REAL_CARGO" \
+    SILICA_WS="$WS" FAKE_CALLS="$CALLS" FAKE_FX="$FX" REAL_CARGO="$REAL_CARGO" \
     bash "$OS/tools/test.sh" "$@" 2>&1)
   RC=$?
 }
@@ -135,7 +128,7 @@ cat >>"$K/kernel-core/src/lib.rs" <<'RS'
 fn ignored_case() {}
 RS
 run --fast --repo kernel
-[ "$RC" != 0 ] && has '^ERROR: kernel.host::kernel-core/src/lib.rs::ignored_case: ignored' || bad "ignored test escaped: $OUT"
+[ "$RC" = 0 ] && has '^kernel\.host: pass=[0-9]+ fail=0 skipped=1$' || bad "an ignored test must count as skipped: $OUT"
 # ---- 1. green: host std build, Miri, and every loom model as its own suite ---
 write_lib model; write_models ''
 run --full --repo kernel

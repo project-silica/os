@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Runs locally exactly what the hosted lanes run,
-# so local and hosted results match. The hosted workflows call this script.
-#   ci.sh fast    [--repo <repo>] [--checkout <repo> <absolute-dir>]...
-#   ci.sh nightly [--repo <repo>] [--checkout <repo> <absolute-dir>]...
+# Runs locally the same steps as the hosted lanes (test.sh, then check-deps.sh).
+#   ci.sh fast    [--repo <repo>]
+#   ci.sh nightly [--repo <repo>]
 # fast (pre-merge): test.sh --fast, then check-deps.sh. Both always run.
 # nightly:          test.sh --deep ($SILICA_FUZZ_TIME passes through).
 # --repo limits the test suites to one repository (the dependency check always
@@ -13,7 +12,6 @@
 # going over it is a WARNING line, not a failure.
 # Exit 0 when every step passed, 1 when any step failed, 2 on a usage error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
-parse_checkouts "$@"; set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 tier="" repo=""
 while [ $# -gt 0 ]; do
@@ -22,10 +20,10 @@ while [ $# -gt 0 ]; do
       [ -z "$tier" ] || die "one tier only ($tier and $1)"
       tier=$1; shift ;;
     --repo) [ $# -ge 2 ] || die "--repo needs a repository"; repo=$2; shift 2 ;;
-    *) die "unknown argument $1 (usage: ci.sh fast|nightly [--repo <repo>] [--checkout <repo> <dir>]...)" ;;
+    *) die "unknown argument $1 (usage: ci.sh fast|nightly [--repo <repo>])" ;;
   esac
 done
-[ -n "$tier" ] || die "usage: ci.sh fast|nightly [--repo <repo>] [--checkout <repo> <dir>]..."
+[ -n "$tier" ] || die "usage: ci.sh fast|nightly [--repo <repo>]"
 
 fails=0
 step() { # step <name> <command...>: runs it, logs everything, prints status and its ERROR lines

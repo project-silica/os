@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Size budgets and bloat ceilings (spec/ARCHITECTURE.md section 2).
-#   size.sh [--checkout <repo> <absolute-dir>]...
+#   size.sh
 # Measures the artifacts test.sh builds and boots (the kernel checkout's
 # artifact cache). A missing artifact is one SKIP: line before its
 # "Required from" milestone (the MILESTONE file in the workshop root; absent means 0) and one ERROR: line from then on.
@@ -10,7 +10,6 @@
 #   fast path     ELF sections named .text.fast* in the x86_64 kernel
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
-parse_checkouts "$@"
 ms=$(milestone)
 K=$(checkout_of kernel)
 ART=$(cache_of kernel)/artifacts

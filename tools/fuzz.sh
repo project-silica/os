@@ -3,7 +3,6 @@
 # test.sh --deep calls this).
 #   fuzz.sh [--repo <repo>]... [--target <id|name>]... [--time <seconds>]
 #           [--unit-timeout <seconds>] [--list | --report]
-#           [--checkout <repo> <absolute-dir>]...
 # A fuzz target is a cargo-fuzz target of a libfuzzer-sys crate:
 #   <crate dir>/fuzz/Cargo.toml (depends on libfuzzer-sys) and
 #   <crate dir>/fuzz/fuzz_targets/<name>.rs, found up to four levels deep in
@@ -12,7 +11,7 @@
 #   or the bare name.
 # Each target is built and run for --time seconds (default $SILICA_FUZZ_TIME or
 # 60; the build is not part of it) with a hard limit of $SILICA_FUZZ_GRACE
-# (default 120) seconds more, inside the sandbox. Nothing is written inside a
+# (default 120) seconds more. Nothing is written inside a
 # checkout. Under target/fuzz/<repo>/<target>/:
 #   corpus/    grows from run to run; the checkout's fuzz/corpus/<name>, when
 #              present, is read as seed input
@@ -30,7 +29,6 @@
 # there are none), 1 on any crash or failure, 2 on a usage error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
-parse_checkouts "$@"; set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 repos=() targets=() secs=${SILICA_FUZZ_TIME:-60} unit=${SILICA_FUZZ_UNIT_TIMEOUT:-30} mode=run
 while [ $# -gt 0 ]; do
@@ -154,16 +152,16 @@ run_target() { # run_target <id> <repo> <fuzz dir> <name>
   host=$(cd "$fd" && rustc -vV 2>/dev/null | sed -n 's/^host: //p')
   san=${SILICA_FUZZ_SANITIZER:-address}
   # cargo-fuzz builds the instrumented binary (cargo-fuzz run would create
-  # artifact directories inside the read-only checkout); the binary is then run
+  # artifact directories inside the checkout); the binary is then run
   # directly, as libFuzzer's own command line.
   fz_build() { # fz_build <log>
-    (cd "$fd" && sandboxed "$cache" "$out" -- timeout -k 10 "${SILICA_FUZZ_BUILD_LIMIT:-1800}" \
+    (cd "$fd" && timeout -k 10 "${SILICA_FUZZ_BUILD_LIMIT:-1800}" \
       env CARGO="$W" CARGO_TARGET_DIR="$tdir" CARGO_TERM_COLOR=never RUST_BACKTRACE=1 \
       cargo-fuzz build --fuzz-dir "$fd" --target-dir "$tdir" ${host:+--target "$host"} -s "$san" "$name") </dev/null >"$1" 2>&1
   }
   fz_run() { # fz_run <hard limit> <log> <libFuzzer args...>
     local hard=$1 log=$2; shift 2
-    (cd "$fd" && sandboxed "$cache" "$out" -- timeout -k 10 "$hard" \
+    (cd "$fd" && timeout -k 10 "$hard" \
       env RUST_BACKTRACE=1 "$bin" "$@") </dev/null >"$log" 2>&1
   }
   # 1. build (not part of the time box)

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Benchmarks against the recorded Linux baseline (spec/TESTING.md section 4).
 #   bench.sh [--image <bench.img>] [--runs <n>] [--out <results.json>] [--previous <results.json>]
-#            [--checkout <repo> <absolute-dir>]...
-#   bench.sh --build-baseline [--force] [--runs <n>] [--smp <n>] [--mem <MiB>] [--checkout os <dir>]
+#   bench.sh --build-baseline [--force] [--runs <n>] [--smp <n>] [--mem <MiB>]
 #
 # Guests (ours and the Linux baseline image) boot through tools/qemu.sh and print
 #   BENCH <metric> <number> <unit>     one line per metric, then
@@ -52,8 +51,6 @@ blk_iops iops higher 1.1 le 5
 app_cold_start_ms ms lower 1 win 6
 nvme_iops iops higher 1.1 le 8'
 
-parse_checkouts "$@"
-set -- "${ARGS[@]+"${ARGS[@]}"}"
 mode=run image="" runs=3 out="" prev="" force=0 smp="" mem=""
 while [ $# -gt 0 ]; do
   case "$1" in

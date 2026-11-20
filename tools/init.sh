@@ -9,7 +9,7 @@ fail=0
 need() { echo "ERROR: init: $1 (fix: $2)"; fail=1; }
 later() { echo "SKIP: init: $1 (needed from M$2; fix: $3)"; }
 
-for t in git jq bwrap cargo rustup sha256sum flock size nm socat; do
+for t in git jq cargo rustup sha256sum size nm socat; do
   command -v "$t" >/dev/null 2>&1 || need "$t is not installed" "install $t"
 done
 tc=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$WS/kernel/rust-toolchain.toml" 2>/dev/null)

@@ -16,12 +16,12 @@ ARG RUST_CHANNEL=nightly-2026-10-01
 # llvm-tools: symbolization and size checks.
 ARG RUST_COMPONENTS=rust-src,miri,clippy,rustfmt,llvm-tools
 
-# bubblewrap: the sandbox every tool runs commands in. qemu-system-*, ovmf and
+# qemu-system-*, ovmf and
 # qemu-efi-aarch64: the emulators and their UEFI firmware. mtools: the FAT
 # images. python3 and python3-yaml: the workflow and schema checks.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       bubblewrap build-essential ca-certificates git jq mtools ovmf \
+       build-essential ca-certificates git jq mtools ovmf \
        python3 python3-yaml qemu-efi-aarch64 qemu-system-arm qemu-system-x86 \
        rustup socat \
     && rm -rf /var/lib/apt/lists/*

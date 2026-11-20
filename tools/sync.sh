@@ -14,14 +14,14 @@ case "${1:-}" in
   --update) [ $# = 1 ] && update=1 || die "usage: sync.sh [--update]" ;;
   *) die "usage: sync.sh [--update]" ;;
 esac
-net() { g -c protocol.allow=always "$@"; }
+net() { git -c protocol.allow=always "$@"; }
 fail=0
 for r in $(manifest_repos); do
   url=$(manifest_get "$r" url); pin=$(manifest_get "$r" commit); m=$(manifest_get "$r" milestone)
   dir=$WS/$r
   if [ -e "$dir/.git" ]; then
     if [ $update = 1 ]; then net -C "$dir" fetch --quiet "$url" 2>/dev/null || echo "SKIP: sync: cannot fetch $r (no network?)"; fi
-    if [ -n "$pin" ] && ! g -C "$dir" cat-file -e "$pin^{commit}" 2>/dev/null; then
+    if [ -n "$pin" ] && ! git -C "$dir" cat-file -e "$pin^{commit}" 2>/dev/null; then
       echo "ERROR: sync: $r lacks pinned commit $pin"; fail=1
     fi
     continue
@@ -31,7 +31,7 @@ for r in $(manifest_repos); do
   if [ -e "$dir" ] && { [ ! -d "$dir" ] || [ -n "$(ls -A "$dir" 2>/dev/null)" ]; }; then
     echo "ERROR: sync: $dir exists and is not a clone of $r; move it away"; fail=1; continue
   fi
-  if net clone --quiet --no-checkout "$url" "$dir" 2>/dev/null && g -C "$dir" checkout --quiet -B main "$pin"; then
+  if net clone --quiet --no-checkout "$url" "$dir" 2>/dev/null && git -C "$dir" checkout --quiet -B main "$pin"; then
     echo "sync: cloned $r at ${pin:0:12}"
   else
     rm -rf "$dir"; echo "ERROR: sync: cannot clone $r from $url"; fail=1

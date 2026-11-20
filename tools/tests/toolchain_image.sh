@@ -44,7 +44,7 @@ commit = "x"
 EOF
 cp -r "$SRC/lib" "$SRC/toolchain-image.sh" "$OS/tools/"
 
-PKGS=(bubblewrap ca-certificates git jq mtools ovmf python3 python3-yaml qemu-efi-aarch64 qemu-system-arm qemu-system-x86 rustup socat)
+PKGS=(ca-certificates git jq mtools ovmf python3 python3-yaml qemu-efi-aarch64 qemu-system-arm qemu-system-x86 rustup socat)
 write_containerfile() { # write_containerfile <path> <channel> <components> <packages...>
   local path=$1 ch=$2 comps=$3; shift 3
   cat >"$path" <<EOF
@@ -227,22 +227,9 @@ run key idl; [ $RC = 1 ] && [ "$(errs)" = 1 ] && printf '%s\n' "$OUT" | grep -q 
 run key nosuch; [ $RC != 0 ] && [ "$(errs)" -ge 1 ] || bad "key of an unknown repository: exit $RC: $OUT"
 w "$IDL" Cargo.lock 'version = 3'
 
-# --checkout: the key follows the tree it is given
-(cd "$KERNEL" && git init -q . && git add -A && git commit -qm base) >/dev/null 2>&1 || { echo "ERROR: toolchain-image-test: cannot create the fake kernel repository"; exit 2; }
-git -C "$KERNEL" worktree add -q -b topic "$FX/kernel-wt" >/dev/null 2>&1 || { echo "ERROR: toolchain-image-test: cannot create a worktree"; exit 2; }
-key kernel; K0=$OUT
-run key kernel --checkout kernel "$FX/kernel-wt"; [ $RC = 0 ] && [ "$OUT" = "$K0" ] || bad "--checkout of a clean worktree: key differs from the canonical clone: exit $RC: $OUT vs $K0"
-w "$FX/kernel-wt" Cargo.lock 'version = 3 # topic'
-run key kernel --checkout kernel "$FX/kernel-wt"; [ $RC = 0 ] && [ "$OUT" != "$K0" ] || bad "--checkout: the key ignores the worktree's changed lock file: exit $RC: $OUT"
-run key kernel; [ "$OUT" = "$K0" ] || bad "the canonical clone's key moved with a worktree's change: $OUT vs $K0"
-run key kernel --checkout kernel "relative/dir"; [ $RC = 2 ] && [ "$(errs)" = 1 ] || bad "relative --checkout: want exit 2 and 1 ERROR, got exit $RC: $OUT"
-# the check reads the pins of the checkouts it is given
-write_toolchain "$FX/kernel-wt" nightly-2026-11-01 '"rust-src", "miri", "clippy", "rustfmt"'
-run check --checkout kernel "$FX/kernel-wt"; [ $RC = 1 ] && printf '%s\n' "$OUT" | grep -q 'differs.*kernel/rust-toolchain.toml' || bad "check --checkout: the pin of the worktree is not read: exit $RC: $OUT"
-run check; [ $RC = 0 ] || bad "check: the canonical pin is clean but the check failed: exit $RC: $OUT"
 
 # ---- 5. usage ------------------------------------------------------------------
-for args in "" "bogus" "check extra" "tag extra" "key" "key a b" "restore-key" "--checkout"; do
+for args in "" "bogus" "check extra" "tag extra" "key" "key a b" "restore-key"; do
   # shellcheck disable=SC2086
   run $args; [ $RC = 2 ] && [ "$(errs)" = 1 ] || bad "usage '$args': want exit 2 and 1 ERROR line, got exit $RC: $OUT"
 done
@@ -252,11 +239,11 @@ run bogus; printf '%s\n' "$OUT" | grep -q bogus || bad "unknown argument is not 
 REAL_OS=$(cd "$SRC/.." && pwd -P)
 if [ -f "$REAL_OS/tools/image/Containerfile" ]; then
   RUN_REAL() { OUT=$(cd "$FX" && env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" "$SRC/toolchain-image.sh" "$@" 2>&1); RC=$?; }
-  RUN_REAL check --checkout os "$REAL_OS"
+  RUN_REAL check
   [ $RC = 0 ] && printf '%s\n' "$OUT" | grep -qx 'TOOLCHAIN-IMAGE: OK' || bad "real repositories: check: exit $RC: $(printf '%s\n' "$OUT" | head -n 5 | tr '\n' ' ')"
-  RUN_REAL key os --checkout os "$REAL_OS"
+  RUN_REAL key os
   [ $RC = 0 ] && printf '%s\n' "$OUT" | grep -Eq '^silica-os-[A-Za-z0-9_]+-[0-9a-f]{12}-[0-9a-f]{16}$' || bad "real os: key: exit $RC: $OUT"
-  RUN_REAL tag --checkout os "$REAL_OS"
+  RUN_REAL tag
   [ $RC = 0 ] && printf '%s\n' "$OUT" | grep -Eq '^[0-9a-f]{12}$' || bad "real os: tag: exit $RC: $OUT"
   # the real definition pins exactly the channel of os/rust-toolchain.toml and names QEMU and both firmwares
   want=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$REAL_OS/rust-toolchain.toml" | head -n 1)

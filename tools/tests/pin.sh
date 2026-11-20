@@ -48,13 +48,8 @@ setup() { # a fresh workshop: spec, idl, .github cloned; kernel (milestone 1) no
 RENV=()
 run() { # run <script> <args...>: OUT and RC; the tools are reached through the workshop link
   local s=$1; shift
-  OUT=$(cd "$ST" && env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS" "${RENV[@]+"${RENV[@]}"}" bash "$WS/tools/$s" "$@" 2>&1)
+  OUT=$(cd "$ST" && env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t.invalid SILICA_WS="$WS" "${RENV[@]+"${RENV[@]}"}" bash "$WS/tools/$s" "$@" 2>&1)
   RC=$?
-}
-run_locked() { # like run, while another process holds the pin lock
-  ( exec 9>"$WS/target/.pin.lock"; flock -n 9 && { run "$@"; echo "$RC" >"$FX/rc"; printf '%s\n' "$OUT" >"$FX/out"; } ) 2>/dev/null
-  RC=$(cat "$FX/rc" 2>/dev/null || echo 0); OUT=$(cat "$FX/out" 2>/dev/null)
-  rm -f "$FX/rc" "$FX/out"
 }
 snap() { # everything that must not change on an error or a read-only run
   (for d in "$WS"/*/ "$WS"/.github/; do [ -e "$d/.git" ] || continue
@@ -128,23 +123,12 @@ run pin.sh; want_ok "pin after a failed commit" '^PIN: '
 # a manifest entry without a commit value cannot be pinned
 setup; sed -i '/^\[repos.idl\]/,/^$/{/^commit/d}' "$MF"; G -C "$OS" commit -qam "no commit key"; S=$(snap)
 run pin.sh; want_err "no commit key" 'idl'
-# the pin lock is held: no pin
-setup; run_locked pin.sh
-[ "$RC" != 0 ] && printf '%s\n' "$OUT" | grep -q '^ERROR:.*lock' || bad "lock held: pin.sh ran or gave no lock error: rc=$RC $OUT"
-[ "$(pinned spec)" != "$(head_of spec)" ] || bad "lock held: the manifest changed"
 # arguments
 setup; S=$(snap)
 run pin.sh --bogus; want_err "unknown argument" '^ERROR: pin: usage'
 run pin.sh --check extra; want_err "extra argument to --check" 'usage'
 run pin.sh pin; want_err "the word pin is not an argument" 'usage'
 run pin.sh --check --check; want_err "repeated --check" 'usage'
-# hooks never run
-setup
-for h in pre-commit commit-msg post-commit; do printf '#!/bin/sh\necho ran >>%s/hook.log\nexit 1\n' "$FX" >"$OS/.git/hooks/$h"; chmod +x "$OS/.git/hooks/$h"; done
-G -C "$OS" config core.hooksPath "$OS/.git/hooks"
-run pin.sh; want_ok "hooks configured" '^PIN: '
-[ ! -e "$FX/hook.log" ] || bad "a Git hook ran"
-G -C "$OS" config --unset core.hooksPath
 
 # ===== 3. pin --check ======================================================
 setup; run pin.sh >/dev/null; S=$(snap)

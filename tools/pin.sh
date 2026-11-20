@@ -15,7 +15,7 @@ OS=$(realdir "$TOOLS/..")
 BOOT=$WS/bootstrap.pins
 fail=0
 boot_want() { # the revision bootstrap.pins should name for <repo>
-  if [ "$1" = os ]; then g -C "$OS" rev-parse -q --verify HEAD; else manifest_get "$1" commit; fi
+  if [ "$1" = os ]; then git -C "$OS" rev-parse -q --verify HEAD; else manifest_get "$1" commit; fi
 }
 boot_repos() { # repositories that have a line in bootstrap.pins
   awk '$2 ~ /^[0-9a-f]{40}$/ { print $1 }' "$BOOT" 2>/dev/null
@@ -46,11 +46,11 @@ if [ "$mode" = --check ]; then
       [ "$(manifest_get "$r" milestone)" -gt "$(milestone)" ] 2>/dev/null && continue
       echo "ERROR: pin: $r is not cloned"; fail=1; continue
     fi
-    head=$(g -C "$d" rev-parse -q --verify HEAD)
+    head=$(git -C "$d" rev-parse -q --verify HEAD)
     [ "$head" = "$pin" ] || { echo "ERROR: pin: $r is at ${head:0:12}, pinned ${pin:0:12}"; fail=1; }
-    [ -z "$(g -C "$d" status --porcelain --untracked-files=all)" ] || { echo "ERROR: pin: $r has modified or untracked files"; fail=1; }
+    [ -z "$(git -C "$d" status --porcelain --untracked-files=all)" ] || { echo "ERROR: pin: $r has modified or untracked files"; fail=1; }
   done
-  [ -z "$(g -C "$OS" status --porcelain --untracked-files=all)" ] || { echo "ERROR: pin: os has modified or untracked files"; fail=1; }
+  [ -z "$(git -C "$OS" status --porcelain --untracked-files=all)" ] || { echo "ERROR: pin: os has modified or untracked files"; fail=1; }
   for r in $(boot_repos); do
     want=$(boot_want "$r"); [ -n "$want" ] || continue
     have=$(awk -v r="$r" '$1 == r { print $2 }' "$BOOT")
@@ -59,14 +59,12 @@ if [ "$mode" = --check ]; then
   [ $fail = 0 ] && echo "PIN: CHECK OK"
   exit $fail
 fi
-exec 9>"$OUTBASE/.pin.lock" || die "cannot open pin lock"
-flock -n 9 || die "pin lock is held by another operation"
-[ -z "$(g -C "$OS" status --porcelain -- manifest.toml)" ] || die "os/manifest.toml has uncommitted changes"
+[ -z "$(git -C "$OS" status --porcelain -- manifest.toml)" ] || die "os/manifest.toml has uncommitted changes"
 new=$(cat "$MANIFEST")
 changed=()
 for r in $(manifest_repos); do
   d=$WS/$r; [ -e "$d/.git" ] || continue
-  head=$(g -C "$d" rev-parse -q --verify refs/heads/main) || { echo "ERROR: pin: $r has no main"; fail=1; continue; }
+  head=$(git -C "$d" rev-parse -q --verify refs/heads/main) || { echo "ERROR: pin: $r has no main"; fail=1; continue; }
   [ "$(manifest_get "$r" commit)" = "$head" ] && continue
   [ -n "$(manifest_get "$r" commit)" ] || { echo "ERROR: pin: $r has no commit value in the manifest"; fail=1; continue; }
   new=$(awk -v r="$r" -v h="$head" '
@@ -78,12 +76,12 @@ done
 [ ${#changed[@]} -gt 0 ] || { echo "PIN: unchanged"; sync_boot; exit 0; }
 saved=$(mktemp "$OUTBASE/runs/pin-manifest.XXXXXX") || die "cannot save the manifest"
 cat "$MANIFEST" >"$saved"
-undo() { cat "$saved" >"$MANIFEST"; g -C "$OS" reset -q -- manifest.toml 2>/dev/null; rm -f "${saved:?}"; }
+undo() { cat "$saved" >"$MANIFEST"; git -C "$OS" reset -q -- manifest.toml 2>/dev/null; rm -f "${saved:?}"; }
 printf '%s\n' "$new" >"$MANIFEST"
 for r in "${changed[@]}"; do
-  [ "$(manifest_get "$r" commit)" = "$(g -C "$WS/$r" rev-parse refs/heads/main)" ] || { undo; die "cannot set the pin of $r in the manifest"; }
+  [ "$(manifest_get "$r" commit)" = "$(git -C "$WS/$r" rev-parse refs/heads/main)" ] || { undo; die "cannot set the pin of $r in the manifest"; }
 done
-g -C "$OS" add manifest.toml && g -C "$OS" commit -q -m "Pin ${changed[*]}" -- manifest.toml ||
+git -C "$OS" add manifest.toml && git -C "$OS" commit -q -m "Pin ${changed[*]}" -- manifest.toml ||
   { undo; die "commit in os failed; manifest unchanged"; }
 rm -f "${saved:?}"
 echo "PIN: ${changed[*]}"

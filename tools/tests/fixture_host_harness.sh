@@ -25,14 +25,6 @@ mkdir -p "$FX/bin" "$OS/tools" "$K/kernel-core/src"
 echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/test.sh" "$SRC/size.sh" "$SRC/qemu.sh" "$OS/tools/"
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"
-cat >"$FX/bin/sandbox.sh" <<'EOF'
-#!/bin/bash
-while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
-shift
-exec "$@"
-EOF
-printf '#!/bin/bash\nexit 0\n' >"$FX/bin/bwrap"
-chmod +x "$FX/bin/sandbox.sh" "$FX/bin/bwrap"
 cp "$TOOLCHAIN" "$K/rust-toolchain.toml"
 cat >"$K/Cargo.toml" <<'EOF'
 [workspace]
@@ -89,7 +81,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.invalid GIT_COMMITTER_NAME=t GIT_C
   { echo "ERROR: host-fixture: cannot create the fake kernel repository"; exit 2; }
 run() {
   OUT=$(cd "$FX" && env -i PATH="$FX/bin:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" RUSTUP_HOME="$RUSTUP_HOME" \
-    SILICA_WS="$WS" SILICA_SANDBOX="$FX/bin/sandbox.sh" bash "$OS/tools/test.sh" --full --repo kernel 2>&1)
+    SILICA_WS="$WS" bash "$OS/tools/test.sh" --full --repo kernel 2>&1)
   RC=$?
 }
 has() { printf '%s\n' "$OUT" | grep -qE -- "$1"; }

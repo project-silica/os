@@ -26,14 +26,6 @@ cp -r "$SRC/lib" "$SRC/fuzz.sh" "$SRC/test.sh" "$SRC/size.sh" "$SRC/qemu.sh" "$O
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"
 : >"$RUNS"; : >"$BUILDS"
 
-# Pass-through sandbox; shims for rustc and cargo.
-cat >"$BIN/sandbox.sh" <<'EOF'
-#!/bin/bash
-while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
-shift
-exec "$@"
-EOF
-printf '#!/bin/bash\nexit 0\n' >"$BIN/bwrap"
 cat >"$BIN/rustc" <<'EOF'
 #!/bin/bash
 case "$*" in
@@ -130,13 +122,13 @@ ENVX=()
 run() {
   local t0=$SECONDS
   OUT=$(cd "$FX" && env -i PATH="$BIN:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS" \
-    SILICA_SANDBOX="$BIN/sandbox.sh" FAKE_FX="$FX" "${ENVX[@]+"${ENVX[@]}"}" bash "$OS/tools/fuzz.sh" "$@" 2>&1)
+    FAKE_FX="$FX" "${ENVX[@]+"${ENVX[@]}"}" bash "$OS/tools/fuzz.sh" "$@" 2>&1)
   RC=$?; SECS=$((SECONDS - t0))
 }
 run_test() { # run_test <args...>: test.sh in the fake workshop
   local t0=$SECONDS
   OUT=$(cd "$FX" && env -i PATH="$BIN:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS" \
-    SILICA_SANDBOX="$BIN/sandbox.sh" FAKE_FX="$FX" "${ENVX[@]+"${ENVX[@]}"}" bash "$OS/tools/test.sh" "$@" 2>&1)
+    FAKE_FX="$FX" "${ENVX[@]+"${ENVX[@]}"}" bash "$OS/tools/test.sh" "$@" 2>&1)
   RC=$?; SECS=$((SECONDS - t0))
 }
 nerr() { printf '%s\n' "$OUT" | grep -c '^ERROR:'; }

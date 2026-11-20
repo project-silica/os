@@ -174,26 +174,13 @@ ENVX=(FAKE_NOFILE="kernel:2"); run; ENVX=()
 [ $RC = 1 ] && [ "$(errs)" = 1 ] && printf '%s\n' "$OUT" | grep -q 'kernel.elf' || bad "missing artifact: want exit 1 and one ERROR naming kernel.elf, got exit $RC: $OUT"
 
 # ---- 7. usage errors: exit 2, one ERROR line, nothing built ---------------------------------
-for args in "--bogus" "extra" "--checkout kernel" "--checkout kernel relative/dir" "--checkout kernel $FX/missing"; do
+for args in "--bogus" "extra"; do
   # shellcheck disable=SC2086
   run $args
   [ $RC = 2 ] || bad "usage '$args': exit $RC, want 2: $OUT"
   printf '%s\n' "$OUT" | grep -q '^ERROR: repro: ' || bad "usage '$args': no ERROR: repro: line: $OUT"
   [ ! -s "$CALLS" ] || bad "usage '$args': something was built"
 done
-
-# ---- 8. --checkout names the checkout the copies come from ---------------------------------------
-OS2=$FX/os-other
-if git -C "$OS" worktree add -q "$OS2" -b other 2>/dev/null; then
-  echo "fn other_tool() {}" >"$OS2/tool.rs"
-  : >"$FX/seen.log"
-  run --checkout os "$OS2"
-  [ $RC = 0 ] || bad "--checkout os: exit $RC: $OUT"
-  grep -q 'tool: fn other_tool() {}' "$FX/seen.log" || bad "--checkout os: the build did not use the named checkout"
-  grep -q 'tool: fn tool() {}' "$FX/seen.log" && bad "--checkout os: the build used the default os checkout"
-else
-  bad "cannot create a second os worktree for the --checkout case"
-fi
 
 # ---- 9. build_loader: reproducible PE header, caller's flags kept -----------------------------------
 cp "$SRC/lib/build.sh" "$OS/tools/lib/build.sh"

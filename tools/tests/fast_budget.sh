@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
 # Budget test for tools/test.sh --fast (component A02): the fast tier stays
 # under a minute, which is why the tool self-tests run only in --full and --deep.
-# Runs this tool suite's test.sh --fast twice on the workshop, with the os
-# checkout that holds this test (other overrides pass through
-# SILICA_CHECKOUTS when the environment carries them), and fails if the second run's
+# Runs this tool suite's test.sh --fast twice on the workshop and fails if the second run's
 # RESULT time is 60 or more, or if --fast prints an os.tools suite line.
 # The first run only warms the build caches; its time is not judged.
 # Full output of each run goes to target/logs (or $SILICA_RUN).
 set -uo pipefail
 SRC=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd -P)
-OSDIR=$(cd "$SRC/.." && pwd -P)
 BASE=${SILICA_RUN:-${TMPDIR:-/tmp}}; mkdir -p "$BASE"
 OUTDIR=$(mktemp -d "$BASE/fastbudget.XXXX") || { echo "ERROR: fast-budget: no scratch directory"; exit 2; }
 fails=0
 bad() { echo "ERROR: fast-budget: $1"; fails=$((fails + 1)); }
 
 for n in 1 2; do
-  bash "$SRC/test.sh" --fast --checkout os "$OSDIR" >"$OUTDIR/run$n.log" 2>&1
+  bash "$SRC/test.sh" --fast >"$OUTDIR/run$n.log" 2>&1
   rc=$?
   if [ "$rc" != 0 ]; then bad "run $n exited $rc: $(grep -m1 ^ERROR "$OUTDIR/run$n.log")"; fi
 done
