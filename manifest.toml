@@ -1,10 +1,5 @@
 # Pinned component revisions for the system image.
 
-[repos.spec]
-url = "https://github.com/project-silica/spec"
-milestone = 0
-commit = "edfc479523c3edb3c4affb5c31d7dcd58669c241"
-
 [repos.idl]
 url = "https://github.com/project-silica/idl"
 milestone = 0
