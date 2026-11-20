@@ -55,7 +55,7 @@ rs_lines() { # non-blank, non-comment lines of Rust under the given paths, tests
 }
 if [ -d "$K" ]; then
   src=()
-  for d in "$K/abi/src" "$K/kernel-core/src" "$K/kernel/src"; do [ -d "$d" ] && src+=("$d"); done
+  for d in "$K/abi/src" "$K/formats/src" "$K/kernel-core/src" "$K/kernel/src"; do [ -d "$d" ] && src+=("$d"); done
   check "kernel source lines (no tests, no arch)" "$(rs_lines "${src[@]}")" 12000 1
   for a in "$K"/kernel/arch/*/; do
     [ -d "$a" ] || continue
