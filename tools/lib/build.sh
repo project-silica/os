@@ -12,6 +12,17 @@
 
 BUILD_STD=(-Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem)
 
+# strip_debug <in> <out> <log>: the copy that goes into the image. The file
+# with debug information stays beside it for symbolize.sh.
+strip_debug() {
+  local t
+  for t in llvm-objcopy objcopy; do
+    command -v "$t" >/dev/null 2>&1 || continue
+    "$t" --strip-debug "$1" "$2" >>"$3" 2>&1; return
+  done
+  echo "error: neither llvm-objcopy nor objcopy is installed" >>"$3"; return 1
+}
+
 art_dir() { local d; d=$(cache_of kernel)/artifacts/$1; mkdir -p "$d"; echo "$d"; }
 
 build_kernel() {
@@ -21,6 +32,7 @@ build_kernel() {
   cargo_run kernel "$log" build --release -p kernel --target "$dir/targets/$arch-silica.json" \
     -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
   cp "$(cache_of kernel)/target/$arch-silica/release/kernel" "$out/kernel.elf" || return 1
+  strip_debug "$out/kernel.elf" "$out/kernel.stripped" "$log" || return 1
   echo "$out/kernel.elf"
 }
 
@@ -30,7 +42,8 @@ build_root() { # the root task the kernel starts: the in-OS test program until t
   [ -f "$dir/targets/$arch-silica-user.json" ] || { echo "no target spec targets/$arch-silica-user.json" >"$log"; return 1; }
   cargo_run kernel "$log" build --release -p roottest --target "$dir/targets/$arch-silica-user.json" \
     -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
-  cp "$(cache_of kernel)/target/$arch-silica-user/release/roottest" "$out/root.elf" || return 1
+  cp "$(cache_of kernel)/target/$arch-silica-user/release/roottest" "$out/root.debug.elf" || return 1
+  strip_debug "$out/root.debug.elf" "$out/root.elf" "$log" || return 1
   echo "$out/root.elf"
 }
 
@@ -72,7 +85,7 @@ build_image() {
     extra=("SILICA/CMDLINE.TXT=$(dirname "$out")/CMDLINE.TXT")
   fi
   cp "$t" "$(dirname "$out")/silica-image" || return 1
-  "$(dirname "$out")/silica-image" --out "$out" "EFI/BOOT/BOOTX64.EFI=$l" "SILICA/KERNEL.ELF=$k" \
+  "$(dirname "$out")/silica-image" --out "$out" "EFI/BOOT/BOOTX64.EFI=$l" "SILICA/KERNEL.ELF=${k%.elf}.stripped" \
     --ramdisk-entry "root=$r" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
   echo "$out"
 }

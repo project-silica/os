@@ -84,6 +84,18 @@ suite_inos() { # in-OS tests on one architecture; --fast boots boot_ok only
   fi
 }
 
+suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
+  local c m
+  for c in 1 2 8 64; do
+    for m in 256 16384; do
+      INOS_QEMU=(--smp "$c" --mem "$m"); INOS_LABEL="boot_ok.smp$c.mem$m"
+      run_inos x86_64 inos.x86_64 boot_ok
+    done
+  done
+  INOS_QEMU=(); INOS_LABEL=""
+  run_panic x86_64 inos.x86_64
+}
+
 suite_required_arch() { # an architecture required by milestone that cannot boot is an error
   local a=$1
   case "$a" in
@@ -215,6 +227,7 @@ else
   if { in_scope kernel || in_scope os; } && [ -f "$(checkout_of kernel)/targets/x86_64-silica.json" ]; then
     suite_builds
     suite_inos x86_64
+    [ "$tier" != fast ] && suite_matrix
   fi
   [ "$tier" != fast ] && in_scope os && suite_tools
   suite_size

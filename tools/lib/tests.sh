@@ -117,16 +117,26 @@ run_named() {
 # through the debug-exit device. A name that is empty or has a character
 # outside A-Za-z0-9_.:- never boots. A missing line, a line for another name,
 # both PASS and FAIL, a PASS with a failing exit status, or a timeout is a failure.
+# INOS_QEMU (array) adds qemu.sh arguments (--smp, --mem) and INOS_LABEL names
+# the result, for the boot matrix.
+INOS_QEMU=() INOS_LABEL=""
 run_inos() {
-  local arch=$1 suite=$2 name=${3-boot_ok} log img serial cmdline="" rc
+  local arch=$1 suite=$2 name=${3-boot_ok} log img serial cmdline="" rc label
   case "$name" in ''|*[!A-Za-z0-9_.:-]*) record fail "$suite" "$name" "malformed in-OS test name"; return 3 ;; esac
   [ "$name" = boot_ok ] || cmdline="test=$name"
-  log=$(logfile "$suite" "build.$name")
-  img=$(build_image "$arch" "$log" "$cmdline") || { record fail "$suite" "$name" "image build failed (log: $log)"; return 1; }
-  serial=$(logfile "$suite" "$name")
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  label=${INOS_LABEL:-$name}
+  log=$(logfile "$suite" "build.$label")
+  img=$(build_image "$arch" "$log" "$cmdline") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$label")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    "${INOS_QEMU[@]+"${INOS_QEMU[@]}"}" >"$serial.qemu" 2>&1
   rc=$?
   local lines npass nfail nother why
+  if [ -n "$INOS_LABEL" ]; then
+    lines=$(tr -d '\r' <"$serial" 2>/dev/null)
+    if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$lines"; then record pass "$suite" "$label"; return 0; fi
+    record fail "$suite" "$label" "no BOOT OK or bad exit status $rc (serial: $serial)"; return 1
+  fi
   lines=$(tr -d '\r' <"$serial" 2>/dev/null)
   if [ "$name" = boot_ok ]; then
     if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$lines"; then record pass "$suite" "$name"; return 0; fi
@@ -151,4 +161,29 @@ run_inos() {
   elif [ "$npass" = 1 ]; then record fail "$suite" "$name" "TEST $name PASS but bad exit status $rc (serial: $serial)"
   else record fail "$suite" "$name" "no TEST $name PASS/FAIL line, exit status $rc (serial: $serial)"; fi
   return 1
+}
+
+# run_panic <arch> <suite>: the kernel is asked to panic (panic=test). The
+# boot must fail through the debug-exit device, the serial log must carry the
+# panic message and a backtrace, and symbolize.sh must decode the frame of the
+# function that panicked to a function name, a source file and a line.
+run_panic() {
+  local arch=$1 suite=$2 log img serial rc sym
+  log=$(logfile "$suite" build.panic_backtrace)
+  img=$(build_image "$arch" "$log" "panic=test") || { record fail "$suite" panic_backtrace "image build failed (log: $log)"; return 1; }
+  serial=$(logfile "$suite" panic_backtrace)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  rc=$?
+  sym=$serial.symbolized
+  "$TOOLS/symbolize.sh" --arch "$arch" "$serial" >"$sym" 2>&1
+  if [ $rc != 1 ] || ! grep -q 'guest exit code 17' "$serial.qemu"; then
+    record fail "$suite" panic_backtrace "a panicking kernel did not leave with the failure code (exit status $rc)"; return 1
+  fi
+  if ! grep -aq '^PANIC: deliberate panic' "$serial"; then
+    record fail "$suite" panic_backtrace "no panic message on the serial port (serial: $serial)"; return 1
+  fi
+  if ! grep -aqE 'deliberate_panic at .+\.rs:[1-9][0-9]*' "$sym"; then
+    record fail "$suite" panic_backtrace "the backtrace does not decode to function, file and line (see $sym)"; return 1
+  fi
+  record pass "$suite" panic_backtrace
 }
