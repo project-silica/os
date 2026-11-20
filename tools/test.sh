@@ -73,14 +73,32 @@ suite_builds() { # the kernel for all three targets and the UEFI loader
 }
 
 suite_inos() { # in-OS tests on one architecture; --fast boots boot_ok only
-  local a=$1 t manifest
+  local a=$1 t opts o manifest
   manifest="$(checkout_of kernel)/tests/inos-$a.txt"
   run_inos "$a" "inos.$a" boot_ok
   if [ "$tier" != fast ] && [ -f "$manifest" ]; then
-    while IFS= read -r t; do
+    # One test per line: its name, then optionally the machine it needs
+    # (smp=<processors> mem=<MiB>).
+    while read -r t opts; do
       case "$t" in ""|"#"*|boot_ok) continue ;; esac
+      INOS_QEMU=()
+      for o in $opts; do
+        case "$o" in
+          smp=*) INOS_QEMU+=(--smp "${o#smp=}") ;;
+          mem=*) INOS_QEMU+=(--mem "${o#mem=}") ;;
+          *) record fail "inos.$a" "$t" "unknown option $o in $manifest"; continue 2 ;;
+        esac
+      done
       run_inos "$a" "inos.$a" "$t"
+      # A test that names no machine runs on one processor above and on
+      # four here: the same paths with other processors present.
+      if [ -z "$opts" ]; then
+        INOS_QEMU=(--smp 4); INOS_LABEL="$t.smp4"
+        run_inos "$a" "inos.$a" "$t"
+        INOS_LABEL=""
+      fi
     done <"$manifest"
+    INOS_QEMU=()
   fi
 }
 

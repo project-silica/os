@@ -117,8 +117,8 @@ run_named() {
 # through the debug-exit device. A name that is empty or has a character
 # outside A-Za-z0-9_.:- never boots. A missing line, a line for another name,
 # both PASS and FAIL, a PASS with a failing exit status, or a timeout is a failure.
-# INOS_QEMU (array) adds qemu.sh arguments (--smp, --mem) and INOS_LABEL names
-# the result, for the boot matrix.
+# INOS_QEMU (array) adds qemu.sh arguments (--smp, --mem); INOS_LABEL, when
+# set, is the name the result is recorded under (the same test on another machine).
 INOS_QEMU=() INOS_LABEL=""
 run_inos() {
   local arch=$1 suite=$2 name=${3-boot_ok} log img serial cmdline="" rc label
@@ -132,34 +132,29 @@ run_inos() {
     "${INOS_QEMU[@]+"${INOS_QEMU[@]}"}" >"$serial.qemu" 2>&1
   rc=$?
   local lines npass nfail nother why
-  if [ -n "$INOS_LABEL" ]; then
-    lines=$(tr -d '\r' <"$serial" 2>/dev/null)
-    if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$lines"; then record pass "$suite" "$label"; return 0; fi
-    record fail "$suite" "$label" "no BOOT OK or bad exit status $rc (serial: $serial)"; return 1
-  fi
   lines=$(tr -d '\r' <"$serial" 2>/dev/null)
   if [ "$name" = boot_ok ]; then
-    if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$lines"; then record pass "$suite" "$name"; return 0; fi
+    if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$lines"; then record pass "$suite" "$label"; return 0; fi
   else
     npass=$(grep -cxF "TEST $name PASS" <<<"$lines")
     nfail=$(grep -cE "^TEST ${name//./\\.} FAIL( .*)?\$" <<<"$lines")
     nother=$(grep -E '^TEST ' <<<"$lines" | grep -vcE "^TEST ${name//./\\.} (PASS|FAIL( .*)?)\$")
-    if [ $rc = 0 ] && [ "$npass" = 1 ] && [ "$nfail" = 0 ] && [ "$nother" = 0 ]; then record pass "$suite" "$name"; return 0; fi
+    if [ $rc = 0 ] && [ "$npass" = 1 ] && [ "$nfail" = 0 ] && [ "$nother" = 0 ]; then record pass "$suite" "$label"; return 0; fi
   fi
   # The log of a failed boot, decoded against the kernel ELF just booted.
   [ -x "$TOOLS/symbolize.sh" ] && "$TOOLS/symbolize.sh" --arch "$arch" "$serial" >"$serial.symbolized" 2>&1
-  if [ $rc = 124 ]; then record fail "$suite" "$name" "timeout"; return 1; fi
+  if [ $rc = 124 ]; then record fail "$suite" "$label" "timeout (serial: $serial)"; return 1; fi
   if [ "$name" = boot_ok ]; then
-    record fail "$suite" "$name" "no BOOT OK or bad exit status $rc (serial: $serial)"; return 1
+    record fail "$suite" "$label" "no BOOT OK or bad exit status $rc (serial: $serial)"; return 1
   fi
   if [ "$nfail" -gt 0 ]; then
     why=$(grep -m1 -E "^TEST ${name//./\\.} FAIL" <<<"$lines" | sed "s/^TEST [^ ]* FAIL *//" | cut -c1-140)
     [ "$npass" = 0 ] && [ "$nfail" = 1 ] || why="both PASS and FAIL lines or repeated: $why"
-    record fail "$suite" "$name" "${why:-failed} (serial: $serial)"
-  elif [ "$nother" -gt 0 ]; then record fail "$suite" "$name" "TEST line for another test (serial: $serial)"
-  elif [ "$npass" -gt 1 ]; then record fail "$suite" "$name" "TEST $name PASS printed $npass times (serial: $serial)"
-  elif [ "$npass" = 1 ]; then record fail "$suite" "$name" "TEST $name PASS but bad exit status $rc (serial: $serial)"
-  else record fail "$suite" "$name" "no TEST $name PASS/FAIL line, exit status $rc (serial: $serial)"; fi
+    record fail "$suite" "$label" "${why:-failed} (serial: $serial)"
+  elif [ "$nother" -gt 0 ]; then record fail "$suite" "$label" "TEST line for another test (serial: $serial)"
+  elif [ "$npass" -gt 1 ]; then record fail "$suite" "$label" "TEST $name PASS printed $npass times (serial: $serial)"
+  elif [ "$npass" = 1 ]; then record fail "$suite" "$label" "TEST $name PASS but bad exit status $rc (serial: $serial)"
+  else record fail "$suite" "$label" "no TEST $name PASS/FAIL line, exit status $rc (serial: $serial)"; fi
   return 1
 }
 
