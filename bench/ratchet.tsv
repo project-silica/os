@@ -1,0 +1,11 @@
+# Best result per metric (tools/bench.sh --update-ratchet). vs-linux: ours/linux for
+# lower-is-better metrics, linux/ours otherwise; value: the metric itself.
+ipc_roundtrip	0.261905	vs-linux
+ctx_switch	0.475904	vs-linux
+boot_userspace	0.752609	vs-linux
+timer_overshoot_p99	0.292102	vs-linux
+page_fault	0.933105	vs-linux
+null_syscall	0.8125	vs-linux
+ipc_roundtrip_p99	0.272583	vs-linux
+ctx_switch_p99	0.472934	vs-linux
+timer_overshoot	0.166747	vs-linux

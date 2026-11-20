@@ -2,15 +2,20 @@
 # Headless QEMU boot (component A04).
 #   qemu.sh --image <disk.img> [--arch x86_64] [--serial <file>] [--timeout <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
+#           [--pin <host cpu list>] [--stamp <file>]
+# --pin runs the emulator on the given host processors (taskset), for
+# benchmarks. --stamp writes one line per serial line, "<host time in seconds
+# with microseconds> <text>", after a first line "<time> QEMU START", so boot
+# times are measured by the host.
 # Serial goes to a file; a hard timeout kills the guest. Exit status: 0 when
 # the guest wrote the success code to the debug-exit device, 1 for any other
 # exit code, 124 on timeout, 2 on a usage or setup error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
-arch=x86_64 image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256
+arch=x86_64 image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -22,6 +27,8 @@ while [ $# -gt 0 ]; do
     --screendump-after) shot_after=$2; shift 2 ;;
     --smp) smp=$2; shift 2 ;;
     --mem) mem=$2; shift 2 ;;
+    --pin) pin=$2; shift 2 ;;
+    --stamp) stamp=$2; shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
 done
@@ -52,7 +59,7 @@ cp "$vars" "$RUN/vars.fd"
 # The monitor socket is addressed relative to $RUN (QEMU and socat run there):
 # a unix socket path is limited to about 100 bytes and deep run directories exceed it.
 mon=monitor.sock
-for v in image serial shot; do # the guest runs in $RUN, so every other path must be absolute
+for v in image serial shot stamp; do # the guest runs in $RUN, so every other path must be absolute
   case "${!v}" in ''|/*) ;; *) printf -v "$v" '%s' "$PWD/${!v}" ;; esac
 done
 case "$arch" in
@@ -71,10 +78,23 @@ command -v "$bin" >/dev/null || die "$bin is not installed (run tools/init.sh)"
 
 vga=(-vga none); [ -n "$shot" ] && vga=(-vga std)
 : >"$serial"
-( cd "$RUN" && TMPDIR=$RUN exec "$bin" -nodefaults -no-reboot -display none "${accel[@]}" -smp "$smp" -m "$mem" \
-  -serial "file:$serial" -monitor "unix:$mon,server,nowait" \
+run=(); [ -n "$pin" ] && command -v taskset >/dev/null && run=(taskset -c "$pin")
+serial_arg="file:$serial" stamper=""
+if [ -n "$stamp" ]; then
+  # The serial port goes through a pipe to a reader that notes when each line arrived.
+  mkfifo "$RUN/serial.fifo" || die "cannot create a fifo in $RUN"
+  ( while IFS= read -r line || [ -n "$line" ]; do
+      printf '%s %s\n' "$EPOCHREALTIME" "$line" >>"$stamp"; printf '%s\n' "$line" >>"$serial"
+    done <"$RUN/serial.fifo" ) &
+  stamper=$!
+  serial_arg=stdio
+  printf '%s QEMU START\n' "$EPOCHREALTIME" >"$stamp"
+fi
+( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
+  cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none "${accel[@]}" -smp "$smp" -m "$mem" \
+  -serial "$serial_arg" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
-  -drive "format=raw,file=$image,if=virtio,snapshot=on" "${vga[@]}" "${extra[@]}" ) >"$RUN/qemu.out" 2>&1 &
+  -drive "format=raw,file=$image,if=virtio,snapshot=on" "${vga[@]}" "${extra[@]}" ) 2>"$RUN/qemu.out" &
 pid=$!
 
 shotpid=""
@@ -99,6 +119,7 @@ while kill -0 "$pid" 2>/dev/null; do
   sleep 0.1; waited=$((waited + 1))
 done
 wait "$pid"; rc=$?
+[ -z "$stamper" ] || wait "$stamper" 2>/dev/null
 stop_shot
 # isa-debug-exit returns (value << 1) | 1; the success value is 0x10.
 if [ "$rc" != 33 ]; then

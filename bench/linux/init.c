@@ -27,14 +27,14 @@ static inline unsigned long rdtsc(void)
 static unsigned long now_ns(void)
 {
 	struct { long sec, nsec; } ts;
-	my_syscall2(__NR_clock_gettime, 1 /* CLOCK_MONOTONIC */, &ts);
+	syscall(__NR_clock_gettime, 1 /* CLOCK_MONOTONIC */, &ts);
 	return ts.sec * 1000000000UL + ts.nsec;
 }
 
 static void pin(int cpu)
 {
 	unsigned long mask[2] = { 1UL << cpu, 0 };
-	my_syscall3(__NR_sched_setaffinity, 0, sizeof(mask), mask);
+	syscall(__NR_sched_setaffinity, 0, sizeof(mask), mask);
 }
 
 static void sort(unsigned long *v, int n)
@@ -134,7 +134,7 @@ static void timer_overshoot(void)
 	for (int i = 0; i < n; i++) {
 		unsigned long at = now_ns() + 1000000;
 		struct { long sec, nsec; } ts = { at / 1000000000UL, at % 1000000000UL };
-		my_syscall4(__NR_clock_nanosleep, 1, 1 /* TIMER_ABSTIME */, &ts, 0);
+		syscall(__NR_clock_nanosleep, 1, 1 /* TIMER_ABSTIME */, &ts, 0);
 		samples[i] = now_ns() - at;
 	}
 	sort(samples, n);
@@ -160,7 +160,7 @@ static void null_syscall(void)
 {
 	for (int i = -WARMUP; i < SAMPLES; i++) {
 		unsigned long t = rdtsc();
-		my_syscall0(__NR_getppid);
+		syscall(__NR_getppid);
 		t = rdtsc() - t;
 		if (i >= 0)
 			samples[i] = t;
@@ -210,6 +210,12 @@ int main(void)
 {
 	// The host stamps this line: the first instruction-level sign of userspace.
 	printf("BENCH MARK userspace\n");
+	// Before pinning, the affinity mask names every processor.
+	unsigned long mask[16] = { 0 };
+	long bytes = syscall(__NR_sched_getaffinity, 0, sizeof(mask), mask);
+	int ncpu = 0;
+	for (long i = 0; i < bytes * 8; i++)
+		ncpu += (mask[i / 64] >> (i % 64)) & 1;
 	pin(0);
 	unsigned long t0 = now_ns(), c0 = rdtsc();
 	while (now_ns() - t0 < 20000000)
@@ -223,20 +229,6 @@ int main(void)
 	timer_overshoot();
 	unsigned long one = throughput(1);
 	printf("BENCH ipc_pairs1 %lu ops/s\n", one);
-	long cpus = my_syscall3(__NR_sched_getaffinity, 0, 0, 0); // fails; processors counted below
-	(void)cpus;
-	unsigned long mask[16] = { 0 };
-	// The initial affinity mask of a fresh process names every processor.
-	if (fork() == 0) {
-		long n = my_syscall3(__NR_sched_getaffinity, 0, sizeof(mask), mask);
-		int count = 0;
-		for (long i = 0; i < n * 8; i++)
-			count += (mask[i / 64] >> (i % 64)) & 1;
-		exit(count);
-	}
-	int status = 0;
-	wait(&status);
-	int ncpu = (status >> 8) & 0xff;
 	if (ncpu >= 8) {
 		unsigned long eight = throughput(8);
 		printf("BENCH ipc_pairs8 %lu ops/s\n", eight);
@@ -244,10 +236,14 @@ int main(void)
 	}
 	printf("BENCH DONE\n");
 
+	// Wait until the console has sent everything (TCSBRK with a non-zero
+	// argument is tcdrain), or the last lines die with the machine.
+	syscall(__NR_ioctl, 1, 0x5409, 1);
+
 	// Leave through the emulator's exit device; power off if there is none.
-	if (my_syscall3(__NR_ioperm, 0xf4, 4, 1) == 0)
+	if (syscall(__NR_ioperm, 0xf4, 4, 1) == 0)
 		__asm__ volatile("outb %%al, %%dx" : : "a"(0x10), "d"(0xf4));
-	my_syscall4(__NR_reboot, 0xfee1dead, 672274793, 0x4321fedc, 0);
+	syscall(__NR_reboot, 0xfee1dead, 672274793, 0x4321fedc, 0);
 	for (;;)
 		;
 }

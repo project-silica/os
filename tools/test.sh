@@ -228,6 +228,24 @@ suite_fuzz() {
   if [ $rc != 0 ] && [ $n = 0 ]; then record fail "$s" run "fuzz.sh failed (log: $log)"; fi
 }
 
+# Benchmarks against Linux (--deep): every metric bench.sh prints is one result
+# of suite bench. A gate missed before its milestone is a skip that says so.
+suite_bench() {
+  in_scope kernel || in_scope os || return 0
+  local s=bench log l rest id rc n=0
+  log=$(logfile "$s" run)
+  "$TOOLS/bench.sh" >"$log" 2>&1; rc=$?
+  while IFS= read -r l; do
+    case "$l" in
+      "bench: behind Linux:"*|"bench: results in"*|"bench: ratchet"*) ;;
+      "bench: "*": "*) rest=${l#bench: }; record pass "$s" "${rest%%: *}"; n=$((n + 1)) ;;
+      "SKIP: bench: "*) rest=${l#SKIP: bench: }; record skip "$s" "${rest%%: *}" "${rest#*: }"; n=$((n + 1)) ;;
+      "ERROR: bench::"*) rest=${l#ERROR: bench::}; record fail "$s" "${rest%%: *}" "${rest#*: }"; n=$((n + 1)) ;;
+    esac
+  done <"$log"
+  if [ $rc != 0 ] && ! grep -q "^fail"$'\t'"$s"$'\t' "$RES"; then record fail "$s" run "bench.sh exited $rc (log: $log)"; fi
+}
+
 if [ "${#guests[@]}" -gt 0 ]; then
   for guest in "${guests[@]}"; do run_inos x86_64 inos.x86_64 "$guest"; done
 else
@@ -250,7 +268,9 @@ else
   fi
   if [ "$tier" = deep ]; then
     suite_fuzz
-    record skip deep "kani-bench" "no proofs or benchmarks yet"
+    suite_bench
+    # Proofs of no-forge and revoke-completeness are due at M2 (spec/MILESTONES.md).
+    [ "$ms" -lt 2 ] || record fail kani proofs "no Kani proofs (required from M2)"
   fi
 fi
 
