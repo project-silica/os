@@ -179,13 +179,18 @@ has '^kernel\.loom\.queue_model: pass=1 ' || bad "miri failure: loom models must
 shape miri-failure
 grep -Rq 'Undefined Behavior' "$WS/target/logs/kernel.miri" 2>/dev/null || bad "miri failure: Miri's output is not kept under target/logs/kernel.miri/"
 
-# ---- 4. no models yet: one skipped line, not a failure -----------------------
+# ---- 4. no models: nothing to report before M2, an error from M2 on ----------
 write_lib; rm -f "$K/kernel-core/tests/loom_models.rs"
 run --full --repo kernel
 [ "$RC" = 0 ] && [ "$(errs)" = 0 ] || bad "no models: exit $RC, $(errs) ERROR: $OUT"
-has '^kernel\.loom: pass=0 fail=0 skipped=1$' || bad "no models: want 'kernel.loom: pass=0 fail=0 skipped=1': $OUT"
+has '^kernel\.loom' && bad "no models before M2: no kernel.loom line is expected: $OUT"
 has '^kernel\.miri: pass=1 fail=0 skipped=0$' || bad "no models: Miri must still run: $OUT"
 shape no-models
+echo 2 >"$WS/MILESTONE"
+run --full --repo kernel
+rm -f "$WS/MILESTONE"
+[ "$RC" != 0 ] || bad "no models at M2: must fail: $OUT"
+has '^ERROR: kernel\.loom::models: no loom models \(required from M2\)' || bad "no models at M2: want an ERROR naming the missing models: $OUT"
 
 # ---- 5. a model that does not compile: one ERROR, the host build stays green -
 write_lib model; write_models 'fn broken() { let x: u32 = "no"; }'

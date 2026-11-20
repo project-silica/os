@@ -1,0 +1,4 @@
+# The baseline image's whole userspace: the benchmark as /init and a console.
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+file /init @INIT@ 0755 0 0

@@ -187,3 +187,30 @@ run_panic() {
   fi
   record pass "$suite" panic_backtrace
 }
+
+# run_boot_error <arch> <suite> <label> <expected text> <silica-image arguments...>
+# A boot that cannot succeed must say why on the serial port and leave with
+# the failure code. The image is built from the given ESP contents; $K, $L and
+# $R in them stand for the stripped kernel, the loader and the root task.
+run_boot_error() {
+  local arch=$1 suite=$2 label=$3 want=$4 log dir serial rc a; shift 4
+  log=$(logfile "$suite" "build.$label")
+  build_image "$arch" "$log" >/dev/null || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  dir=$(art_dir "$arch")
+  local -a args=()
+  for a in "$@"; do
+    a=${a//\$K/$dir/kernel.stripped}; a=${a//\$L/$dir/BOOTX64.EFI}; a=${a//\$R/$dir/root.elf}
+    args+=("$a")
+  done
+  "$dir/silica-image" --out "$dir/error.img" "${args[@]}" >"$log" 2>&1 || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$label")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$dir/error.img" --serial "$serial" --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc != 1 ] || ! grep -q 'guest exit code 17' "$serial.qemu"; then
+    record fail "$suite" "$label" "a boot that cannot succeed did not leave with the failure code (exit status $rc; serial: $serial)"; return 1
+  fi
+  if ! grep -aqF -- "$want" "$serial"; then
+    record fail "$suite" "$label" "the serial log does not say: $want (serial: $serial)"; return 1
+  fi
+  record pass "$suite" "$label"
+}

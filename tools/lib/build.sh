@@ -75,7 +75,12 @@ build_image() {
   [ "$arch" = x86_64 ] || { echo "no image layout for $arch before B05" >"$log"; return 1; }
   k=$(build_kernel "$arch" "$log.kernel") || { cat "$log.kernel" >"$log"; return 1; }
   l=$(build_loader "$log.loader") || { cat "$log.loader" >"$log"; return 1; }
-  r=$(build_root "$arch" "$log.root") || { cat "$log.root" >"$log"; return 1; }
+  # A kernel checkout with a user target spec has a root task to pack.
+  local -a root=()
+  if [ -f "$(checkout_of kernel)/targets/$arch-silica-user.json" ]; then
+    r=$(build_root "$arch" "$log.root") || { cat "$log.root" >"$log"; return 1; }
+    root=(--ramdisk-entry "root=$r")
+  fi
   t=$(build_image_tool "$log.tool") || { cat "$log.tool" >"$log"; return 1; }
   out=$(art_dir "$arch")/disk.img
   local -a extra=()
@@ -86,6 +91,6 @@ build_image() {
   fi
   cp "$t" "$(dirname "$out")/silica-image" || return 1
   "$(dirname "$out")/silica-image" --out "$out" "EFI/BOOT/BOOTX64.EFI=$l" "SILICA/KERNEL.ELF=${k%.elf}.stripped" \
-    --ramdisk-entry "root=$r" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
+    "${root[@]+"${root[@]}"}" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
   echo "$out"
 }

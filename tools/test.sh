@@ -94,6 +94,14 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
   done
   INOS_QEMU=(); INOS_LABEL=""
   run_panic x86_64 inos.x86_64
+  # Boots that cannot succeed say why.
+  local e=inos.x86_64 boot='EFI/BOOT/BOOTX64.EFI=$L'
+  run_boot_error x86_64 $e error.no_kernel 'ERROR: loader: SILICA\KERNEL.ELF not found' "$boot"
+  run_boot_error x86_64 $e error.kernel_not_elf 'ERROR: loader: SILICA\KERNEL.ELF is not an x86_64 ELF image' "$boot" 'SILICA/KERNEL.ELF=$L'
+  run_boot_error x86_64 $e error.kernel_not_ours 'ERROR: loader: kernel image is not position-independent at the kernel base' "$boot" 'SILICA/KERNEL.ELF=$R'
+  run_boot_error x86_64 $e error.no_ramdisk 'ERROR: kernel: no root task' "$boot" 'SILICA/KERNEL.ELF=$K'
+  run_boot_error x86_64 $e error.no_root_entry 'ERROR: kernel: no root task' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'other=$R'
+  run_boot_error x86_64 $e error.root_not_elf 'ERROR: kernel: cannot start the root task: Image(NotElf)' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'root=$L'
 }
 
 suite_required_arch() { # an architecture required by milestone that cannot boot is an error
@@ -193,7 +201,11 @@ suite_loom() {
     done <<<"$withloom"
     TEST_ARGS=(); CARGO_ENV=()
   done < <(packages kernel)
-  if [ "$models" = 0 ] && ! grep -q "^fail"$'\t'"$s"$'\t' "$RES"; then record skip "$s" models "no loom models yet"; fi
+  # Lock-free structures arrive with SMP at M2; from then on a kernel with no
+  # loom model is an error. Before that there is nothing to model.
+  if [ "$models" = 0 ] && [ "$ms" -ge 2 ] && ! grep -q "^fail"$'\t'"$s"$'\t' "$RES"; then
+    record fail "$s" models "no loom models (required from M2)"
+  fi
 }
 
 # Fuzzing (--deep): every fuzz target is one result of suite fuzz, from
