@@ -169,8 +169,11 @@ run_inos() {
 # panic message and a backtrace, and symbolize.sh must decode the frame of the
 # function that panicked to a function name, a source file and a line.
 run_panic() {
-  local arch=$1 suite=$2 mode=${3:-test} label=panic_backtrace cpus=1 log img serial rc sym
+  local arch=$1 suite=$2 mode=${3:-test} label=panic_backtrace cpus=1 log img serial rc sym want=deliberate_panic
   if [ "$mode" = secondary ]; then label=panic_backtrace_secondary; cpus=2; fi
+  # panic=null: the kernel reaches an object through the null address,
+  # which must fault (physical page 0 is never mapped for it).
+  if [ "$mode" = null ]; then label=null_object_faults; want=deliberate_null_access; fi
   log=$(logfile "$suite" "build.$label")
   img=$(build_image "$arch" "$log" "panic=$mode") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$label")
@@ -181,13 +184,17 @@ run_panic() {
   if [ $rc != 1 ] || ! grep -q 'guest exit code 17' "$serial.qemu"; then
     record fail "$suite" "$label" "a panicking kernel did not leave with the failure code (exit status $rc)"; return 1
   fi
-  if ! grep -aq '^PANIC: deliberate panic' "$serial"; then
+  if [ "$mode" = null ]; then
+    if ! grep -aq '^PANIC: kernel exception' "$serial"; then
+      record fail "$suite" "$label" "a null object address did not fault: $(grep -am1 '^PANIC' "$serial" | cut -c1-120) (serial: $serial)"; return 1
+    fi
+  elif ! grep -aq '^PANIC: deliberate panic' "$serial"; then
     record fail "$suite" "$label" "no panic message on the serial port (serial: $serial)"; return 1
   fi
   if [ "$mode" = secondary ] && ! grep -aq '^PANIC: deliberate panic on processor 1' "$serial"; then
     record fail "$suite" "$label" "the secondary processor did not report its panic (serial: $serial)"; return 1
   fi
-  if ! grep -aqE 'deliberate_panic at .+\.rs:[1-9][0-9]*' "$sym"; then
+  if ! grep -aqE "$want at .+\.rs:[1-9][0-9]*" "$sym"; then
     record fail "$suite" "$label" "the backtrace does not decode to function, file and line (see $sym)"; return 1
   fi
   record pass "$suite" "$label"

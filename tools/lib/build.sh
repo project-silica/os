@@ -98,10 +98,12 @@ build_image_tool() {
 # program of that repository in the ramdisk under its own name. Prints the
 # image path (system.img, or system-<root>.img for another root task).
 build_system_image() {
-  local arch=$1 log=$2 cmdline=${3:-} root=${4:-init} k l t sys out f n
-  [ "$arch" = x86_64 ] || { echo "no image layout for $arch before B05" >"$log"; return 1; }
+  local arch=$1 log=$2 cmdline=${3:-} root=${4:-init} k l t sys out f n lp
+  lp=$(loader_path "$arch") || { echo "no image layout for $arch (no UEFI loader)" >"$log"; return 1; }
+  # As for build_image: on aarch64 the harness hears the status through semihosting.
+  [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
   k=$(build_kernel "$arch" "$log.kernel") || { cat "$log.kernel" >"$log"; return 1; }
-  l=$(build_loader "$log.loader") || { cat "$log.loader" >"$log"; return 1; }
+  l=$(build_loader "$log.loader" "$arch") || { cat "$log.loader" >"$log"; return 1; }
   sys=$(build_system "$arch" "$log.system") || { cat "$log.system" >"$log"; return 1; }
   t=$(build_image_tool "$log.tool") || { cat "$log.tool" >"$log"; return 1; }
   out=$(art_dir "$arch")/system.img
@@ -120,7 +122,7 @@ build_system_image() {
     extra=("SILICA/CMDLINE.TXT=$(dirname "$out")/SYSTEM-CMDLINE.TXT")
   fi
   cp "$t" "$(dirname "$out")/silica-image" || return 1
-  "$(dirname "$out")/silica-image" --out "$out" "EFI/BOOT/BOOTX64.EFI=$l" "SILICA/KERNEL.ELF=${k%.elf}.stripped" \
+  "$(dirname "$out")/silica-image" --out "$out" "$lp=$l" "SILICA/KERNEL.ELF=${k%.elf}.stripped" \
     "${entries[@]}" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
   echo "$out"
 }

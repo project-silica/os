@@ -119,6 +119,7 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
   done
   INOS_QEMU=(); INOS_LABEL=""
   run_panic x86_64 inos.x86_64
+  run_panic x86_64 inos.x86_64 null
   # Boots that cannot succeed say why.
   local e=inos.x86_64 boot='EFI/BOOT/BOOTX64.EFI=$L'
   run_boot_error x86_64 $e error.no_kernel 'ERROR: loader: SILICA\KERNEL.ELF not found' "$boot"
@@ -335,6 +336,12 @@ else
   if { in_scope kernel || in_scope os || in_scope system; } && [ -f "$(checkout_of system)/Cargo.toml" ]; then
     run_system x86_64 system.x86_64
     [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
+    # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
+    # "aarch64 boots to the same test"), emulated, so not in the fast tier.
+    if [ "$tier" != fast ] && [ -f "$(checkout_of kernel)/targets/aarch64-silica-user.json" ]; then
+      run_system aarch64 system.aarch64
+      run_systest aarch64 systest.aarch64
+    fi
   fi
   [ "$tier" != fast ] && in_scope os && suite_tools
   # The hosted CI definitions test themselves (every workflow parses).
@@ -351,6 +358,7 @@ else
       suite_arch_entry aarch64
       run_panic aarch64 inos.aarch64
       run_panic aarch64 inos.aarch64 secondary
+      run_panic aarch64 inos.aarch64 null
       suite_inos aarch64
     fi
     suite_required_arch aarch64
