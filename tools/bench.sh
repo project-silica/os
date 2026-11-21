@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Benchmarks against Linux (spec/TESTING.md section 4).
 #   bench.sh [--runs <n>] [--out <results.json>] [--update-ratchet]
+#   bench.sh [--runs <n>] --compare <kernel commit>
+#   bench.sh [--runs <n>] --sweep NAME=value[,value...]
+# The last two put several kernels side by side instead of Silica beside
+# Linux (see "variants" below): the question "did this change, or which
+# value of this constant, make the kernel faster" asked of the machine.
 #
 # Builds the Silica benchmark image (the kernel's root task run with "bench"
 # on its command line) and the Linux baseline image (tools/lib/linux.sh, from
@@ -68,12 +73,14 @@ insns_ipc_roundtrip insns lower none 0 2
 insns_ctx_switch insns lower none 0 2
 insns_page_fault insns lower none 0 2'
 
-runs=5 out="" update=0
+runs=5 out="" update=0 compare="" sweep=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --runs) [ $# -ge 2 ] || die "--runs needs a value"; runs=$2; shift 2 ;;
     --out) [ $# -ge 2 ] || die "--out needs a file"; out=$2; shift 2 ;;
     --update-ratchet) update=1; shift ;;
+    --compare) [ $# -ge 2 ] || die "--compare needs a commit of the kernel repository"; compare=$2; shift 2 ;;
+    --sweep) [ $# -ge 2 ] && [[ $2 =~ ^[A-Z_]+=[0-9]+(,[0-9]+)*$ ]] || die "--sweep needs NAME=value[,value...]"; sweep=$2; shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
 done
@@ -128,6 +135,7 @@ if [ $accel = kvm ] && [ -n "$pin" ] && [ $tuned = no ]; then
   else host_restore "$policy"; echo "bench: host not tuned (needs passwordless sudo): timings carry its power-saving policy"; fi
 fi
 
+if [ -z "$compare$sweep" ]; then
 log=$LOGS/bench/build.silica.log
 # $SILICA_BENCH_IMG names a ready-made Silica image (used by the tool's own test).
 silica=${SILICA_BENCH_IMG:-$(build_image x86_64 "$log" bench)} && [ -f "$silica" ] || { err "cannot build the Silica benchmark image (log: $log)"; echo "RESULT: pass=0 fail=1 skipped=0 time=$((SECONDS - start))"; exit 2; }
@@ -139,6 +147,7 @@ if [ $rc = 3 ]; then
 elif [ $rc != 0 ]; then
   err "cannot build the Linux baseline image: $(grep -m1 -iE 'error' "$log" | cut -c1-160) (log: $log)"
   echo "RESULT: pass=0 fail=1 skipped=0 time=$((SECONDS - start))"; exit 2
+fi
 fi
 
 # boot <system> <image> <run>: one boot; appends "<metric> <value>" lines to $RUN/<system>.values
@@ -189,12 +198,13 @@ counts() {
     for ((i = 1; i <= runs; i++)); do echo "insns_$name $v insns" >>"$RUN/silica.values"; done
   done
 }
-counts
-
-for ((i = 1; i <= runs; i++)); do
-  boot silica "$silica" "$i"
-  boot linux "$linux" "$i"
-done
+if [ -z "$compare$sweep" ]; then
+  counts
+  for ((i = 1; i <= runs; i++)); do
+    boot silica "$silica" "$i"
+    boot linux "$linux" "$i"
+  done
+fi
 
 # stat <system> <metric>: "<median> <mad>" over the runs, empty when never reported.
 stat() {
@@ -205,6 +215,60 @@ stat() {
       n = asort(d); mad = (n % 2) ? d[(n + 1) / 2] : (d[n / 2] + d[n / 2 + 1]) / 2
       print med, mad }'
 }
+# ---- variants: the same benchmarks on several kernels, side by side -----------
+# --compare <commit>: the kernel repository at that commit ("base") against
+# the working tree ("new"). --sweep NAME=v1,v2,...: the working tree built
+# once per value of the build-time constant SILICA_TUNE_<NAME>
+# (kernel_core::tuned). Their boots are interleaved on the held host, so a
+# difference between two columns is a difference between the kernels and not
+# between two moments of the host. An instrument: nothing is gated or
+# recorded. A change is marked "~" when it is inside the noise of the runs
+# (three times the two deviations).
+if [ -n "$compare$sweep" ]; then
+  [ $tuned = no ] && echo "bench: host not held still: differences of a few percent mean nothing"
+  labels=()
+  build_variant() { # build_variant <label> [NAME=value]
+    local label=$1 img l=$LOGS/bench/build.$1.log
+    img=$(if [ -n "${2:-}" ]; then export "SILICA_TUNE_$2"; fi; build_image x86_64 "$l" bench) && cp "$img" "$RUN/$label.img" ||
+      { err "cannot build the variant $label (log: $l)"; exit 2; }
+    labels+=("$label")
+  }
+  if [ -n "$compare" ]; then
+    here=$(checkout_of kernel); base=$OUTBASE/bench-base/kernel
+    rev=$(git -C "$here" rev-parse --verify --quiet "$compare^{commit}") || die "--compare: the kernel repository has no commit $compare"
+    if [ -d "$base" ]; then git -C "$base" checkout -q --detach "$rev"
+    else mkdir -p "$(dirname "$base")" && git -C "$here" worktree add -q --detach "$base" "$rev"; fi || die "--compare: cannot check out $compare in $base"
+    SRC[kernel]=$base; build_variant base; unset 'SRC[kernel]'
+    build_variant new
+    echo "bench: base is the kernel at $(git -C "$here" log -1 --format='%h %s' "$rev" | cut -c1-70); new is the working tree"
+  else
+    for v in $(echo "${sweep#*=}" | tr , ' '); do build_variant "${sweep%%=*}-$v" "${sweep%%=*}=$v"; done
+  fi
+  for ((i = 1; i <= runs; i++)); do
+    for v in "${labels[@]}"; do boot "$v" "$RUN/$v.img" "$i"; done
+  done
+  printf '%-22s %-6s' metric unit; for v in "${labels[@]}"; do printf ' %24s' "$v"; done; echo
+  while read -r name unit better _; do
+    line=$(printf '%-22s %-6s' "$name" "$unit") first="" fmad="" any=0
+    for v in "${labels[@]}"; do
+      read -r m mad <<<"$(stat "$v" "$name")"
+      if [ -z "${m:-}" ]; then cell=-
+      elif [ -z "$first" ]; then first=$m fmad=$mad any=1; cell=$(fmt "$m")
+      else
+        any=1
+        cell=$(awk -v m="$m" -v d="$mad" -v f="$first" -v fd="$fmad" -v b="$better" 'BEGIN {
+          c = (f != 0) ? (m - f) / f * 100 : 0; diff = m - f; if (diff < 0) diff = -diff
+          tag = (diff <= 3 * (d + fd)) ? "~" : (((b == "lower") == (m < f)) ? "better" : "worse")
+          printf "%.4g (%+.1f%% %s)", m, c, tag }')
+      fi
+      line+=$(printf ' %24s' "$cell")
+    done
+    [ $any = 1 ] && echo "$line"
+  done <<<"$METRICS"
+  echo "RESULT: pass=1 fail=0 skipped=0 time=$((SECONDS - start))"
+  exit 0
+fi
+
 ratchet_row() { [ -f "$RATCHET" ] && awk -F'\t' -v m="$1" '$1 == m { print; exit }' "$RATCHET"; }
 # The host a value was measured on: its processor model ($SILICA_BENCH_HOST
 # overrides, for the tool's own test).
@@ -253,7 +317,12 @@ while read -r name unit better gate limit from repeat; do
   # instruction count allows one instruction.
   IFS=$'\t' read -r _ rbest rkind vbest vhost <<<"$(ratchet_row "$name")"
   floor() { awk -v e="$1" -v b="$2" -v u="$unit" -v p="${repeat:-1}" 'BEGIN { f = (u == "insns") ? 0 : b * p / 100; if (f < 0) f = -f; print (e > f ? e : f) }'; }
-  vnoise=$(awk -v m="$omad" -v u="$unit" 'BEGIN { print 3 * m + (u == "insns" ? 1 : 0) }')
+  # (An instruction count is the difference of two boots divided by the
+  # operations of one benchmark; the boots differ by a few hundred
+  # instructions of interrupt timing, which is under 0.1 per operation over
+  # 22,000 operations and about 1 over the page fault's 2,048: one kernel
+  # read 2764, 2765 and 2766 there. So that count allows 2.)
+  vnoise=$(awk -v m="$omad" -v u="$unit" -v n="$name" 'BEGIN { print 3 * m + (u == "insns" ? (n == "insns_page_fault" ? 2 : 1) : 0) }')
   vworse=$([ "$better" = lower ] && echo higher || echo lower)
   worse_than() { awk -v n="$1" -v b="$2" -v e="$3" -v w="$4" 'BEGIN { exit !((w == "higher") ? (n > b + e) : (n < b - e)) }'; }
   better_than() { awk -v n="$1" -v b="$2" -v w="$3" 'BEGIN { exit !((w == "higher") ? (n < b) : (n > b)) }'; }

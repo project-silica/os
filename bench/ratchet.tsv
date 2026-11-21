@@ -1,21 +1,21 @@
 # Best result per metric (tools/bench.sh --update-ratchet). vs-linux: ours/linux for
 # lower-is-better metrics, linux/ours otherwise, then the best value and the host it
 # was measured on; value: the metric itself.
-ipc_roundtrip	0.218057	vs-linux	413	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-ctx_switch	0.43254	vs-linux	218	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_roundtrip	0.218057	vs-linux	412	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ctx_switch	0.424658	vs-linux	217	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 boot_userspace	0.0464004	vs-linux	13.771	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 timer_overshoot_p99	0.264836	vs-linux	7823	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 ipc_pairs1	0.215769	vs-linux	2507372	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-ipc_pairs8	0.213079	vs-linux	20120379	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_pairs8	0.212664	vs-linux	20120379	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 ipc_scaling	8.02	value
-ipc_cross_pairs1	0.766044	vs-linux	216105	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-ipc_cross_pairs4	0.674734	vs-linux	970021	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-ipc_cross_scaling	4.50	value
-page_fault	0.707711	vs-linux	569	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_cross_pairs1	0.398561	vs-linux	1004145	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_cross_pairs4	0.413746	vs-linux	3794920	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_cross_scaling	3.79	value
+page_fault	0.707196	vs-linux	569	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 null_syscall	0.865979	vs-linux	84	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-ipc_roundtrip_p99	0.223805	vs-linux	440	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_roundtrip_p99	0.116482	vs-linux	440	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 ctx_switch_p99	0.42115	vs-linux	227	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-timer_overshoot	0.0557322	vs-linux	929	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+timer_overshoot	0.0405405	vs-linux	837	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 insns_null_syscall	138.6	value
 insns_ipc_roundtrip	994.7	value
 insns_ctx_switch	379.7	value

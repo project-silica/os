@@ -38,4 +38,12 @@ CONFIG_VIRTIO_PCI=y
 CONFIG_BLOCK=y
 CONFIG_VIRTIO_BLK=y
 CONFIG_CMDLINE_BOOL=y
-CONFIG_CMDLINE="console=ttyS0,115200 quiet panic=-1 tsc=reliable"
+# Idle polling for a guest (cpuidle-haltpoll): an idle processor watches for
+# work before it halts, as Silica's does (IDLE_WATCH_NS), so that a wake-up
+# across processors does not leave the virtual machine. Forced on, as on a
+# guest tuned for latency; the poll time is Linux's own (adaptive, up to
+# guest_halt_poll_ns = 200 us).
+CONFIG_CPU_IDLE=y
+CONFIG_CPU_IDLE_GOV_HALTPOLL=y
+CONFIG_HALTPOLL_CPUIDLE=y
+CONFIG_CMDLINE="console=ttyS0,115200 quiet panic=-1 tsc=reliable cpuidle_haltpoll.force=1"
