@@ -107,7 +107,10 @@ if [ "$arch" = aarch64 ]; then
     file:*) backend="file,path=${serial_arg#file:}" ;;
     *) backend="stdio,signal=off" ;;
   esac
-  serial_dev=(-chardev "$backend,id=con,mux=on" -serial chardev:con)
+  # A second UART, connected to nothing: a device in memory space with an
+  # interrupt line that a test drives from userspace (roottest irq); the
+  # firmware describes it in the DSDT and the kernel keeps only the first.
+  serial_dev=(-chardev "$backend,id=con,mux=on" -serial chardev:con -serial null)
 fi
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
   cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${accel[@]}" -smp "$smp" -m "$mem" \
