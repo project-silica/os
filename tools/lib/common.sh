@@ -46,16 +46,18 @@ declare -A SRC=()
 checkout_of() { echo "${SRC[$1]:-$WS/$1}"; }
 
 # ---- output directories (never inside a source checkout) ------------------
-if [ -w "$WS/target" ] || { [ ! -e "$WS/target" ] && [ -w "$WS" ]; }; then
-  OUTBASE=$WS/target
-else
-  OUTBASE=${TMPDIR:-/tmp}/silica
+OUTBASE=$WS/target
+if [ ! -w "$OUTBASE" ] && { [ -e "$OUTBASE" ] || [ ! -w "$WS" ]; }; then
+  # A read-only workshop still needs room for Rust, disk images and QEMU.
+  # Respect an explicit scratch directory; otherwise use the user's cache.
+  OUTBASE=${TMPDIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/silica
 fi
-mkdir -p "$OUTBASE/logs" "$OUTBASE/runs" "$OUTBASE/cache" 2>/dev/null || OUTBASE=${TMPDIR:-/tmp}/silica
-mkdir -p "$OUTBASE/logs" "$OUTBASE/runs" "$OUTBASE/cache"
+mkdir -p "$OUTBASE/logs" "$OUTBASE/runs" "$OUTBASE/cache" || die "cannot create build directories under $OUTBASE"
+export TMPDIR=${TMPDIR:-$OUTBASE/tmp}
+mkdir -p "$TMPDIR" || die "cannot create scratch directory $TMPDIR"
 LOGS=$OUTBASE/logs
 new_run() { # private per-run directory
-  RUN=$(mktemp -d "$OUTBASE/runs/$TOOL_NAME.$(date +%Y%m%dT%H%M%S).XXXX")
+  RUN=$(mktemp -d "$OUTBASE/runs/$TOOL_NAME.$(date +%Y%m%dT%H%M%S).XXXX") || die "cannot create a run under $OUTBASE/runs"
   case "$TOOL_NAME" in
     test)
       LOGS=$OUTBASE/logs/${RUN##*/}
