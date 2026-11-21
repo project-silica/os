@@ -53,19 +53,20 @@ transcript() {
 }
 GOOD=(ipc_roundtrip 400 ns ctx_switch 200 ns timer_overshoot_p99 30000 ns ipc_scaling 7.5 x page_fault 550 ns null_syscall 60 ns
   ipc_roundtrip_p99 450 ns ctx_switch_p99 220 ns timer_overshoot 10000 ns ipc_cross_pairs1 900000 ops/s ipc_cross_pairs4 3200000 ops/s
-  ipc_cross_scaling 3.5 x)
+  ipc_cross_scaling 3.5 x ipc_pairs1 5000000 ops/s ipc_pairs8 35000000 ops/s)
 LINUX=(ipc_roundtrip 1200 ns ctx_switch 340 ns timer_overshoot_p99 80000 ns page_fault 600 ns null_syscall 64 ns
   ipc_roundtrip_p99 1400 ns ctx_switch_p99 360 ns timer_overshoot 60000 ns ipc_cross_pairs1 300000 ops/s
-  ipc_cross_pairs4 1000000 ops/s ipc_cross_scaling 3.3 x)
+  ipc_cross_pairs4 1000000 ops/s ipc_cross_scaling 3.8 x ipc_pairs1 800000 ops/s ipc_pairs8 6500000 ops/s)
 reset() {
   rm -f "$FX"/count.* "$FX/calls" "$SER"/* "$OS/bench/ratchet.tsv" "$WS/MILESTONE"
   transcript "$SER/silica.img" "${GOOD[@]}"; transcript "$SER/linux.img" "${LINUX[@]}"
   echo 600 >"$SER/silica.img.boot"; echo 800 >"$SER/linux.img.boot"
+  printf 'insns_null_syscall 140.0 insns\ninsns_ipc_roundtrip 977.5 insns\ninsns_ctx_switch 315.0 insns\ninsns_page_fault 1400.0 insns\n' >"$FX/counts"
 }
 run() { # run <milestone> [bench.sh args]: sets OUT and RC
   local m=$1; shift
   echo "$m" >"$WS/MILESTONE"
-  OUT=$(SILICA_WS=$WS SILICA_BENCH_IMG=$FX/silica.img SILICA_LINUX_IMG=$FX/linux.img SILICA_BENCH_CPUS=0 "$OS/tools/bench.sh" "$@" 2>&1); RC=$?
+  OUT=$(SILICA_WS=$WS SILICA_BENCH_IMG=$FX/silica.img SILICA_LINUX_IMG=$FX/linux.img SILICA_BENCH_CPUS=0 SILICA_BENCH_COUNTS=$FX/counts "$OS/tools/bench.sh" "$@" 2>&1); RC=$?
 }
 has() { grep -qE -- "$1" <<<"$OUT"; }
 errs() { grep -c '^ERROR:' <<<"$OUT"; }
@@ -76,8 +77,8 @@ reset; run 2 --runs 2
 has '^bench: ipc_roundtrip: silica 400 ns .*linux 1200 ns, ratio 0\.3333' || bad "good run: ipc line wrong: $OUT"
 has '^bench: boot_userspace: silica 600 ms .*linux 800 ms, ratio 0\.75' || bad "good run: boot time must come from the host stamps: $OUT"
 has '^bench: ipc_scaling: silica 7\.5 x' || bad "good run: a metric with no Linux value passes on its own limit: $OUT"
-has '^bench: behind Linux' && bad "good run: nothing is slower than Linux, so nothing is named behind it: $OUT"
-has '^RESULT: pass=13 fail=0 skipped=0 ' || bad "good run: RESULT wrong: $OUT"
+has '^bench: behind Linux' && bad "good run: nothing is slower than Linux (a scaling factor, unit x, below Linux's is not), so nothing is named behind it: $OUT"
+has '^RESULT: pass=19 fail=0 skipped=0 ' || bad "good run: RESULT wrong: $OUT"
 [ "$(tr '\n' ' ' <"$FX/calls")" = "silica.img linux.img silica.img linux.img " ] || bad "boots must alternate, Silica first: $(tr '\n' ' ' <"$FX/calls")"
 jq -e '.schema == 2 and .metrics.ipc_roundtrip.ratio < 0.34 and .metrics.ipc_scaling.linux == null' "$WS/target/logs/bench/results.json" >/dev/null 2>&1 ||
   bad "good run: results.json wrong"
@@ -141,6 +142,15 @@ run 2 --runs 3
 reset
 OUT=$(SILICA_WS=$WS SILICA_BENCH_IMG=$FX/silica.img SILICA_BENCH_CPUS=0 "$OS/tools/bench.sh" --runs 1 2>&1); RC=$?
 [ "$RC" = 3 ] && has '^ERROR: bench::baseline: Linux baseline unavailable' || bad "no baseline: want exit 3 and one ERROR, got exit $RC: $OUT"
+
+# ---- 7b. instruction counts: no noise, gated whatever the accelerator ------------
+reset; run 2 --runs 1
+has '^bench: insns_ipc_roundtrip: silica 977\.5 insns' || bad "counts: the instruction count must be reported: $OUT"
+printf 'insns_ipc_roundtrip\t977.5\tvalue\n' >"$OS/bench/ratchet.tsv"
+sed -i 's/insns_ipc_roundtrip 977.5/insns_ipc_roundtrip 978.3/' "$FX/counts"; run 2 --runs 1
+has '^ERROR: bench::insns_ipc_roundtrip' && bad "counts: under one instruction more is the count's own jitter, not a regression: $OUT"
+sed -i 's/insns_ipc_roundtrip 978.3/insns_ipc_roundtrip 979.5/' "$FX/counts"; run 2 --runs 1
+has '^ERROR: bench::insns_ipc_roundtrip: regression' || bad "counts: two instructions more per round trip must fail: $OUT"
 
 # ---- 8. usage ----------------------------------------------------------------------
 run 2 --runs 0; [ "$RC" = 2 ] || bad "--runs 0 must be a usage error"

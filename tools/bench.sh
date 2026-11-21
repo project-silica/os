@@ -26,7 +26,8 @@
 # Timings are gated only under KVM; under TCG they are printed and recorded.
 #
 # Output: one line per metric, one ERROR: bench::<metric>: line per failure,
-# a "behind Linux" line naming every metric still slower than Linux (the
+# a "behind Linux" line naming every metric still slower than Linux (a
+# scaling factor, unit x, is not one: its throughputs are; the
 # system is not finished while there is one), last line
 # RESULT: pass=<n> fail=<n> skipped=<n> time=<s>.
 # Exit: 0 pass, 1 a gate failed, 2 usage or setup error, 3 Linux baseline unavailable.
@@ -44,15 +45,21 @@ METRICS='ipc_roundtrip ns lower win 0.5 2
 ctx_switch ns lower le 1 2
 boot_userspace ms lower win 1 2
 timer_overshoot_p99 ns lower le 1 2
+ipc_pairs1 ops/s higher le 1 2
+ipc_pairs8 ops/s higher le 1 2
 ipc_scaling x higher min 7 2
 ipc_cross_pairs1 ops/s higher le 1 2
 ipc_cross_pairs4 ops/s higher le 1 2
-ipc_cross_scaling x higher le 1 2
+ipc_cross_scaling x higher min 3.5 2
 page_fault ns lower le 1 2
 null_syscall ns lower le 1 2
 ipc_roundtrip_p99 ns lower le 1 2
 ctx_switch_p99 ns lower le 1 2
-timer_overshoot ns lower le 1 2'
+timer_overshoot ns lower le 1 2
+insns_null_syscall insns lower none 0 2
+insns_ipc_roundtrip insns lower none 0 2
+insns_ctx_switch insns lower none 0 2
+insns_page_fault insns lower none 0 2'
 
 runs=5 out="" update=0
 while [ $# -gt 0 ]; do
@@ -81,27 +88,22 @@ finish() {
   exit 0
 }
 ok() { echo "bench: $1"; pass=$((pass + 1)); }
+# Instruction counts (insns_*) do not depend on the accelerator: they are
+# gated under TCG as well.
+gated() { [ $accel = kvm ] || [ "${1#insns_}" != "$1" ]; }
 enforce() { # enforce <metric> <from-milestone> <message>: a metric not measured yet: ERROR from its milestone (under KVM), SKIP before
-  if [ "$ms" -ge "$2" ] && [ $accel = kvm ]; then echo "ERROR: bench::$1: $3"; fail=$((fail + 1))
+  if [ "$ms" -ge "$2" ] && gated "$1"; then echo "ERROR: bench::$1: $3"; fail=$((fail + 1))
   else echo "SKIP: bench: $1: $3 (required from M$2 under KVM)"; skipped=$((skipped + 1)); fi
 }
 miss() { # miss <metric> <message>: a measured result that misses its gate or ratchet: ERROR at every milestone (under KVM)
-  if [ $accel = kvm ]; then echo "ERROR: bench::$1: $2"; fail=$((fail + 1))
+  if gated "$1"; then echo "ERROR: bench::$1: $2"; fail=$((fail + 1))
   else echo "SKIP: bench: $1: $2 (timings are gated under KVM only)"; skipped=$((skipped + 1)); fi
 }
 fmt() { awk -v x="$1" 'BEGIN { printf "%.4g", x }'; }
 
 # Host processors for the guests: $SILICA_BENCH_CPUS, else one hardware thread
 # of each of the fastest cores, as many as the guest has processors.
-pin=${SILICA_BENCH_CPUS:-}
-if [ -z "$pin" ] && [ -d /sys/devices/system/cpu/cpu0/topology ]; then
-  pin=$(for c in /sys/devices/system/cpu/cpu[0-9]*; do
-      [ -r "$c/topology/thread_siblings_list" ] || continue
-      first=$(cut -d, -f1 "$c/topology/thread_siblings_list" | cut -d- -f1)
-      [ "${c##*cpu}" = "$first" ] || continue
-      echo "$(cat "$c/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo 0) ${c##*cpu}"
-    done | sort -k1,1nr -k2,2n | head -n "$SMP" | awk '{ print $2 }' | sort -n | paste -sd, -)
-fi
+pin=${SILICA_BENCH_CPUS:-$(fastest_cpus "$SMP")}
 
 log=$LOGS/bench/build.silica.log
 # $SILICA_BENCH_IMG names a ready-made Silica image (used by the tool's own test).
@@ -133,6 +135,33 @@ boot() {
   t1=$(tr -d '\r' <"$st" | awk '$2 == "BENCH" && $3 == "MARK" { print $1; exit }')
   [ -n "$t0" ] && [ -n "$t1" ] && awk -v a="$t0" -v b="$t1" 'BEGIN { printf "boot_userspace %.3f ms\n", (b - a) * 1000 }' >>"$RUN/$sys.values"
 }
+# Kernel instructions per operation of the fixed paths (spec/TESTING.md
+# 4.1), counted under TCG with icount by tools/profile.sh: a boot running
+# the benchmark twice minus one running it once is exactly one benchmark.
+# Each value is recorded <runs> times so it carries the noise of a
+# deterministic count: a boot's count moves by a few hundred instructions
+# with the other processor's timing, under 0.05 per operation, so a
+# tolerance of one instruction per operation is added in the ratchet check.
+# $SILICA_BENCH_COUNTS names a file of ready "insns_<metric> <n> insns"
+# lines instead (the tool's own test).
+counts() {
+  local spec b name per one two v
+  if [ -n "${SILICA_BENCH_COUNTS:-}" ]; then
+    for ((i = 1; i <= runs; i++)); do cat "$SILICA_BENCH_COUNTS" >>"$RUN/silica.values"; done; return
+  fi
+  for spec in "null null_syscall 22000" "ipc ipc_roundtrip 22000" "ctx ctx_switch 44000" "fault page_fault 2048"; do
+    read -r b name per <<<"$spec"
+    one=$("$TOOLS/profile.sh" --count --bench "$b" --times 1 --out "$RUN/count.$b.1" 2>"$LOGS/bench/count.$b.log" | awk '$1 == "COUNT" { print $2 }')
+    two=$("$TOOLS/profile.sh" --count --bench "$b" --times 2 --out "$RUN/count.$b.2" 2>>"$LOGS/bench/count.$b.log" | awk '$1 == "COUNT" { print $2 }')
+    if [ -z "$one" ] || [ -z "$two" ]; then
+      echo "bench: no instruction count for $name (log: $LOGS/bench/count.$b.log)"; continue
+    fi
+    v=$(awk -v a="$one" -v b="$two" -v p="$per" 'BEGIN { printf "%.1f", (b - a) / p }')
+    for ((i = 1; i <= runs; i++)); do echo "insns_$name $v insns" >>"$RUN/silica.values"; done
+  done
+}
+counts
+
 for ((i = 1; i <= runs; i++)); do
   boot silica "$silica" "$i"
   boot linux "$linux" "$i"
@@ -163,7 +192,10 @@ while read -r name unit better gate limit from; do
   [ -n "${l:-}" ] && desc="$desc, linux $(fmt "$l") $unit${ratio:+, ratio $(fmt "$ratio")}"
   results+=("$(jq -cn --arg n "$name" --arg u "$unit" --argjson o "$o" --argjson mad "$omad" --arg l "${l:-}" --arg r "$ratio" \
     '{key: $n, value: {unit: $u, silica: $o, noise: $mad, linux: (if $l == "" then null else ($l | tonumber) end), ratio: (if $r == "" then null else ($r | tonumber) end)}}')")
-  [ -n "$ratio" ] && awk -v r="$ratio" 'BEGIN { exit !(r > 1) }' && behind="$behind $name ($(fmt "$ratio")x)"
+  # A scaling factor (unit x) compares a system with itself, not with the
+  # other: its own gate judges it, and the throughputs it is made of are
+  # compared with Linux directly.
+  [ -n "$ratio" ] && [ "$unit" != x ] && awk -v r="$ratio" 'BEGIN { exit !(r > 1) }' && behind="$behind $name ($(fmt "$ratio")x)"
   good=1
   case "$gate" in
     win|le)
@@ -174,8 +206,8 @@ while read -r name unit better gate limit from; do
     max) awk -v o="$o" -v x="$limit" 'BEGIN { exit !(o <= x) }' || { miss "$name" "$desc, gate: at most $limit"; good=0; } ;;
   esac
   # The ratchet: against Linux where there is a Linux value, else the value itself.
-  if [ -n "$ratio" ]; then kind=vs-linux now=$ratio noise=$(awk -v r="$ratio" -v o="$o" -v m="$omad" -v l="$l" -v n="${lmad:-0}" 'BEGIN { print 3 * r * (m / o + n / l) }'); worse=higher
-  else kind=value now=$o noise=$(awk -v m="$omad" 'BEGIN { print 3 * m }'); worse=$([ "$better" = lower ] && echo higher || echo lower); fi
+  if [ -n "$ratio" ] && [ "$unit" != x ]; then kind=vs-linux now=$ratio noise=$(awk -v r="$ratio" -v o="$o" -v m="$omad" -v l="$l" -v n="${lmad:-0}" 'BEGIN { print 3 * r * (m / o + n / l) }'); worse=higher
+  else kind=value now=$o noise=$(awk -v m="$omad" -v u="$unit" 'BEGIN { print 3 * m + (u == "insns" ? 1 : 0) }'); worse=$([ "$better" = lower ] && echo higher || echo lower); fi
   best=$(ratchet_of "$name")
   keep=${best:-$now}
   if [ -n "$best" ]; then

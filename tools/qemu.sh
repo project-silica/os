@@ -7,7 +7,8 @@
 # benchmarks. --stamp writes one line per serial line, "<host time in seconds
 # with microseconds> <text>", after a first line "<time> QEMU START", so boot
 # times are measured by the host.
-# Serial goes to a file; a hard timeout kills the guest. The processors'
+# Serial goes to a file; a hard timeout kills the guest (counted from the
+# firmware's hand-over to the loader; the firmware has its own allowance). The processors'
 # registers at every reset go to qemu-reset.log beside it, so a guest that
 # dies by triple fault says where. Exit status: 0 when
 # the guest wrote the success code to the debug-exit device, 1 for any other
@@ -126,8 +127,17 @@ stop_shot() { # a screendump still pending must not outlive the run
   pkill -P "$shotpid" 2>/dev/null; kill "$shotpid" 2>/dev/null; wait "$shotpid" 2>/dev/null; return 0
 }
 
-waited=0
+# --timeout is Silica's budget: it starts when the firmware hands over to
+# the loader. The firmware has its own allowance ($SILICA_FW_TIMEOUT, default
+# 300 s): emulated UEFI start-up is slow and slower still on a busy host, and
+# it is not what a test measures.
+waited=0 fw=0 fw_limit=${SILICA_FW_TIMEOUT:-300} started=0
 while kill -0 "$pid" 2>/dev/null; do
+  if [ $started = 0 ]; then
+    if [ $((fw % 10)) = 0 ] && grep -aq "BdsDxe: starting\|Booting\|silica:\|ERROR: loader" "$serial" 2>/dev/null; then started=1
+    elif [ "$fw" -lt $((fw_limit * 10)) ]; then fw=$((fw + 1)); sleep 0.1; continue
+    else started=1; waited=$((timeout * 10)); fi
+  fi
   if [ "$waited" -ge $((timeout * 10)) ]; then
     # The serial log often ends before a firmware or kernel stall. Keep
     # where the guest is before destroying the VM: eight samples of the boot
@@ -151,10 +161,10 @@ while kill -0 "$pid" 2>/dev/null; do
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; stop_shot
     # Where the guest stopped: still in the firmware (it never started a
     # boot option), in the loader, or in the kernel or later.
-    where=""
-    if ! grep -aq "BdsDxe: starting\|Booting\|silica:\|ERROR: loader" "$serial" 2>/dev/null; then where=" in the firmware: it never started the loader"
+    where="" after=$timeout
+    if ! grep -aq "BdsDxe: starting\|Booting\|silica:\|ERROR: loader" "$serial" 2>/dev/null; then where=" in the firmware: it never started the loader"; after=$fw_limit
     elif ! grep -aq "^silica:" "$serial" 2>/dev/null; then where=" before the kernel's first line"; fi
-    echo "ERROR: qemu: $arch: timeout after ${timeout}s$where (serial: $serial)"
+    echo "ERROR: qemu: $arch: timeout after ${after}s$where (serial: $serial)"
     exit 124
   fi
   sleep 0.1; waited=$((waited + 1))

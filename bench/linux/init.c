@@ -130,7 +130,11 @@ static void ctx_switch(void)
 // How late a sleep to an absolute deadline wakes.
 static void timer_overshoot(void)
 {
-	int n = 500;
+	int n = 10000;
+	// A latency-sensitive Linux program asks for no timer slack (the
+	// default is 50 us); 1 ns is the least the kernel accepts.
+	if (syscall(__NR_prctl, 29 /* PR_SET_TIMERSLACK */, 1UL, 0UL, 0UL, 0UL) != 0)
+		printf("ERROR: bench: prctl(PR_SET_TIMERSLACK) failed\n");
 	for (int i = 0; i < n; i++) {
 		unsigned long at = now_ns() + 1000000;
 		struct { long sec, nsec; } ts = { at / 1000000000UL, at % 1000000000UL };

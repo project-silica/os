@@ -23,7 +23,8 @@ fw_files() { mkdir -p "$FW/usr/share/OVMF"; echo code >"$FW/usr/share/OVMF/OVMF_
 fw_files
 echo disk >"$FX/disk.img"
 
-# The fake QEMU. FAKE_MODE: exit:<n> | silent | hang | shot:<n> (serves one
+# The fake QEMU. FAKE_MODE: exit:<n> | silent | hang (after the firmware
+# started the loader) | fwhang (in the firmware) | shot:<n> (serves one
 # monitor "screendump <file>" command, then exits with <n>). It records its
 # argument vector in $FAKE_ARGV and writes a line to the serial file.
 cat >"$BIN/qemu-system-x86_64" <<'FAKE'
@@ -41,7 +42,8 @@ echo "hello from the fake guest" >>"$serial"
 case "$FAKE_MODE" in
   exit:*) exit "${FAKE_MODE#exit:}" ;;
   silent) exit 0 ;;
-  hang) echo $$ >"$FAKE_PID"; exec sleep 300 ;;
+  hang) echo "BdsDxe: starting Boot0001" >>"$serial"; echo $$ >"$FAKE_PID"; exec sleep 300 ;;
+  fwhang) echo $$ >"$FAKE_PID"; exec sleep 300 ;;
   shot:*)
     line=$(socat -T10 "UNIX-LISTEN:$mon" - 2>/dev/null | head -1)
     f=${line#screendump }
@@ -55,7 +57,7 @@ run() { # run <mode> <args...>: qemu.sh with the fake QEMU; output in $OUT, stat
   local mode=$1; shift
   local t0=$SECONDS
   OUT=$(cd "$FX" && env -i PATH="$BIN:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS" \
-    SILICA_FW_ROOT="$FW" FAKE_MODE="$mode" FAKE_ARGV="$FX/argv" FAKE_PID="$FX/pid" \
+    SILICA_FW_ROOT="$FW" SILICA_FW_TIMEOUT="${SILICA_FW_TIMEOUT:-}" FAKE_MODE="$mode" FAKE_ARGV="$FX/argv" FAKE_PID="$FX/pid" \
     bash "$OS/tools/qemu.sh" "$@" 2>&1)
   RC=$?; SECS=$((SECONDS - t0))
 }
@@ -93,6 +95,11 @@ expect "timeout" 124 1
 case "$OUT" in *timeout*) ;; *) bad "timeout ERROR does not say timeout" ;; esac
 case "$OUT" in *"$S"*) ;; *) bad "timeout ERROR does not name the serial file" ;; esac
 [ "$SECS" -ge 2 ] && [ "$SECS" -le 8 ] || bad "timeout took ${SECS}s for --timeout 2"
+# The firmware has its own allowance, and its timeout says where it stopped.
+SILICA_FW_TIMEOUT=2 run fwhang --image "$FX/disk.img" --serial "$S" --timeout 60
+expect "firmware timeout" 124 1
+case "$OUT" in *"timeout after 2s in the firmware"*) ;; *) bad "a firmware stall must be reported as one, after the firmware's allowance: $OUT" ;; esac
+[ "$SECS" -le 8 ] || bad "a firmware stall took ${SECS}s for an allowance of 2"
 if [ -f "$FX/pid" ] && kill -0 "$(cat "$FX/pid")" 2>/dev/null; then
   bad "the guest is still running after the timeout"; kill -9 "$(cat "$FX/pid")" 2>/dev/null
 fi
@@ -167,7 +174,7 @@ done
 if command -v qemu-system-x86_64 >/dev/null && command -v socat >/dev/null && [ -n "$fw" ]; then
   head -c 1048576 /dev/zero >"$FX/blank.img"
   P=$FX/real.ppm
-  OUT=$(cd "$FX" && env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS" \
+  OUT=$(cd "$FX" && env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS" SILICA_FW_TIMEOUT=12 \
     bash "$OS/tools/qemu.sh" --image "$FX/blank.img" --serial "$FX/real.log" --timeout 12 \
     --screendump "$P" --screendump-after 4 2>&1); RC=$?
   expect "real qemu, non-bootable disk" 124 1
