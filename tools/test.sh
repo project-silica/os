@@ -90,6 +90,16 @@ suite_inos() { # in-OS tests on one architecture; --fast boots boot_ok only
   local a=$1 t opts o manifest
   manifest="$(checkout_of kernel)/tests/inos-$a.txt"
   run_inos "$a" "inos.$a" boot_ok
+  # Every test the root task has is in the manifest: one left out would
+  # never run, and nothing would say so.
+  if [ -f "$manifest" ]; then
+    local name missing=""
+    for name in $(awk '/^const TESTS/ { on = 1 } on && /^\];/ { exit } on' "$(checkout_of kernel)/roottest/src/main.rs" | grep -o '("[a-z0-9_]*",' | tr -d '(",'); do
+      awk -v t="$name" '$1 == t { found = 1 } END { exit !found }' "$manifest" || missing="$missing $name"
+    done
+    if [ -n "$missing" ]; then record fail "inos.$a" manifest "roottest has tests tests/inos-$a.txt does not list, so they never run:$missing"
+    else record pass "inos.$a" manifest; fi
+  fi
   if [ "$tier" != fast ] && [ -f "$manifest" ]; then
     # One test per line: its name, then optionally the machine it needs
     # (smp=<processors> mem=<MiB>).
