@@ -142,3 +142,18 @@ cargo_run() {
   (cd "$dir" && env CARGO_TARGET_DIR="$cache/target" CARGO_TERM_COLOR=never CARGO_NET_OFFLINE=true \
     "${CARGO_ENV[@]+"${CARGO_ENV[@]}"}" cargo --config "$cache/cargo-patch.toml" "$@") >"$log" 2>&1
 }
+
+# fastest_cpus <n>: a comma-separated list of host processors for a guest
+# with <n> processors: one hardware thread of each of the <n> fastest cores
+# (by maximum frequency; on a hybrid processor, the performance cores).
+# Empty where the host does not say.
+fastest_cpus() {
+  [ -d /sys/devices/system/cpu/cpu0/topology ] || return 0
+  local c first
+  for c in /sys/devices/system/cpu/cpu[0-9]*; do
+    [ -r "$c/topology/thread_siblings_list" ] || continue
+    first=$(cut -d, -f1 "$c/topology/thread_siblings_list" | cut -d- -f1)
+    [ "${c##*cpu}" = "$first" ] || continue
+    echo "$(cat "$c/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo 0) ${c##*cpu}"
+  done | sort -k1,1nr -k2,2n | head -n "$1" | awk '{ print $2 }' | sort -n | paste -sd, -
+}
