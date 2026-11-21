@@ -279,7 +279,8 @@ suite_fuzz() {
   [ -x "$TOOLS/fuzz.sh" ] || return 0
   local s=fuzz log l id why rest rc n=0
   log=$(logfile "$s" run)
-  "$TOOLS/fuzz.sh" ${repo:+--repo "$repo"} --time "${SILICA_FUZZ_TIME:-60}" >"$log" 2>&1; rc=$?
+  # Ten minutes per target: every trust boundary runs 10 min clean (spec/MILESTONES.md).
+  "$TOOLS/fuzz.sh" ${repo:+--repo "$repo"} --time "${SILICA_FUZZ_TIME:-600}" >"$log" 2>&1; rc=$?
   while IFS= read -r l; do
     case "$l" in
       "fuzz: "*": ok "*) id=${l#fuzz: }; record pass "$s" "${id%%: ok *}"; n=$((n + 1)) ;;

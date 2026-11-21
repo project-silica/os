@@ -2,7 +2,7 @@
 # Coverage-guided fuzzing of any repository (spec/TESTING.md section 3;
 # test.sh --deep calls this).
 #   fuzz.sh [--repo <repo>]... [--target <id|name>]... [--time <seconds>]
-#           [--unit-timeout <seconds>] [--list | --report]
+#           [--unit-timeout <seconds>] [--save] [--list | --report]
 # A fuzz target is a cargo-fuzz target of a libfuzzer-sys crate:
 #   <crate dir>/fuzz/Cargo.toml (depends on libfuzzer-sys) and
 #   <crate dir>/fuzz/fuzz_targets/<name>.rs, found up to four levels deep in
@@ -11,8 +11,8 @@
 #   or the bare name.
 # Each target is built and run for --time seconds (default $SILICA_FUZZ_TIME or
 # 60; the build is not part of it) with a hard limit of $SILICA_FUZZ_GRACE
-# (default 120) seconds more. Nothing is written inside a
-# checkout. Under target/fuzz/<repo>/<target>/:
+# (default 120) seconds more. Nothing is written inside a checkout except by
+# --save (below). Under target/fuzz/<repo>/<target>/
 #   corpus/    grows from run to run; the checkout's fuzz/corpus/<name>, when
 #              present, is read as seed input
 #   crashes/   reproducers (crash-*, timeout-*, oom-*, leak-*). Every stored
@@ -20,6 +20,14 @@
 #              an ERROR; one that no longer fails moves into corpus/ as a
 #              regression input.
 #   run.log    the full libFuzzer output (build.log for the build)
+# Coverage floor (spec/TESTING.md section 4.4): <crate dir>/fuzz/coverage-floor.tsv
+# names each target and the edges its committed seed corpus (fuzz/corpus/<name>)
+# reaches when libFuzzer loads it. That number does not depend on time or luck,
+# so every run checks it before fuzzing: fewer edges than the floor, or a
+# target with no floor, is an ERROR. --save merges what a clean run found into
+# the committed corpus (minimized) and records its coverage as the new floor;
+# commit both with the change that earned them. A floor only goes down in a
+# commit that says why.
 # target/fuzz/coverage.tsv has one row per target of the last run that
 # included it: id, edges covered, features, corpus size, executions, status.
 # --report prints it.
@@ -30,13 +38,14 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
 
-repos=() targets=() secs=${SILICA_FUZZ_TIME:-60} unit=${SILICA_FUZZ_UNIT_TIMEOUT:-30} mode=run
+repos=() targets=() secs=${SILICA_FUZZ_TIME:-60} unit=${SILICA_FUZZ_UNIT_TIMEOUT:-30} mode=run save=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) [ $# -ge 2 ] || die "--repo needs a repository"; repos+=("$2"); shift 2 ;;
     --target) [ $# -ge 2 ] || die "--target needs a target"; targets+=("$2"); shift 2 ;;
     --time) [ $# -ge 2 ] || die "--time needs seconds"; secs=$2; shift 2 ;;
     --unit-timeout) [ $# -ge 2 ] || die "--unit-timeout needs seconds"; unit=$2; shift 2 ;;
+    --save) save=1; shift ;;
     --list) mode=list; shift ;;
     --report) mode=report; shift ;;
     *) die "unknown argument $1" ;;
@@ -138,6 +147,18 @@ last_stat() { # last_stat <log>: "<edges> <features> <corpus> <execs>" from libF
     END { printf "%d %d %d %d\n", cov, ft, corp, ex }' "$1"
 }
 
+# inited_cov <log>: the edges libFuzzer reported once its inputs were loaded.
+inited_cov() { sed -n 's/.*INITED cov: \([0-9]*\).*/\1/p' "$1" | tail -1; }
+# floor_of <fuzz dir> <name>: the committed coverage floor, or nothing.
+floor_of() { [ -f "$1/coverage-floor.tsv" ] && awk -F'\t' -v n="$2" '$1 == n { print $2 }' "$1/coverage-floor.tsv"; }
+# seed_cov <out> <fuzz dir> <name>: edges the committed seeds reach (0 without seeds).
+seed_cov() {
+  local d=$2/corpus/$3 c
+  [ -d "$d" ] && [ -n "$(ls -A "$d")" ] || { echo 0; return; }
+  fz_run "$((unit * 4 + 300))" "$1/seed.log" -runs=0 -timeout="$unit" "$d"
+  c=$(inited_cov "$1/seed.log"); echo "${c:-0}"
+}
+
 run_target() { # run_target <id> <repo> <fuzz dir> <name>
   local id=$1 repo=$2 fd=$3 name=$4 bin slug out cache tdir host san t0 rc f before new kind why cov ft corp execs
   slug=$(printf '%s' "$id" | tr '/:' '__'); out=$FUZZ_OUT/$repo/$slug
@@ -182,7 +203,19 @@ run_target() { # run_target <id> <repo> <fuzz dir> <name>
     fi
     mv "$f" "$out/corpus/regress-$(basename "$f")"
   done
-  # 3. the time-boxed run
+  # 3. the committed seeds against the committed floor
+  local floor seeded
+  floor=$(floor_of "$fd" "$name"); seeded=$(seed_cov "$out" "$fd" "$name")
+  if [ "${floor:-0}" = 0 ] && [ "$save" = 0 ]; then
+    # A floor of 0 (no committed seeds) would check nothing.
+    fail_line "$id" "no coverage floor: $fd/coverage-floor.tsv has no non-zero row for $name (run fuzz.sh --target $id --save and commit the corpus and floor)"
+    coverage_row "$id" "$seeded" 0 0 0 no-floor; return
+  fi
+  if [ -n "$floor" ] && [ "$seeded" -lt "$floor" ]; then
+    fail_line "$id" "coverage dropped: the committed seeds reach $seeded edges, the floor is $floor (log: $out/seed.log)"
+    coverage_row "$id" "$seeded" 0 0 0 coverage-drop; return
+  fi
+  # 4. the time-boxed run
   before=$(ls "$out/crashes")
   local seed=(); [ -d "$fd/corpus/$name" ] && seed=("$fd/corpus/$name")
   fz_run "$((secs + grace))" "$out/run.log" "$out/corpus" ${seed[@]+"${seed[@]}"} \
@@ -205,7 +238,22 @@ run_target() { # run_target <id> <repo> <fuzz dir> <name>
     fail_line "$id" "fuzzer exited with status $rc and no reproducer: $(first_err "$out/run.log") (log: $out/run.log)"
     coverage_row "$id" "$cov" "$ft" "$corp" "$execs" failed; return
   fi
-  echo "fuzz: $id: ok execs=$execs cov=$cov ft=$ft corpus=$corp time=$(($(date +%s) - t0))s"
+  if [ "$save" = 1 ]; then
+    # 5. keep what this run found: every committed seed stays, under its own
+    # name (regression inputs are named and tests include them), and only
+    # found inputs that add coverage are added. Its coverage is the floor.
+    local seeds=$fd/corpus/$name
+    mkdir -p "$seeds"
+    if ! fz_run "$((secs + grace))" "$out/merge.log" -merge=1 -timeout="$unit" "$seeds" "$out/corpus"; then
+      fail_line "$id" "merge into $seeds failed (log: $out/merge.log)"; coverage_row "$id" "$cov" "$ft" "$corp" "$execs" failed; return
+    fi
+    seeded=$(seed_cov "$out" "$fd" "$name")
+    { [ -f "$fd/coverage-floor.tsv" ] && awk -F'\t' -v n="$name" '$1 != n && $1 != "target"' "$fd/coverage-floor.tsv"
+      printf '%s\t%s\n' "$name" "$seeded"; } | sort >"$out/floor.tsv"
+    { printf 'target\tedges\n'; cat "$out/floor.tsv"; } >"$fd/coverage-floor.tsv"
+    floor=$seeded
+  fi
+  echo "fuzz: $id: ok execs=$execs cov=$cov ft=$ft corpus=$corp floor=$floor seeds=$seeded time=$(($(date +%s) - t0))s"
   pass=$((pass + 1))
   coverage_row "$id" "$cov" "$ft" "$corp" "$execs" ok
 }

@@ -76,6 +76,15 @@ for a in "$@"; do
     *) pos+=("$a") ;;
   esac
 done
+for a in "$@"; do
+  case "$a" in
+    -runs=0) # load the corpus only: 4 edges plus one per input
+      n=0; for d in "${pos[@]}"; do n=$((n + $(ls "$d" 2>/dev/null | wc -l))); done
+      echo "#$n	INITED cov: $((4 + n)) ft: $((4 + n)) corp: $n/${n}b exec/s: 0 rss: 30Mb"; exit 0 ;;
+    -merge=1) # the first directory receives every input of the others it lacks
+      for d in "${pos[@]:1}"; do cp -n "$d"/* "${pos[0]}/" 2>/dev/null; done; exit 0 ;;
+  esac
+done
 if [ -f "${pos[0]:-}" ]; then # replay
   if grep -q CRASH "${pos[0]}"; then echo "==1==ERROR: AddressSanitizer: replay of ${pos[0]}"; exit 77; fi
   echo "Executed ${pos[0]} in 0 ms"; exit 0
@@ -106,7 +115,12 @@ mk_crate() { # mk_crate <repo dir> <crate rel path or .> <libfuzzer-sys|none> <t
   [ "$c" = . ] && d=$r/fuzz
   mkdir -p "$d/fuzz_targets"
   printf '[package]\nname = "x-fuzz"\nversion = "0.0.0"\n[dependencies]\n%s\n' "$([ "$LIBF" = none ] || echo 'libfuzzer-sys = "0.4"')" >"$d/Cargo.toml"
-  local t; for t in "$@"; do echo "fn main() {}" >"$d/fuzz_targets/$t.rs"; done
+  local t; for t in "$@"; do echo "fn main() {}" >"$d/fuzz_targets/$t.rs"; seed "$d" "$t"; done
+}
+seed() { # seed <fuzz dir> <target>: one committed seed and its floor (5 edges)
+  mkdir -p "$1/corpus/$2"; echo "seed $2" >"$1/corpus/$2/seed-$2"
+  [ -f "$1/coverage-floor.tsv" ] || printf 'target\tedges\n' >"$1/coverage-floor.tsv"
+  printf '%s\t5\n' "$2" >>"$1/coverage-floor.tsv"
 }
 LIBF=yes mk_crate "$K" kernel-core x ok_parse crash_decode hang_loop buildfail_x
 LIBF=none mk_crate "$K" bad x plain
@@ -154,7 +168,7 @@ run --list --repo os
 before=$(tree)
 run --target "$OKID" --time 5
 expect "clean run" 0 0
-has "^fuzz: $OKID: ok execs=4096 cov=9 ft=12 corpus=3 time=[0-9]+s\$" || bad "clean run: no coverage line: $OUT"
+has "^fuzz: $OKID: ok execs=4096 cov=9 ft=12 corpus=3 floor=5 seeds=5 time=[0-9]+s\$" || bad "clean run: no coverage line: $OUT"
 has '^RESULT: pass=1 fail=0 skipped=0 time=[0-9]+$' || bad "clean run: no RESULT line: $OUT"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 3 ] || bad "clean run: too much output: $OUT"
 [ "$(tree)" = "$before" ] || bad "a run changed files inside a checkout"
@@ -179,7 +193,37 @@ expect "bare name, second run" 0 0
 grep -q -- "$K/kernel-core/fuzz/corpus/ok_parse" "$RUNS" || bad "the checked-in seed corpus is not passed: $(cat "$RUNS")"
 grep -q -- "-timeout=7" "$RUNS" || bad "--unit-timeout is not passed: $(cat "$RUNS")"
 ls "$F"/kernel/*ok_parse/corpus | grep -q '^new-' || bad "the corpus was not kept between runs"
-rm -rf "$K/kernel-core/fuzz/corpus"
+rm -f "$K/kernel-core/fuzz/corpus/ok_parse/seed1"
+
+# ---- 2b. the coverage floor ------------------------------------------------------
+FL=$K/kernel-core/fuzz/coverage-floor.tsv; cp "$FL" "$FX/floor.orig"
+sed -i 's/^ok_parse\t5$/ok_parse\t50/' "$FL"; : >"$RUNS"
+run --target ok_parse --time 5
+expect "coverage drop" 1 1
+has "^ERROR: fuzz: $OKID: coverage dropped: the committed seeds reach 5 edges, the floor is 50" || bad "coverage drop: wrong ERROR line: $OUT"
+grep -q -- '-max_total_time' "$RUNS" && bad "coverage drop: the fuzzer ran anyway: $(cat "$RUNS")"
+for f in "/^ok_parse\t/d" 's/^ok_parse\t50$/ok_parse\t0/'; do
+  cp "$FX/floor.orig" "$FL"; sed -i 's/^ok_parse\t5$/ok_parse\t50/' "$FL"; sed -i "$f" "$FL"
+  run --target ok_parse --time 5
+  expect "no floor ($f)" 1 1
+  has "^ERROR: fuzz: $OKID: no coverage floor: .*coverage-floor.tsv has no non-zero row for ok_parse" || bad "no floor ($f): wrong ERROR line: $OUT"
+done
+# --save keeps what the run found in the checkout and raises the floor to match
+cp "$FX/floor.orig" "$FL"; sed -i '/^ok_parse\t/d' "$FL"
+run --target ok_parse --time 5 --save
+expect "save" 0 0
+n=$(ls "$K/kernel-core/fuzz/corpus/ok_parse" | wc -l)
+[ "$n" -ge 2 ] && ls "$K/kernel-core/fuzz/corpus/ok_parse" | grep -q '^new-' || bad "save: the found inputs were not merged into the committed corpus: $(ls "$K/kernel-core/fuzz/corpus/ok_parse")"
+[ "$(cat "$K/kernel-core/fuzz/corpus/ok_parse/seed-ok_parse" 2>/dev/null)" = "seed ok_parse" ] || bad "save: a committed seed lost its name or content"
+grep -q -- "-merge=1 .* $K/kernel-core/fuzz/corpus/ok_parse " "$RUNS" || bad "save: the merge does not go into the committed corpus itself: $(grep merge "$RUNS")"
+grep -qP "^ok_parse\t$((4 + n))$" "$FL" || bad "save: the floor is not the coverage of the new seeds ($((4 + n))): $(cat "$FL")"
+head -n 1 "$FL" | grep -qP '^target\tedges$' || bad "save: the floor file lost its header: $(cat "$FL")"
+grep -qP '^crash_decode\t5$' "$FL" || bad "save: other targets' floors were not kept: $(cat "$FL")"
+run --target ok_parse --time 5
+expect "after save" 0 0
+has "floor=$((4 + n)) seeds=$((4 + n)) " || bad "after save: the new floor is not checked: $OUT"
+cp "$FX/floor.orig" "$FL"; rm -rf "$K/kernel-core/fuzz/corpus/ok_parse"; seed_dir=$K/kernel-core/fuzz/corpus/ok_parse
+mkdir -p "$seed_dir"; echo "seed ok_parse" >"$seed_dir/seed-ok_parse"
 
 # ---- 3. a crash: reproducer kept, replayed, retired once fixed -------------------
 : >"$RUNS"
@@ -246,7 +290,7 @@ has '^fuzz: pass=1 fail=0 skipped=0$' || bad "deep: no fuzz suite line: $OUT"
 has '^(deep|bench|kani): ' && bad "deep: with --repo os there is no kernel to benchmark or prove and nothing to report for either: $OUT"
 grep -q -- "-max_total_time=3" "$RUNS" || bad "deep: SILICA_FUZZ_TIME is not the time box: $(cat "$RUNS")"
 [ "$(printf '%s\n' "$OUT" | wc -l)" -le 30 ] || bad "deep: more than 30 lines"
-echo "fn main() {}" >"$OS/fuzz/fuzz_targets/crash_root.rs"
+echo "fn main() {}" >"$OS/fuzz/fuzz_targets/crash_root.rs"; seed "$OS/fuzz" crash_root
 ENVX=(SILICA_FUZZ_TIME=3)
 run_test --deep --repo os
 ENVX=()
@@ -254,6 +298,6 @@ ENVX=()
 has '^ERROR: fuzz::os::crash_root: crash: ' || bad "deep with a crash: wrong ERROR line: $OUT"
 has '^fuzz: pass=1 fail=1 skipped=0$' || bad "deep with a crash: wrong suite line: $OUT"
 has '^RESULT: .* fail=1 ' || bad "deep with a crash: RESULT: $OUT"
-rm -f "$OS/fuzz/fuzz_targets/crash_root.rs"
+rm -rf "$OS/fuzz/fuzz_targets/crash_root.rs" "$OS/fuzz/corpus/crash_root"; sed -i '/^crash_root\t/d' "$OS/fuzz/coverage-floor.tsv"
 
 [ "$fails" = 0 ]
