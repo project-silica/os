@@ -3,8 +3,9 @@
 # section 2). Runs a private copy of the tool suite in a disposable fake
 # workshop with a fake kernel repository, fake ELF/image artifacts and fake
 # kernel sources, and checks every budget and bloat ceiling at, just under and
-# just over its limit, plus SKIP before the required milestone and ERROR from
-# it on. Nothing real is built. One "ERROR:" line per failed check.
+# just over its limit: a missing artifact is a SKIP before its milestone and
+# an ERROR from it on; an artifact over its budget is an ERROR at every
+# milestone. Nothing real is built. One "ERROR:" line per failed check.
 set -uo pipefail
 SRC=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd -P)
 BASE=${SILICA_RUN:-${TMPDIR:-/tmp}}; mkdir -p "$BASE"
@@ -119,8 +120,8 @@ has 'IPC fast path.*: 32768/32768' || bad "fast-at-budget: wrong measurement: $O
 fresh 2; mkelf 1000 1000 32769
 expect_fail "fast-over-budget-m2" 'IPC fast path.*32769 over budget 32768'
 fresh 1; mkelf 1000 1000 32769
-expect_pass "fast-over-budget-m1-skips"
-has '^SKIP: size: IPC fast path.*32769 over 32768.*M2' || bad "fast-over-budget-m1-skips: no SKIP naming M2: $OUT"
+# Over budget fails before its milestone too: a measured artifact is never let through.
+expect_fail "fast-over-budget-m1" 'IPC fast path.*32769 over budget 32768'
 
 # ---- 5. kernel heap ceiling (linked allocator) ----------------------------------
 fresh 1; mkelf 1000 1000 0 alloc
@@ -144,8 +145,7 @@ for spec in "core-text.bin:2097152:5:kernel \+ core servers" "server.img:1677721
   img "$f" $((lim + 1))
   expect_fail "$f-over-budget" "$name.*$((lim + 1)) over budget $lim"
   fresh $((from - 1)); good; img core-text.bin 1000; img server.img 1000; img desktop.img 1000; img "$f" $((lim + 1))
-  run; [ "$(errs)" = 0 ] || bad "$f-over-before-m$from: must not ERROR before M$from: $OUT"
-  has "^SKIP: size: $name.*over $lim.*enforced from M$from" || bad "$f-over-before-m$from: no SKIP: $OUT"
+  expect_fail "$f-over-before-m$from" "$name.*$((lim + 1)) over budget $lim"
 done
 fresh 9; good; img core-text.bin 2097152; img server.img 16777216; img desktop.img 134217728
 expect_pass "all-in-budget-m9" 0

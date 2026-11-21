@@ -17,7 +17,8 @@
 # from (the MILESTONE file in the workshop root). Every metric with a Linux
 # equivalent is gated at or better than Linux: no milestone permits Silica
 # to be slower (spec/TESTING.md section 4.2). Before that milestone a
-# miss or a missing value is a SKIP line, from it an ERROR. Every metric is
+# missing value is a SKIP line, from it an ERROR; a measured result that
+# misses its gate or its ratchet is an ERROR at every milestone. Every metric is
 # also a ratchet: bench/ratchet.tsv keeps the best ratio to Linux (or the best
 # value where Linux has no equivalent), and a result worse than that by more
 # than three times the noise is an ERROR. --update-ratchet records
@@ -80,9 +81,13 @@ finish() {
   exit 0
 }
 ok() { echo "bench: $1"; pass=$((pass + 1)); }
-enforce() { # enforce <metric> <from-milestone> <message>: ERROR from the milestone (under KVM), SKIP before
+enforce() { # enforce <metric> <from-milestone> <message>: a metric not measured yet: ERROR from its milestone (under KVM), SKIP before
   if [ "$ms" -ge "$2" ] && [ $accel = kvm ]; then echo "ERROR: bench::$1: $3"; fail=$((fail + 1))
-  else echo "SKIP: bench: $1: $3 (gated from M$2 under KVM)"; skipped=$((skipped + 1)); fi
+  else echo "SKIP: bench: $1: $3 (required from M$2 under KVM)"; skipped=$((skipped + 1)); fi
+}
+miss() { # miss <metric> <message>: a measured result that misses its gate or ratchet: ERROR at every milestone (under KVM)
+  if [ $accel = kvm ]; then echo "ERROR: bench::$1: $2"; fail=$((fail + 1))
+  else echo "SKIP: bench: $1: $2 (timings are gated under KVM only)"; skipped=$((skipped + 1)); fi
 }
 fmt() { awk -v x="$1" 'BEGIN { printf "%.4g", x }'; }
 
@@ -164,9 +169,9 @@ while read -r name unit better gate limit from; do
     win|le)
       if [ -z "$ratio" ]; then enforce "$name" "$from" "Linux reported no value to compare with ($desc)"; good=0
       elif awk -v r="$ratio" -v x="$limit" -v g="$gate" 'BEGIN { exit !((g == "win") ? (r < x) : (r <= x)) }'; then :
-      else enforce "$name" "$from" "$desc, gate: ratio $([ $gate = win ] && echo '<' || echo '<=') $limit"; good=0; fi ;;
-    min) awk -v o="$o" -v x="$limit" 'BEGIN { exit !(o >= x) }' || { enforce "$name" "$from" "$desc, gate: at least $limit"; good=0; } ;;
-    max) awk -v o="$o" -v x="$limit" 'BEGIN { exit !(o <= x) }' || { enforce "$name" "$from" "$desc, gate: at most $limit"; good=0; } ;;
+      else miss "$name" "$desc, gate: ratio $([ $gate = win ] && echo '<' || echo '<=') $limit"; good=0; fi ;;
+    min) awk -v o="$o" -v x="$limit" 'BEGIN { exit !(o >= x) }' || { miss "$name" "$desc, gate: at least $limit"; good=0; } ;;
+    max) awk -v o="$o" -v x="$limit" 'BEGIN { exit !(o <= x) }' || { miss "$name" "$desc, gate: at most $limit"; good=0; } ;;
   esac
   # The ratchet: against Linux where there is a Linux value, else the value itself.
   if [ -n "$ratio" ]; then kind=vs-linux now=$ratio noise=$(awk -v r="$ratio" -v o="$o" -v m="$omad" -v l="$l" -v n="${lmad:-0}" 'BEGIN { print 3 * r * (m / o + n / l) }'); worse=higher
@@ -175,7 +180,7 @@ while read -r name unit better gate limit from; do
   keep=${best:-$now}
   if [ -n "$best" ]; then
     if awk -v n="$now" -v b="$best" -v e="$noise" -v w="$worse" 'BEGIN { exit !((w == "higher") ? (n > b + e) : (n < b - e)) }'; then
-      enforce "$name" "$from" "regression: $kind $(fmt "$now") against the ratchet $(fmt "$best") (noise $(fmt "$noise")); $desc"; good=0
+      miss "$name" "regression: $kind $(fmt "$now") against the ratchet $(fmt "$best") (noise $(fmt "$noise")); $desc"; good=0
     elif awk -v n="$now" -v b="$best" -v w="$worse" 'BEGIN { exit !((w == "higher") ? (n < b) : (n > b)) }'; then
       keep=$now; desc="$desc; better than the ratchet $(fmt "$best")"
     fi

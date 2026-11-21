@@ -88,13 +88,14 @@ transcript "$SER/silica.img.1" "${GOOD[@]/400/900}"; transcript "$SER/silica.img
 run 2 --runs 3
 has '^bench: ipc_roundtrip: silica 400 ns \(noise 300\)' || bad "median: want the middle run and its deviation: $OUT"
 
-# ---- 3. a missed gate: ERROR from its milestone, SKIP before -------------------
+# ---- 3. a missed gate: ERROR at every milestone ---------------------------------
 reset; transcript "$SER/silica.img" "${GOOD[@]/400/700}"
 run 2 --runs 1
 [ "$RC" = 1 ] && [ "$(errs)" = 1 ] || bad "missed gate at M2: want one ERROR and exit 1, got $(errs) (exit $RC): $OUT"
 has '^ERROR: bench::ipc_roundtrip: .*ratio 0\.5833, gate: ratio < 0\.5' || bad "missed gate: message wrong: $OUT"
+# Before its milestone too: a measured result that misses its gate fails.
 run 1 --runs 1
-[ "$RC" = 0 ] && has '^SKIP: bench: ipc_roundtrip: .*gated from M2' || bad "missed gate before its milestone must be a SKIP: $OUT"
+[ "$RC" = 1 ] && has '^ERROR: bench::ipc_roundtrip: .*gate: ratio < 0\.5' || bad "a measured miss before its milestone must still be an ERROR: $OUT"
 reset; transcript "$SER/silica.img" "${GOOD[@]/200/341}"
 run 2 --runs 1
 has '^ERROR: bench::ctx_switch: .*gate: ratio <= 1' || bad "an at-most gate missed by a hair must fail: $OUT"

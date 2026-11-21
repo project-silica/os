@@ -19,10 +19,9 @@ bad() { echo "ERROR: size: $1"; fail=1; }
 missing() { # missing <what> <required-from>
   if [ "$ms" -ge "$2" ]; then bad "$1: artifact missing (required from M$2)"; else echo "SKIP: size: $1: not built yet (required from M$2)"; fi
 }
-check() { # check <name> <value> <limit> <required-from> [unit]
+check() { # check <name> <value> <limit> <required-from> [unit]: a measured artifact over its budget fails at every milestone
   if [ "$2" -le "$3" ]; then ok "$1: $2/$3${5:-}"
-  elif [ "$ms" -ge "$4" ] || [ "$4" -le 1 ]; then bad "$1: $2 over budget $3${5:-}"
-  else echo "SKIP: size: $1: $2 over $3${5:-}, enforced from M$4"; fi
+  else bad "$1: $2 over budget $3${5:-}"; fi
 }
 sections() { # sum of section sizes in ELF $1 whose names match regex $2
   size -A "$1" 2>/dev/null | awk -v re="$2" '$1 ~ re { s += $2 } END { print s + 0 }'
