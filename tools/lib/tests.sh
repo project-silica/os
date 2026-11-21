@@ -242,19 +242,40 @@ run_system() {
 # line is that test's failure; a run that does not end with SYSTEST OK and
 # status 0 is a failure of its own.
 run_systest() {
-  local arch=$1 suite=$2 log img serial rc l name
+  local arch=$1 suite=$2 log img serial rc l name expected=""
+  local -A seen=()
+  local plan='^systest: ([0-9]+) processors, ([1-9][0-9]*) tests$'
+  local passed='^TEST ([^[:space:]]+) PASS( \([0-9]+ ms\))?$'
   log=$(logfile "$suite" build.systest)
   img=$(build_system_image "$arch" "$log" "" systest) || { record fail "$suite" systest "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" systest)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 8 --timeout "${SILICA_SYSTEST_TIMEOUT:-600}" >"$serial.qemu" 2>&1
   rc=$?
   while IFS= read -r l; do
+    if [[ "$l" =~ $plan ]]; then
+      expected=${BASH_REMATCH[2]}
+      if [ "${BASH_REMATCH[1]}" != 8 ]; then record fail "$suite" systest "guest did not start eight processors (serial: $serial)"; fi
+      continue
+    fi
+    if [[ "$l" =~ $passed ]]; then
+      name=${BASH_REMATCH[1]}
+      if [ -n "${seen[$name]:-}" ]; then
+        record fail "$suite" "$name" "duplicate result (serial: $serial)"
+      else
+        seen[$name]=1
+        record pass "$suite" "$name"
+      fi
+      continue
+    fi
     case "$l" in
-      "TEST "*" PASS") name=${l#TEST }; record pass "$suite" "${name% PASS}" ;;
+      "TEST "*) record fail "$suite" systest "malformed result: $l (serial: $serial)" ;;
       "ERROR: systest: "*": "*) name=${l#ERROR: systest: }; record fail "$suite" "${name%%: *}" "${name#*: } (serial: $serial)" ;;
     esac
   done < <(tr -d '\r' <"$serial")
-  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'SYSTEST OK'; then return 0; fi
+  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'SYSTEST OK'; then
+    [ "${#seen[@]}" = "$expected" ] && return 0
+    record fail "$suite" systest "guest announced ${expected:-no} tests and reported ${#seen[@]} distinct passes (serial: $serial)"; return 1
+  fi
   [ -x "$TOOLS/symbolize.sh" ] && "$TOOLS/symbolize.sh" --arch "$arch" "$serial" >"$serial.symbolized" 2>&1
   record fail "$suite" systest "the run did not end with SYSTEST OK: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   return 1
