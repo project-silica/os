@@ -14,7 +14,9 @@
 # deviation; the noise of a ratio to Linux combines both systems' deviations.
 #
 # Each metric below has a gate against Linux and the milestone it applies
-# from (the MILESTONE file in the workshop root). Before that milestone a
+# from (the MILESTONE file in the workshop root). Every metric with a Linux
+# equivalent is gated at or better than Linux: no milestone permits Silica
+# to be slower (spec/TESTING.md section 4.2). Before that milestone a
 # miss or a missing value is a SKIP line, from it an ERROR. Every metric is
 # also a ratchet: bench/ratchet.tsv keeps the best ratio to Linux (or the best
 # value where Linux has no equivalent), and a result worse than that by more
@@ -44,12 +46,12 @@ timer_overshoot_p99 ns lower le 1 2
 ipc_scaling x higher min 7 2
 ipc_cross_pairs1 ops/s higher le 1 2
 ipc_cross_pairs4 ops/s higher le 1 2
-ipc_cross_scaling x higher none - 2
-page_fault ns lower none - 2
-null_syscall ns lower none - 2
-ipc_roundtrip_p99 ns lower none - 2
-ctx_switch_p99 ns lower none - 2
-timer_overshoot ns lower none - 2'
+ipc_cross_scaling x higher le 1 2
+page_fault ns lower le 1 2
+null_syscall ns lower le 1 2
+ipc_roundtrip_p99 ns lower le 1 2
+ctx_switch_p99 ns lower le 1 2
+timer_overshoot ns lower le 1 2'
 
 runs=5 out="" update=0
 while [ $# -gt 0 ]; do

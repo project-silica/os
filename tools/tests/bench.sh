@@ -51,7 +51,7 @@ transcript() {
     while [ $# -gt 0 ]; do printf 'BENCH %s %s %s\r\n' "$1" "$2" "$3"; shift 3; done
     echo "BENCH DONE"; } >"$f"
 }
-GOOD=(ipc_roundtrip 400 ns ctx_switch 200 ns timer_overshoot_p99 30000 ns ipc_scaling 7.5 x page_fault 700 ns null_syscall 60 ns
+GOOD=(ipc_roundtrip 400 ns ctx_switch 200 ns timer_overshoot_p99 30000 ns ipc_scaling 7.5 x page_fault 550 ns null_syscall 60 ns
   ipc_roundtrip_p99 450 ns ctx_switch_p99 220 ns timer_overshoot 10000 ns ipc_cross_pairs1 900000 ops/s ipc_cross_pairs4 3200000 ops/s
   ipc_cross_scaling 3.5 x)
 LINUX=(ipc_roundtrip 1200 ns ctx_switch 340 ns timer_overshoot_p99 80000 ns page_fault 600 ns null_syscall 64 ns
@@ -76,7 +76,7 @@ reset; run 2 --runs 2
 has '^bench: ipc_roundtrip: silica 400 ns .*linux 1200 ns, ratio 0\.3333' || bad "good run: ipc line wrong: $OUT"
 has '^bench: boot_userspace: silica 600 ms .*linux 800 ms, ratio 0\.75' || bad "good run: boot time must come from the host stamps: $OUT"
 has '^bench: ipc_scaling: silica 7\.5 x' || bad "good run: a metric with no Linux value passes on its own limit: $OUT"
-has '^bench: behind Linux: page_fault \(1\.167x\)$' || bad "good run: must name exactly the metrics slower than Linux: $OUT"
+has '^bench: behind Linux' && bad "good run: nothing is slower than Linux, so nothing is named behind it: $OUT"
 has '^RESULT: pass=13 fail=0 skipped=0 ' || bad "good run: RESULT wrong: $OUT"
 [ "$(tr '\n' ' ' <"$FX/calls")" = "silica.img linux.img silica.img linux.img " ] || bad "boots must alternate, Silica first: $(tr '\n' ' ' <"$FX/calls")"
 jq -e '.schema == 2 and .metrics.ipc_roundtrip.ratio < 0.34 and .metrics.ipc_scaling.linux == null' "$WS/target/logs/bench/results.json" >/dev/null 2>&1 ||
@@ -98,6 +98,12 @@ run 1 --runs 1
 reset; transcript "$SER/silica.img" "${GOOD[@]/200/341}"
 run 2 --runs 1
 has '^ERROR: bench::ctx_switch: .*gate: ratio <= 1' || bad "an at-most gate missed by a hair must fail: $OUT"
+# Every metric with a Linux value is gated at or better than Linux: a
+# metric 1.167x slower fails, and is named behind Linux.
+reset; transcript "$SER/silica.img" "${GOOD[@]/550/700}"
+run 2 --runs 1
+has '^ERROR: bench::page_fault: .*ratio 1\.167, gate: ratio <= 1' || bad "a metric slower than Linux must fail its gate: $OUT"
+has '^bench: behind Linux: page_fault \(1\.167x\)$' || bad "must name exactly the metrics slower than Linux: $OUT"
 reset; transcript "$SER/silica.img" "${GOOD[@]/7.5/6.9}"
 run 2 --runs 1
 has '^ERROR: bench::ipc_scaling: .*gate: at least 7' || bad "a minimum gate must fail below its limit: $OUT"
