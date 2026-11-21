@@ -99,7 +99,8 @@ case "$OUT" in *"$S"*) ;; *) bad "timeout ERROR does not name the serial file" ;
 SILICA_FW_TIMEOUT=2 run fwhang --image "$FX/disk.img" --serial "$S" --timeout 60
 expect "firmware timeout" 124 1
 case "$OUT" in *"timeout after 2s in the firmware"*) ;; *) bad "a firmware stall must be reported as one, after the firmware's allowance: $OUT" ;; esac
-[ "$SECS" -le 8 ] || bad "a firmware stall took ${SECS}s for an allowance of 2"
+case "$OUT" in *"booting once more"*) ;; *) bad "a firmware stall must be tried once more before it fails: $OUT" ;; esac
+[ "$SECS" -le 14 ] || bad "a firmware stall tried twice took ${SECS}s for an allowance of 2"
 if [ -f "$FX/pid" ] && kill -0 "$(cat "$FX/pid")" 2>/dev/null; then
   bad "the guest is still running after the timeout"; kill -9 "$(cat "$FX/pid")" 2>/dev/null
 fi
@@ -174,7 +175,7 @@ done
 if command -v qemu-system-x86_64 >/dev/null && command -v socat >/dev/null && [ -n "$fw" ]; then
   head -c 1048576 /dev/zero >"$FX/blank.img"
   P=$FX/real.ppm
-  OUT=$(cd "$FX" && env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS" SILICA_FW_TIMEOUT=12 \
+  OUT=$(cd "$FX" && env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" SILICA_WS="$WS" SILICA_FW_TIMEOUT=12 SILICA_FW_RETRIED=1 \
     bash "$OS/tools/qemu.sh" --image "$FX/blank.img" --serial "$FX/real.log" --timeout 12 \
     --screendump "$P" --screendump-after 4 2>&1); RC=$?
   expect "real qemu, non-bootable disk" 124 1

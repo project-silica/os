@@ -1,21 +1,22 @@
 # Best result per metric (tools/bench.sh --update-ratchet). vs-linux: ours/linux for
-# lower-is-better metrics, linux/ours otherwise; value: the metric itself.
-ipc_roundtrip	0.221764	vs-linux
-ctx_switch	0.421212	vs-linux
-boot_userspace	0.744303	vs-linux
-timer_overshoot_p99	0.6297	vs-linux
-ipc_pairs1	0.206275	vs-linux
-ipc_pairs8	0.21486	vs-linux
+# lower-is-better metrics, linux/ours otherwise, then the best value and the host it
+# was measured on; value: the metric itself.
+ipc_roundtrip	0.219771	vs-linux	269	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+ctx_switch	0.41194	vs-linux	138	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+boot_userspace	0.0620849	vs-linux	12.48	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+timer_overshoot_p99	0.550682	vs-linux	73070	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+ipc_pairs1	0.206275	vs-linux	3923000	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+ipc_pairs8	0.21486	vs-linux	30706580	12th_Gen_Intel(R)_Core(TM)_i9-12900K
 ipc_scaling	7.87	value
-ipc_cross_pairs1	0.750804	vs-linux
-ipc_cross_pairs4	0.672574	vs-linux
-ipc_cross_scaling	4.26	value
-page_fault	0.932759	vs-linux
-null_syscall	0.8125	vs-linux
-ipc_roundtrip_p99	0.223787	vs-linux
-ctx_switch_p99	0.415473	vs-linux
-timer_overshoot	0.039811	vs-linux
-insns_null_syscall	139.6	value
+ipc_cross_pairs1	0.750804	vs-linux	332500	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+ipc_cross_pairs4	0.67137	vs-linux	1443000	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+ipc_cross_scaling	4.33	value
+page_fault	0.924528	vs-linux	539	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+null_syscall	0.8125	vs-linux	52	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+ipc_roundtrip_p99	0.223787	vs-linux	286	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+ctx_switch_p99	0.410765	vs-linux	144	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+timer_overshoot	0.039811	vs-linux	709	12th_Gen_Intel(R)_Core(TM)_i9-12900K
+insns_null_syscall	139.5	value
 insns_ipc_roundtrip	977.6	value
 insns_ctx_switch	314.6	value
-insns_page_fault	2761.2	value
+insns_page_fault	2760.6	value

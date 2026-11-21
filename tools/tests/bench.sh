@@ -39,7 +39,7 @@ echo "\$img" >>"$FX/calls"
 f=$SER/\$img; [ -f "\$f.\$n" ] && f=\$f.\$n
 cp "\$f" "\$ser" 2>/dev/null || : >"\$ser"
 ms=\$(cat "$SER/\$img.boot" 2>/dev/null || echo 500)
-printf '1000.000000 QEMU START\n%s BENCH MARK userspace\n' "\$(awk -v m=\$ms 'BEGIN { printf "%.6f", 1000 + m / 1000 }')" >"\$st"
+printf '1000.000000 QEMU START\n1000.500000 BdsDxe: starting Boot0001\n%s BENCH MARK userspace\n' "\$(awk -v m=\$ms 'BEGIN { printf "%.6f", 1000.5 + m / 1000 }')" >"\$st"
 exit 0
 STUB
 chmod +x "$OS/tools/qemu.sh"
@@ -124,19 +124,34 @@ run 2 --runs 2
 
 # ---- 6. the ratchet -------------------------------------------------------------
 reset; run 2 --runs 1 --update-ratchet
-has '^bench: ratchet updated' && grep -q "^ipc_roundtrip	0.333333	vs-linux$" "$OS/bench/ratchet.tsv" || bad "ratchet: first run must record ratios: $(cat "$OS/bench/ratchet.tsv" 2>&1)"
+has '^bench: ratchet updated' && grep -q "^ipc_roundtrip	0.333333	vs-linux	400	" "$OS/bench/ratchet.tsv" || bad "ratchet: first run must record the ratio, the value and the host: $(cat "$OS/bench/ratchet.tsv" 2>&1)"
 grep -q "^ipc_scaling	7.5	value$" "$OS/bench/ratchet.tsv" || bad "ratchet: a metric without a Linux value records the value"
 rm -f "$FX"/count.*; transcript "$SER/silica.img" "${GOOD[@]/400/460}"
 run 2 --runs 1
-has '^ERROR: bench::ipc_roundtrip: regression: vs-linux 0\.3833 against the ratchet 0\.3333' || bad "ratchet: a slower result inside its gate must still fail: $OUT"
+has '^ERROR: bench::ipc_roundtrip: regression: silica 460 ns against its best 400 ns on this host' || bad "ratchet: a slower result inside its gate must still fail: $OUT"
+# On another host the value does not compare; the ratio to Linux does.
+SILICA_BENCH_HOST=elsewhere run 2 --runs 1
+has '^ERROR: bench::ipc_roundtrip: regression: vs-linux 0\.3833 against the ratchet 0\.3333' || bad "ratchet: on another host a slower ratio must fail: $OUT"
+# On this host a slower Linux does not make Silica's unchanged value pass or fail.
+rm -f "$FX"/count.*; transcript "$SER/silica.img" "${GOOD[@]}"; transcript "$SER/linux.img" "${LINUX[@]/1200/1100}"
+run 2 --runs 1
+has '^ERROR: bench::ipc_roundtrip' && bad "ratchet: Linux being faster this session is not a regression of Silica's: $OUT"
+transcript "$SER/linux.img" "${LINUX[@]}"
 rm -f "$FX"/count.*; transcript "$SER/silica.img" "${GOOD[@]/400/300}"
 run 2 --runs 1 --update-ratchet
-[ "$RC" = 0 ] && has 'ipc_roundtrip: .*better than the ratchet' && grep -q "^ipc_roundtrip	0.25	vs-linux$" "$OS/bench/ratchet.tsv" ||
+[ "$RC" = 0 ] && has 'ipc_roundtrip: .*better than its best 400 on this host' && grep -q "^ipc_roundtrip	0.25	vs-linux	300	" "$OS/bench/ratchet.tsv" ||
   bad "ratchet: an improvement must pass and move the ratchet: $OUT"
 # Within the noise of the runs is not a regression.
 rm -f "$FX"/count.*; transcript "$SER/silica.img.1" "${GOOD[@]/400/280}"; transcript "$SER/silica.img.2" "${GOOD[@]/400/310}"; transcript "$SER/silica.img.3" "${GOOD[@]/400/340}"
 run 2 --runs 3
 [ "$RC" = 0 ] || bad "ratchet: a result within three deviations of the best must pass: $OUT"
+# A timing within 1% of its best is within what a session repeats; 2.5% is not.
+rm -f "$FX"/count.* "$SER"/silica.img.*; transcript "$SER/silica.img" "${GOOD[@]/400/302}"
+run 2 --runs 1
+[ "$RC" = 0 ] || bad "ratchet: a timing 0.7% from its best is within what a session repeats: $OUT"
+rm -f "$FX"/count.*; transcript "$SER/silica.img" "${GOOD[@]/400/308}"
+run 2 --runs 1
+has '^ERROR: bench::ipc_roundtrip: regression' || bad "ratchet: a timing 2.7% from its best must fail: $OUT"
 
 # ---- 7. no Linux to compare with -------------------------------------------------
 reset

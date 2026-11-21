@@ -15,6 +15,7 @@
 # exit code, 124 on timeout, 2 on a usage or setup error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
+orig_args=("$@")
 arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -129,9 +130,12 @@ stop_shot() { # a screendump still pending must not outlive the run
 
 # --timeout is Silica's budget: it starts when the firmware hands over to
 # the loader. The firmware has its own allowance ($SILICA_FW_TIMEOUT, default
-# 300 s): emulated UEFI start-up is slow and slower still on a busy host, and
-# it is not what a test measures.
-waited=0 fw=0 fw_limit=${SILICA_FW_TIMEOUT:-300} started=0
+# 120 s): emulated UEFI start-up is slow and slower still on a busy host, and
+# it is not what a test measures. The emulated aarch64 firmware sometimes
+# hangs for good before it starts any boot option (spinning on an event, with
+# several processors under TCG); such a boot is tried once more, and the
+# output says so. Nothing of Silica had run.
+waited=0 fw=0 fw_limit=${SILICA_FW_TIMEOUT:-120} started=0
 while kill -0 "$pid" 2>/dev/null; do
   if [ $started = 0 ]; then
     if [ $((fw % 10)) = 0 ] && grep -aq "BdsDxe: starting\|Booting\|silica:\|ERROR: loader" "$serial" 2>/dev/null; then started=1
@@ -164,6 +168,10 @@ while kill -0 "$pid" 2>/dev/null; do
     where="" after=$timeout
     if ! grep -aq "BdsDxe: starting\|Booting\|silica:\|ERROR: loader" "$serial" 2>/dev/null; then where=" in the firmware: it never started the loader"; after=$fw_limit
     elif ! grep -aq "^silica:" "$serial" 2>/dev/null; then where=" before the kernel's first line"; fi
+    if [ "$after" = "$fw_limit" ] && [ -z "${SILICA_FW_RETRIED:-}" ]; then
+      echo "qemu: $arch: the firmware stalled for ${fw_limit}s before starting the loader; booting once more"
+      SILICA_FW_RETRIED=1 exec "$0" "${orig_args[@]}"
+    fi
     echo "ERROR: qemu: $arch: timeout after ${after}s$where (serial: $serial)"
     exit 124
   fi

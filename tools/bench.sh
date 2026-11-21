@@ -9,7 +9,8 @@
 # host processors with the same virtual machine. Both guests print
 #     BENCH <metric> <number> <unit>     one line per metric, then
 #     BENCH DONE
-# and the host stamps "BENCH MARK userspace" for the boot time. A metric's
+# and the host stamps the firmware's "BdsDxe: starting" and "BENCH MARK
+# userspace" for the boot time (the operating system's part of it). A metric's
 # value is the median over the runs; its noise is the median absolute
 # deviation; the noise of a ratio to Linux combines both systems' deviations.
 #
@@ -130,10 +131,16 @@ boot() {
     echo "RESULT: pass=$pass fail=1 skipped=$skipped time=$((SECONDS - start))"; exit 1
   fi
   tr -d '\r' <"$ser" | awk '$1 == "BENCH" && NF == 4 && $3 ~ /^[0-9]+([.][0-9]+)?$/ { print $2, $3, $4 }' >>"$RUN/$sys.values"
-  # Boot time, by the host's clock: emulator start to the first line from userspace.
-  t0=$(awk '$2 == "QEMU" && $3 == "START" { print $1; exit }' "$st")
+  # Boot time, by the host's clock: from the firmware starting the boot
+  # option (the operating system's loader) to the first line from userspace.
+  # The firmware before that is the same code for both systems and moves by
+  # tens of milliseconds from boot to boot, more than the operating system's
+  # own boot takes; it is printed for context, not gated.
+  t0=$(tr -d '\r' <"$st" | awk '/BdsDxe: starting/ { print $1; exit }')
+  tq=$(awk '$2 == "QEMU" && $3 == "START" { print $1; exit }' "$st")
   t1=$(tr -d '\r' <"$st" | awk '$2 == "BENCH" && $3 == "MARK" { print $1; exit }')
   [ -n "$t0" ] && [ -n "$t1" ] && awk -v a="$t0" -v b="$t1" 'BEGIN { printf "boot_userspace %.3f ms\n", (b - a) * 1000 }' >>"$RUN/$sys.values"
+  [ -n "$tq" ] && [ -n "$t0" ] && awk -v a="$tq" -v b="$t0" 'BEGIN { printf "%.3f\n", (b - a) * 1000 }' >>"$RUN/$sys.firmware"
 }
 # Kernel instructions per operation of the fixed paths (spec/TESTING.md
 # 4.1), counted under TCG with icount by tools/profile.sh: a boot running
@@ -176,10 +183,14 @@ stat() {
       n = asort(d); mad = (n % 2) ? d[(n + 1) / 2] : (d[n / 2] + d[n / 2 + 1]) / 2
       print med, mad }'
 }
-ratchet_of() { [ -f "$RATCHET" ] && awk -F'\t' -v m="$1" '$1 == m { print $2; exit }' "$RATCHET"; }
+ratchet_row() { [ -f "$RATCHET" ] && awk -F'\t' -v m="$1" '$1 == m { print; exit }' "$RATCHET"; }
+# The host a value was measured on: its processor model ($SILICA_BENCH_HOST
+# overrides, for the tool's own test).
+host=${SILICA_BENCH_HOST:-$(LC_ALL=C lscpu 2>/dev/null | sed -n 's/^Model name: *//p' | head -n 1 | tr -s ' ' '_')}
+host=${host:-unknown}
 
 behind="" results=() newratchet=$RUN/ratchet.tsv
-printf '# Best result per metric (tools/bench.sh --update-ratchet). vs-linux: ours/linux for\n# lower-is-better metrics, linux/ours otherwise; value: the metric itself.\n' >"$newratchet"
+printf '# Best result per metric (tools/bench.sh --update-ratchet). vs-linux: ours/linux for\n# lower-is-better metrics, linux/ours otherwise, then the best value and the host it\n# was measured on; value: the metric itself.\n' >"$newratchet"
 while read -r name unit better gate limit from; do
   read -r o omad <<<"$(stat silica "$name")"
   read -r l lmad <<<"$(stat linux "$name")"
@@ -205,23 +216,55 @@ while read -r name unit better gate limit from; do
     min) awk -v o="$o" -v x="$limit" 'BEGIN { exit !(o >= x) }' || { miss "$name" "$desc, gate: at least $limit"; good=0; } ;;
     max) awk -v o="$o" -v x="$limit" 'BEGIN { exit !(o <= x) }' || { miss "$name" "$desc, gate: at most $limit"; good=0; } ;;
   esac
-  # The ratchet: against Linux where there is a Linux value, else the value itself.
-  if [ -n "$ratio" ] && [ "$unit" != x ]; then kind=vs-linux now=$ratio noise=$(awk -v r="$ratio" -v o="$o" -v m="$omad" -v l="$l" -v n="${lmad:-0}" 'BEGIN { print 3 * r * (m / o + n / l) }'); worse=higher
-  else kind=value now=$o noise=$(awk -v m="$omad" -v u="$unit" 'BEGIN { print 3 * m + (u == "insns" ? 1 : 0) }'); worse=$([ "$better" = lower ] && echo higher || echo lower); fi
-  best=$(ratchet_of "$name")
-  keep=${best:-$now}
-  if [ -n "$best" ]; then
-    if awk -v n="$now" -v b="$best" -v e="$noise" -v w="$worse" 'BEGIN { exit !((w == "higher") ? (n > b + e) : (n < b - e)) }'; then
-      miss "$name" "regression: $kind $(fmt "$now") against the ratchet $(fmt "$best") (noise $(fmt "$noise")); $desc"; good=0
-    elif awk -v n="$now" -v b="$best" -v w="$worse" 'BEGIN { exit !((w == "higher") ? (n < b) : (n > b)) }'; then
-      keep=$now; desc="$desc; better than the ratchet $(fmt "$best")"
+  # The ratchet. It exists to catch Silica getting slower. On the host that
+  # set it, Silica's own value is the measure: it repeats from session to
+  # session within about 1%, while Linux's, and so the ratio, moves by up to
+  # 5% (ipc_pairs1 Linux 804k to 847k round trips/s across sessions on the
+  # reference host): a ratchet on the best ratio ever seen would keep the
+  # luckiest Linux session and fail later ones at random. On another host,
+  # where values do not compare, the ratio to Linux in the same session does.
+  # A metric with a Linux value keeps both: "<best ratio> vs-linux <best
+  # value> <host>". A timing allows at least 1% of its best either way; an
+  # instruction count allows one instruction.
+  IFS=$'\t' read -r _ rbest rkind vbest vhost <<<"$(ratchet_row "$name")"
+  floor() { awk -v e="$1" -v b="$2" -v u="$unit" 'BEGIN { f = (u == "insns") ? 0 : b * 0.01; if (f < 0) f = -f; print (e > f ? e : f) }'; }
+  vnoise=$(awk -v m="$omad" -v u="$unit" 'BEGIN { print 3 * m + (u == "insns" ? 1 : 0) }')
+  vworse=$([ "$better" = lower ] && echo higher || echo lower)
+  worse_than() { awk -v n="$1" -v b="$2" -v e="$3" -v w="$4" 'BEGIN { exit !((w == "higher") ? (n > b + e) : (n < b - e)) }'; }
+  better_than() { awk -v n="$1" -v b="$2" -v w="$3" 'BEGIN { exit !((w == "higher") ? (n < b) : (n > b)) }'; }
+  if [ -n "$ratio" ] && [ "$unit" != x ]; then
+    rnoise=$(awk -v r="$ratio" -v o="$o" -v m="$omad" -v l="$l" -v n="${lmad:-0}" 'BEGIN { print 3 * r * (m / o + n / l) }')
+    rkeep=${rbest:-$ratio} vkeep=$o
+    if [ -n "$vbest" ] && [ "$vhost" = "$host" ]; then
+      e=$(floor "$vnoise" "$vbest"); vkeep=$vbest
+      if worse_than "$o" "$vbest" "$e" "$vworse"; then
+        miss "$name" "regression: silica $(fmt "$o") $unit against its best $(fmt "$vbest") $unit on this host (noise $(fmt "$e")); $desc"; good=0
+      elif better_than "$o" "$vbest" "$vworse"; then vkeep=$o; desc="$desc; better than its best $(fmt "$vbest") on this host"; fi
+    elif [ -n "$rbest" ]; then
+      e=$(floor "$rnoise" "$rbest")
+      if worse_than "$ratio" "$rbest" "$e" higher; then
+        miss "$name" "regression: vs-linux $(fmt "$ratio") against the ratchet $(fmt "$rbest") (noise $(fmt "$e")); $desc"; good=0
+      fi
     fi
+    better_than "$ratio" "$rkeep" higher && rkeep=$ratio
+    printf '%s\t%s\tvs-linux\t%s\t%s\n' "$name" "$rkeep" "$vkeep" "$host" >>"$newratchet"
+  else
+    keep=${rbest:-$o}
+    if [ -n "$rbest" ]; then
+      e=$(floor "$vnoise" "$rbest")
+      if worse_than "$o" "$rbest" "$e" "$vworse"; then
+        miss "$name" "regression: value $(fmt "$o") against the ratchet $(fmt "$rbest") (noise $(fmt "$e")); $desc"; good=0
+      elif better_than "$o" "$rbest" "$vworse"; then keep=$o; desc="$desc; better than the ratchet $(fmt "$rbest")"; fi
+    fi
+    printf '%s\t%s\tvalue\n' "$name" "$keep" >>"$newratchet"
   fi
-  printf '%s\t%s\t%s\n' "$name" "$keep" "$kind" >>"$newratchet"
   [ $good = 1 ] && ok "$name: $desc"
 done <<<"$METRICS"
 
 [ -z "$behind" ] || echo "bench: behind Linux:$behind"
+med() { [ -s "$1" ] && sort -g "$1" | awk '{ v[NR] = $1 } END { printf "%.0f", (NR % 2) ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2 }'; }
+fs=$(med "$RUN/silica.firmware"); fl=$(med "$RUN/linux.firmware")
+[ -n "$fs$fl" ] && echo "bench: firmware before the boot option (the same for both, not gated): silica ${fs:-?} ms, linux ${fl:-?} ms"
 if [ $update = 1 ]; then
   if [ $accel = kvm ] && [ $fail = 0 ]; then cp "$newratchet" "$RATCHET" && echo "bench: ratchet updated: $RATCHET"
   else echo "bench: ratchet not updated (needs KVM and no failure)"; fi
