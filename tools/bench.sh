@@ -38,14 +38,20 @@
 start=$SECONDS
 export LC_ALL=C
 
-# name unit better gate limit from-milestone
+# name unit better gate limit from-milestone [repeat]
+#   repeat: how far, in percent of its best, a timing may sit from one session
+#   to the next on a host held still (default 1). The two timer metrics are
+#   how promptly the host wakes a virtual processor more than anything Silica
+#   does: three sessions of one kernel read 830, 937 and 995 ns (median) and
+#   7.4, 9.9 and 8.4 us (p99), so their ratchets allow 25% and 40%; the gate
+#   against Linux, measured in the same session, is what holds them.
 #   gate: win  ours/linux strictly below limit     le   ours/linux at most limit
 #         min  ours at least limit (no Linux value needed)
 #         max  ours at most limit                  none ratchet only
 METRICS='ipc_roundtrip ns lower win 0.5 2
 ctx_switch ns lower le 1 2
 boot_userspace ms lower win 1 2
-timer_overshoot_p99 ns lower le 1 2
+timer_overshoot_p99 ns lower le 1 2 40
 ipc_pairs1 ops/s higher le 1 2
 ipc_pairs8 ops/s higher le 1 2
 ipc_scaling x higher min 7 2
@@ -56,7 +62,7 @@ page_fault ns lower le 1 2
 null_syscall ns lower le 1 2
 ipc_roundtrip_p99 ns lower le 1 2
 ctx_switch_p99 ns lower le 1 2
-timer_overshoot ns lower le 1 2
+timer_overshoot ns lower le 1 2 25
 insns_null_syscall insns lower none 0 2
 insns_ipc_roundtrip insns lower none 0 2
 insns_ctx_switch insns lower none 0 2
@@ -105,6 +111,22 @@ fmt() { awk -v x="$1" 'BEGIN { printf "%.4g", x }'; }
 # Host processors for the guests: $SILICA_BENCH_CPUS, else one hardware thread
 # of each of the fastest cores, as many as the guest has processors.
 pin=${SILICA_BENCH_CPUS:-$(fastest_cpus "$SMP")}
+# Those processors are held at one policy for both systems while the guests
+# run (host_tune), and put back afterwards, whichever way this script ends.
+# A host left on its power-saving default measures its own frequency ramps
+# and sleep states: the same kernel then reads several percent apart from
+# one session to the next. Where the policy cannot be set the results say so.
+policy=$LOGS/bench/host-policy tuned=no
+mkdir -p "$LOGS/bench"
+host_restore "$policy"   # left by a run that was killed
+# (The tool's own test boots nothing: there is no host to hold.)
+[ -n "${SILICA_BENCH_IMG:-}" ] && tuned=stub
+if [ $accel = kvm ] && [ -n "$pin" ] && [ $tuned = no ]; then
+  trap 'host_restore "$policy"' EXIT
+  trap 'exit 130' INT TERM
+  if host_tune "$pin" "$policy"; then tuned=yes
+  else host_restore "$policy"; echo "bench: host not tuned (needs passwordless sudo): timings carry its power-saving policy"; fi
+fi
 
 log=$LOGS/bench/build.silica.log
 # $SILICA_BENCH_IMG names a ready-made Silica image (used by the tool's own test).
@@ -188,10 +210,13 @@ ratchet_row() { [ -f "$RATCHET" ] && awk -F'\t' -v m="$1" '$1 == m { print; exit
 # overrides, for the tool's own test).
 host=${SILICA_BENCH_HOST:-$(LC_ALL=C lscpu 2>/dev/null | sed -n 's/^Model name: *//p' | head -n 1 | tr -s ' ' '_')}
 host=${host:-unknown}
+# Values measured with the host held still do not compare with values from
+# the same machine left to its own frequency policy: a different host.
+[ "$tuned" = yes ] && host=$host+tuned
 
 behind="" results=() newratchet=$RUN/ratchet.tsv
 printf '# Best result per metric (tools/bench.sh --update-ratchet). vs-linux: ours/linux for\n# lower-is-better metrics, linux/ours otherwise, then the best value and the host it\n# was measured on; value: the metric itself.\n' >"$newratchet"
-while read -r name unit better gate limit from; do
+while read -r name unit better gate limit from repeat; do
   read -r o omad <<<"$(stat silica "$name")"
   read -r l lmad <<<"$(stat linux "$name")"
   if [ -z "${o:-}" ]; then enforce "$name" "$from" "Silica reported no value"; continue; fi
@@ -227,7 +252,7 @@ while read -r name unit better gate limit from; do
   # value> <host>". A timing allows at least 1% of its best either way; an
   # instruction count allows one instruction.
   IFS=$'\t' read -r _ rbest rkind vbest vhost <<<"$(ratchet_row "$name")"
-  floor() { awk -v e="$1" -v b="$2" -v u="$unit" 'BEGIN { f = (u == "insns") ? 0 : b * 0.01; if (f < 0) f = -f; print (e > f ? e : f) }'; }
+  floor() { awk -v e="$1" -v b="$2" -v u="$unit" -v p="${repeat:-1}" 'BEGIN { f = (u == "insns") ? 0 : b * p / 100; if (f < 0) f = -f; print (e > f ? e : f) }'; }
   vnoise=$(awk -v m="$omad" -v u="$unit" 'BEGIN { print 3 * m + (u == "insns" ? 1 : 0) }')
   vworse=$([ "$better" = lower ] && echo higher || echo lower)
   worse_than() { awk -v n="$1" -v b="$2" -v e="$3" -v w="$4" 'BEGIN { exit !((w == "higher") ? (n > b + e) : (n < b - e)) }'; }
@@ -266,12 +291,14 @@ med() { [ -s "$1" ] && sort -g "$1" | awk '{ v[NR] = $1 } END { printf "%.0f", (
 fs=$(med "$RUN/silica.firmware"); fl=$(med "$RUN/linux.firmware")
 [ -n "$fs$fl" ] && echo "bench: firmware before the boot option (the same for both, not gated): silica ${fs:-?} ms, linux ${fl:-?} ms"
 if [ $update = 1 ]; then
-  if [ $accel = kvm ] && [ $fail = 0 ]; then cp "$newratchet" "$RATCHET" && echo "bench: ratchet updated: $RATCHET"
-  else echo "bench: ratchet not updated (needs KVM and no failure)"; fi
+  # A metric that failed keeps its previous best in the new file, so writing
+  # it never loosens anything; it only records what the others improved.
+  if [ $accel = kvm ] && [ $tuned != no ]; then cp "$newratchet" "$RATCHET" && echo "bench: ratchet updated: $RATCHET"
+  else echo "bench: ratchet not updated (needs KVM and a host held still: host_tune)"; fi
 fi
 out=${out:-$LOGS/bench/results.json}
-printf '%s\n' "${results[@]+"${results[@]}"}" | jq -s --argjson ms "$ms" --arg accel "$accel" --argjson runs "$runs" --arg pin "$pin" \
-  --arg linux "$(linux_field version)" '{schema: 2, milestone: $ms, accel: $accel, runs: $runs, host_cpus: $pin, linux: $linux, metrics: from_entries}' >"$out" 2>/dev/null ||
+printf '%s\n' "${results[@]+"${results[@]}"}" | jq -s --argjson ms "$ms" --arg accel "$accel" --argjson runs "$runs" --arg pin "$pin" --arg tuned "$tuned" \
+  --arg linux "$(linux_field version)" '{schema: 2, milestone: $ms, accel: $accel, runs: $runs, host_cpus: $pin, host_tuned: $tuned, linux: $linux, metrics: from_entries}' >"$out" 2>/dev/null ||
   echo "ERROR: bench: cannot write $out"
 echo "bench: results in $out"
 finish

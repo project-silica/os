@@ -157,3 +157,50 @@ fastest_cpus() {
     echo "$(cat "$c/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo 0) ${c##*cpu}"
   done | sort -k1,1nr -k2,2n | head -n "$1" | awk '{ print $2 }' | sort -n | paste -sd, -
 }
+
+# host_tune <cpu list> <state file>: hold those processors, and the other
+# hardware threads of their cores, at one fixed policy while a benchmark
+# runs: the "performance" frequency governor and preference (no ramp from a
+# low frequency inside a sample), no idle state slower to leave than 20 us
+# (a processor a guest wakes answers at once instead of after a deep sleep),
+# and, for the whole machine, no turbo: with it a core's frequency depends
+# on how many other cores happen to be awake, and the same kernel measured
+# 53 ns in one boot and 55 ns in the next for a null system call; without
+# it, 84 ns in five boots of five. Absolute timings are therefore at the
+# processor's base frequency, for both systems; ratios are what carry.
+# What everything was set to is recorded in <state file> first, for
+# host_restore. Needs passwordless sudo; returns 1 without changing anything
+# where there is none.
+host_tune() {
+  local cpu sib f s v list=""
+  sudo -n true 2>/dev/null || return 1
+  : >"$2" || return 1
+  for f in /sys/devices/system/cpu/intel_pstate/no_turbo /sys/devices/system/cpu/cpufreq/boost; do
+    [ -e "$f" ] && list="$list $f"
+  done
+  for cpu in $(echo "$1" | tr , ' '); do
+    for sib in $(tr ',-' '  ' <"/sys/devices/system/cpu/cpu$cpu/topology/thread_siblings_list"); do
+      f=/sys/devices/system/cpu/cpu$sib
+      list="$list $f/cpufreq/scaling_governor $f/cpufreq/energy_performance_preference"
+      for s in "$f"/cpuidle/state[0-9]*; do
+        [ "$(cat "$s/latency" 2>/dev/null || echo 0)" -gt 20 ] && list="$list $s/disable"
+      done
+    done
+  done
+  # Everything is recorded before anything changes: the "performance"
+  # governor rewrites the preference beside it.
+  for f in $list; do [ -e "$f" ] && printf '%s %s\n' "$f" "$(cat "$f")" >>"$2"; done
+  while read -r f _; do
+    case $f in */scaling_governor|*/energy_performance_preference) v=performance ;; */boost) v=0 ;; *) v=1 ;; esac
+    echo "$v" | sudo -n tee "$f" >/dev/null || return 1
+  done <"$2"
+}
+
+# host_restore <state file>: put back what host_tune recorded (the governor
+# first: the preference cannot be written under "performance").
+host_restore() {
+  local f v
+  [ -s "$1" ] || return 0
+  { grep scaling_governor "$1"; grep -v scaling_governor "$1"; } | while read -r f v; do echo "$v" | sudo -n tee "$f" >/dev/null; done
+  rm -f "$1"
+}
