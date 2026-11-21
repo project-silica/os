@@ -32,7 +32,7 @@ art_dir() { local d; d=$(cache_of kernel)/artifacts/$1; mkdir -p "$d"; echo "$d"
 
 build_kernel() {
   local arch=$1 log=$2 dir vend out
-  dir=$(checkout_of kernel); vend=$(merged_vendor kernel); out=$(art_dir "$arch")
+  dir=$(checkout_of kernel); vend=$(merged_vendor kernel) || return 1; out=$(art_dir "$arch")
   [ -f "$dir/targets/$arch-silica.json" ] || { echo "no target spec targets/$arch-silica.json" >"$log"; return 1; }
   cargo_run kernel "$log" build --release -p kernel --target "$dir/targets/$arch-silica.json" \
     -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
@@ -43,7 +43,7 @@ build_kernel() {
 
 build_root() { # the root task the kernel starts: the in-OS test program until the system repository exists
   local arch=$1 log=$2 dir vend out
-  dir=$(checkout_of kernel); vend=$(merged_vendor kernel); out=$(art_dir "$arch")
+  dir=$(checkout_of kernel); vend=$(merged_vendor kernel) || return 1; out=$(art_dir "$arch")
   [ -f "$dir/targets/$arch-silica-user.json" ] || { echo "no target spec targets/$arch-silica-user.json" >"$log"; return 1; }
   cargo_run kernel "$log" build --release -p roottest --target "$dir/targets/$arch-silica-user.json" \
     -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
@@ -59,7 +59,7 @@ build_system() {
   local arch=$1 log=$2 k s vend out n
   k=$(checkout_of kernel); s=$(checkout_of system); out=$(art_dir "$arch")/system
   [ -f "$s/Cargo.toml" ] || { echo "no checkout of the system repository" >"$log"; return 1; }
-  mkdir -p "$out"; vend=$(merged_vendor system)
+  mkdir -p "$out"; vend=$(merged_vendor system) || return 1
   cargo_run system "$log" build --release --workspace --bins --target "$k/targets/$arch-silica-user.json" \
     -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
   for n in $(cd "$s" && cargo metadata --no-deps --format-version 1 --offline 2>/dev/null | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name'); do
@@ -80,7 +80,7 @@ build_loader() {
     case $e in RUSTFLAGS=*) rf=${e#RUSTFLAGS=} ;; *) keep+=("$e") ;; esac
   done
   local -a CARGO_ENV=("${keep[@]+"${keep[@]}"}" "RUSTFLAGS=${rf:+$rf }-C link-arg=/debug:none -C link-arg=/timestamp:1")
-  vend=$(merged_vendor kernel); out=$(art_dir "$arch")
+  vend=$(merged_vendor kernel) || return 1; out=$(art_dir "$arch")
   cargo_run kernel "$log" build --release -p boot-uefi --target "$arch-unknown-uefi" \
     "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
   cp "$(cache_of kernel)/target/$arch-unknown-uefi/release/boot-uefi.efi" "$out/$name" || return 1
@@ -114,6 +114,8 @@ build_system_image() {
     entries+=(--ramdisk-entry "$n=$f")
   done
   if [ -n "$cmdline" ]; then
+    # This run's alone, as for build_image.
+    [ -n "${RUN:-}" ] && out=$RUN/$(basename "$out")
     printf '%s\n' "$cmdline" >"$(dirname "$out")/SYSTEM-CMDLINE.TXT" || return 1
     extra=("SILICA/CMDLINE.TXT=$(dirname "$out")/SYSTEM-CMDLINE.TXT")
   fi
@@ -147,7 +149,9 @@ build_image() {
   out=$(art_dir "$arch")/disk.img
   local -a extra=()
   if [ -n "$cmdline" ]; then
-    out=$(art_dir "$arch")/disk-cmdline.img
+    # An image with its own command line is this run's alone: another run
+    # (another test, another command line) may be building one at once.
+    out=${RUN:-$(art_dir "$arch")}/disk-cmdline.img
     printf '%s\n' "$cmdline" >"$(dirname "$out")/CMDLINE.TXT" || return 1
     extra=("SILICA/CMDLINE.TXT=$(dirname "$out")/CMDLINE.TXT")
   fi

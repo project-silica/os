@@ -70,15 +70,30 @@ cache_of() { # build cache for one checkout of one repo (keyed by real path)
 
 # ---- cargo ----------------------------------------------------------------
 SYSROOT_VENDOR() { echo "$(cd "$1" && rustc --print sysroot)/lib/rustlib/src/rust/library/vendor"; }
-merged_vendor() { # repo vendor/ plus the toolchain's library vendor, for -Zbuild-std
-  local repo=$1 dir out c
-  dir=$(checkout_of "$repo"); out=$(cache_of "$repo")/vendor-merged
-  rm -rf "$out"; mkdir -p "$out"
-  for c in "$(SYSROOT_VENDOR "$dir")"/* "$dir"/vendor/*/; do
-    c=${c%/}; [ -f "$c/.cargo-checksum.json" ] && ln -sfn "$c" "$out/$(basename "$c")"
+# A Cargo invocation keeps one immutable directory of links for its entire
+# build. The checkout wins if it vendors the same crate as the sysroot.
+merged_vendor() (
+  local dir cache sysroot crate name key out stage
+  dir=$(checkout_of "$1"); cache=$(cache_of "$1")
+  sysroot=$(SYSROOT_VENDOR "$dir") || return 1
+  local -A links=()
+  for crate in "$sysroot"/* "$dir"/vendor/*; do
+    [ -f "$crate/.cargo-checksum.json" ] || continue
+    links[${crate##*/}]=$crate
   done
-  echo "$out"
-}
+  key=$(printf '%s\0' "${links[@]}" | LC_ALL=C sort -z | sha256sum) || return 1
+  out=$cache/vendor-${key%% *}
+  if [ ! -d "$out" ]; then
+    mkdir -p "$cache" && stage=$(mktemp -d "$cache/.vendor.XXXXXX") || return 1
+    trap 'rm -rf -- "$stage"' EXIT
+    for name in "${!links[@]}"; do
+      ln -s -- "${links[$name]}" "$stage/$name" || return 1
+    done
+    # Concurrent builders of this set of links publish identical directories.
+    mv -T -- "$stage" "$out" 2>/dev/null || [ -d "$out" ] || return 1
+  fi
+  printf '%s\n' "$out"
+)
 patch_config() { # Cargo [patch] for every checkout in use, written to $1
   local f=$1 r d url
   : >"$f"
