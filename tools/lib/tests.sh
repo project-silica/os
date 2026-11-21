@@ -169,24 +169,28 @@ run_inos() {
 # panic message and a backtrace, and symbolize.sh must decode the frame of the
 # function that panicked to a function name, a source file and a line.
 run_panic() {
-  local arch=$1 suite=$2 log img serial rc sym
-  log=$(logfile "$suite" build.panic_backtrace)
-  img=$(build_image "$arch" "$log" "panic=test") || { record fail "$suite" panic_backtrace "image build failed (log: $log)"; return 1; }
-  serial=$(logfile "$suite" panic_backtrace)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  local arch=$1 suite=$2 mode=${3:-test} label=panic_backtrace cpus=1 log img serial rc sym
+  if [ "$mode" = secondary ]; then label=panic_backtrace_secondary; cpus=2; fi
+  log=$(logfile "$suite" "build.$label")
+  img=$(build_image "$arch" "$log" "panic=$mode") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$label")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp "$cpus" --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
   sym=$serial.symbolized
   "$TOOLS/symbolize.sh" --arch "$arch" "$serial" >"$sym" 2>&1
   if [ $rc != 1 ] || ! grep -q 'guest exit code 17' "$serial.qemu"; then
-    record fail "$suite" panic_backtrace "a panicking kernel did not leave with the failure code (exit status $rc)"; return 1
+    record fail "$suite" "$label" "a panicking kernel did not leave with the failure code (exit status $rc)"; return 1
   fi
   if ! grep -aq '^PANIC: deliberate panic' "$serial"; then
-    record fail "$suite" panic_backtrace "no panic message on the serial port (serial: $serial)"; return 1
+    record fail "$suite" "$label" "no panic message on the serial port (serial: $serial)"; return 1
+  fi
+  if [ "$mode" = secondary ] && ! grep -aq '^PANIC: deliberate panic on processor 1' "$serial"; then
+    record fail "$suite" "$label" "the secondary processor did not report its panic (serial: $serial)"; return 1
   fi
   if ! grep -aqE 'deliberate_panic at .+\.rs:[1-9][0-9]*' "$sym"; then
-    record fail "$suite" panic_backtrace "the backtrace does not decode to function, file and line (see $sym)"; return 1
+    record fail "$suite" "$label" "the backtrace does not decode to function, file and line (see $sym)"; return 1
   fi
-  record pass "$suite" panic_backtrace
+  record pass "$suite" "$label"
 }
 
 # run_boot_error <arch> <suite> <label> <expected text> <silica-image arguments...>

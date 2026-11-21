@@ -346,6 +346,8 @@ else
     # before the milestone that requires it, so what works stays working.
     if { in_scope kernel || in_scope os; } && [ -f "$(checkout_of kernel)/targets/aarch64-silica.json" ]; then
       suite_arch_entry aarch64
+      run_panic aarch64 inos.aarch64
+      run_panic aarch64 inos.aarch64 secondary
       suite_inos aarch64
     fi
     suite_required_arch aarch64
