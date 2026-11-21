@@ -93,12 +93,30 @@ else
   [ -n "$code" ] && [ -n "$vars" ] || die "no x86_64 UEFI firmware (run tools/init.sh)"
   img=$(build_image x86_64 "$out/build.log" "bench=$mode:$times") || die "image build failed (log: $out/build.log)"
   elf=$(art_dir x86_64)/kernel.elf
-  cp "$vars" "$out/vars.fd"
-  timeout 1800 qemu-system-x86_64 -nodefaults -no-reboot -display none -machine q35 -cpu max \
-    -accel tcg,one-insn-per-tb=on -icount shift=0,sleep=off -smp 2 -m 512 -serial "file:$out/serial" \
-    -plugin "$plugin,out=$out/counts,cpu=0" \
-    -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$out/vars.fd" \
-    -drive "format=raw,file=$img,if=virtio,snapshot=on" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$out/qemu.log" 2>&1
+  # The emulated firmware occasionally hangs before it starts the loader
+  # (as in qemu.sh); such a boot is tried once more. Nothing of Silica ran.
+  for attempt in 1 2; do
+    cp "$vars" "$out/vars.fd"
+    rm -f "$out/serial" "$out/counts"
+    timeout 1800 qemu-system-x86_64 -nodefaults -no-reboot -display none -machine q35 -cpu max \
+      -accel tcg,one-insn-per-tb=on -icount shift=0,sleep=off -smp 2 -m 512 -serial "file:$out/serial" \
+      -plugin "$plugin,out=$out/counts,cpu=0" \
+      -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$out/vars.fd" \
+      -drive "format=raw,file=$img,if=virtio,snapshot=on" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$out/qemu.log" 2>&1 &
+    q=$!
+    for _ in $(seq 1200); do
+      kill -0 $q 2>/dev/null || break
+      grep -aq "BdsDxe: starting" "$out/serial" 2>/dev/null && break
+      sleep 0.1
+    done
+    if kill -0 $q 2>/dev/null && ! grep -aq "BdsDxe: starting" "$out/serial" 2>/dev/null; then
+      kill $q 2>/dev/null; wait $q 2>/dev/null
+      echo "profile: the firmware stalled for 120 s before starting the loader; booting once more" >&2
+      continue
+    fi
+    wait $q
+    break
+  done
 fi
 
 tr -d '\r' <"$out/serial" | grep -qx 'BENCH DONE' || die "the benchmark did not finish (serial: $out/serial)"
