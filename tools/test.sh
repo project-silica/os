@@ -189,7 +189,9 @@ suite_tools() { # tool self-tests (os/tools/tests/*.sh): they take minutes, so -
   local s=os.tools t
   for t in "$(checkout_of os)"/tools/tests/*.sh; do
     [ -f "$t" ] || continue
-    run_named os "tools/tests/$(basename "$t")" "$s" >/dev/null
+    # Each self-test builds a fake workshop with its own MILESTONE file; the
+    # override for this run (SILICA_MILESTONE) must not leak into it.
+    (unset SILICA_MILESTONE; run_named os "tools/tests/$(basename "$t")" "$s" >/dev/null)
   done
 }
 

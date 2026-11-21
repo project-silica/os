@@ -130,10 +130,23 @@ waited=0
 while kill -0 "$pid" 2>/dev/null; do
   if [ "$waited" -ge $((timeout * 10)) ]; then
     # The serial log often ends before a firmware or kernel stall. Keep
-    # the live PC, instructions and registers before destroying the VM.
+    # where the guest is before destroying the VM: eight samples of the boot
+    # processor's PC an eighth of a second apart (a spin shows the same few
+    # PCs, a stop one), then with the VM stopped every processor's registers,
+    # the code around the PC and around its caller, and the interrupt
+    # controller's state where QEMU can show it (x86_64).
     if [ -S "$RUN/$mon" ] && command -v socat >/dev/null; then
-      (cd "$RUN" && printf '%s\n' 'stop' 'info registers' 'x/12i $pc' |
-        timeout 2 socat -t1 - "UNIX-CONNECT:$mon") >"$serial.monitor" 2>/dev/null
+      (cd "$RUN" && {
+        for _ in 1 2 3 4 5 6 7 8; do printf '%s\n' 'p/x $pc'; sleep 0.125; done
+        printf '%s\n' 'stop' 'info registers -a' 'x/24i $pc-0x40' 'info pic'
+        sleep 0.5
+      } | timeout 5 socat -t2 - "UNIX-CONNECT:$mon") >"$serial.monitor" 2>/dev/null
+      # The caller's code, from its return address (x30 on aarch64).
+      lr=$(grep -m1 -o 'X30=[0-9a-f]*' "$serial.monitor" | cut -d= -f2)
+      [ -n "$lr" ] && (cd "$RUN" && printf 'x/16i 0x%s-0x20\n' "$lr" |
+        timeout 2 socat -t1 - "UNIX-CONNECT:$mon") >>"$serial.monitor" 2>/dev/null
+      # The monitor echoes each command with line-editing escapes; keep the answers.
+      sed -i '/\x1b\[K/d' "$serial.monitor"
     fi
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; stop_shot
     # Where the guest stopped: still in the firmware (it never started a

@@ -39,7 +39,9 @@ manifest_get() { # manifest_get <repo> <key>
     cur == r && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *(#.*)?$/, "", v); print v; exit }' "$MANIFEST"
 }
 all_repos() { manifest_repos; echo os; }
-milestone() { if [ -f "$WS/MILESTONE" ]; then cat "$WS/MILESTONE"; else echo 0; fi; }
+# The milestone whose requirements apply: SILICA_MILESTONE overrides the MILESTONE file, so the
+# next milestone's gates can be checked (SILICA_MILESTONE=2 tools/test.sh --full) before it is declared.
+milestone() { if [ -n "${SILICA_MILESTONE:-}" ]; then echo "$SILICA_MILESTONE"; elif [ -f "$WS/MILESTONE" ]; then cat "$WS/MILESTONE"; else echo 0; fi; }
 
 # Source tree of a repository. SRC[<repo>] names another copy (repro.sh builds the same tree from two directories).
 declare -A SRC=()
