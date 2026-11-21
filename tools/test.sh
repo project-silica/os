@@ -159,6 +159,23 @@ suite_required_arch() { # an architecture required by milestone that cannot boot
   suite_inos "$a"
 }
 
+# Kani proofs in kernel-core (src/proofs.rs): no-forge now; revoke
+# completeness is due at M2 too (spec/MILESTONES.md) and not proved yet.
+suite_kani() {
+  local s=kernel.kani log dir; dir=$(checkout_of kernel); log=$(logfile "$s" kani)
+  if ! command -v cargo-kani >/dev/null 2>&1; then
+    if [ "$ms" -ge 2 ]; then record fail "$s" kani "Kani is not installed (cargo install --locked kani-verifier && cargo kani setup)"
+    else record skip "$s" kani "Kani is not installed"; fi
+    return 0
+  fi
+  (cd "$dir" && timeout 1800 cargo kani -p kernel-core --output-format terse) >"$log" 2>&1
+  local n; n=$(grep -c 'VERIFICATION:- SUCCESSFUL' "$log")
+  if grep -q '^Complete - [0-9]* successfully verified harnesses, 0 failures' "$log"; then record pass "$s" "proofs ($n)"
+  else record fail "$s" proofs "a proof failed or did not finish (log: $log)"; fi
+  [ "$ms" -lt 2 ] || record fail "$s" revoke_completeness "no Kani proof of revoke completeness (required from M2; harnesses on a three-slot list did not finish)"
+  return 0
+}
+
 suite_size() {
   local s=size log; log=$(logfile "$s" size)
   "$TOOLS/size.sh" >"$log" 2>&1
@@ -338,8 +355,7 @@ else
   if [ "$tier" = deep ]; then
     suite_fuzz
     suite_bench
-    # Proofs of no-forge and revoke-completeness are due at M2 (spec/MILESTONES.md).
-    [ "$ms" -lt 2 ] || record fail kani proofs "no Kani proofs (required from M2)"
+    in_scope kernel && suite_kani
   fi
 fi
 
