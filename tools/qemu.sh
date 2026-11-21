@@ -75,7 +75,9 @@ case "$arch" in
     bin=qemu-system-aarch64
     # --el2: the firmware runs at EL2, as on most servers; the loader drops to EL1.
     accel=(-machine "virt,gic-version=3${el2:+,virtualization=on}" -cpu max)
-    extra=(-semihosting-config enable=on,target=native) ;;
+    # Test images report their status through semihosting, from the kernel
+    # (EL1) or the root task (EL0).
+    extra=(-semihosting-config enable=on,target=native,userspace=on,chardev=con) ;;
   *) die "unsupported architecture $arch" ;;
 esac
 command -v "$bin" >/dev/null || die "$bin is not installed (run tools/init.sh)"
@@ -94,9 +96,20 @@ if [ -n "$stamp" ]; then
   serial_arg=stdio
   printf '%s QEMU START\n' "$EPOCHREALTIME" >"$stamp"
 fi
+# The serial port's output: on aarch64 a multiplexed character device that
+# semihosting writes to as well, so a test program's semihosting console and
+# the UART end up in one log, in order.
+serial_dev=(-serial "$serial_arg")
+if [ "$arch" = aarch64 ]; then
+  case "$serial_arg" in
+    file:*) backend="file,path=${serial_arg#file:}" ;;
+    *) backend="stdio,signal=off" ;;
+  esac
+  serial_dev=(-chardev "$backend,id=con,mux=on" -serial chardev:con)
+fi
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
   cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${accel[@]}" -smp "$smp" -m "$mem" \
-  -serial "$serial_arg" -monitor "unix:$mon,server,nowait" \
+  "${serial_dev[@]}" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
   -drive "format=raw,file=$image,if=virtio,snapshot=on" "${vga[@]}" "${extra[@]}" ) 2>"$RUN/qemu.out" &
 pid=$!
@@ -117,7 +130,12 @@ waited=0
 while kill -0 "$pid" 2>/dev/null; do
   if [ "$waited" -ge $((timeout * 10)) ]; then
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; stop_shot
-    echo "ERROR: qemu: $arch: timeout after ${timeout}s (serial: $serial)"
+    # Where the guest stopped: still in the firmware (it never started a
+    # boot option), in the loader, or in the kernel or later.
+    where=""
+    if ! grep -aq "BdsDxe: starting\|Booting\|silica:\|ERROR: loader" "$serial" 2>/dev/null; then where=" in the firmware: it never started the loader"
+    elif ! grep -aq "^silica:" "$serial" 2>/dev/null; then where=" before the kernel's first line"; fi
+    echo "ERROR: qemu: $arch: timeout after ${timeout}s$where (serial: $serial)"
     exit 124
   fi
   sleep 0.1; waited=$((waited + 1))

@@ -129,9 +129,9 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
   run_boot_error x86_64 $e error.root_not_elf 'ERROR: kernel: cannot start the root task: Image(NotElf)' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'root=$L'
 }
 
-# suite_arch_entry <arch>: before an architecture runs the in-OS tests, its
-# loader and kernel entry are tested on their own: the image boots from
-# firmware at EL1 and at EL2 to the kernel's report line, without a panic.
+# suite_arch_entry <arch>: the loader and kernel entry on their own: the
+# image boots from firmware at EL1 and at EL2 (as on most servers) to the
+# kernel's report line, without a panic.
 suite_arch_entry() {
   local a=$1 s="entry.$1" v log img
   log=$(logfile "$s" build)
@@ -154,6 +154,8 @@ suite_required_arch() { # an architecture required by milestone that cannot boot
     riscv64) [ "$ms" -ge 8 ] || return 0 ;;
     *) return 0 ;;
   esac
+  # aarch64 with a target spec has run above.
+  if [ "$a" = aarch64 ] && [ -f "$(checkout_of kernel)/targets/aarch64-silica.json" ]; then return 0; fi
   suite_inos "$a"
 }
 
@@ -323,7 +325,12 @@ else
   # neither is in scope (--repo idl, --repo .github).
   if in_scope kernel || in_scope os || in_scope system; then suite_size; fi
   if [ "$tier" != fast ]; then
-    if { in_scope kernel || in_scope os; } && [ -f "$(checkout_of kernel)/targets/aarch64-silica.json" ]; then suite_arch_entry aarch64; fi
+    # aarch64's in-OS tests run whenever the kernel has the architecture,
+    # before the milestone that requires it, so what works stays working.
+    if { in_scope kernel || in_scope os; } && [ -f "$(checkout_of kernel)/targets/aarch64-silica.json" ]; then
+      suite_arch_entry aarch64
+      suite_inos aarch64
+    fi
     suite_required_arch aarch64
     suite_required_arch riscv64
     if in_scope kernel; then suite_miri; suite_loom; fi
