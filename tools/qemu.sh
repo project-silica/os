@@ -129,6 +129,12 @@ stop_shot() { # a screendump still pending must not outlive the run
 waited=0
 while kill -0 "$pid" 2>/dev/null; do
   if [ "$waited" -ge $((timeout * 10)) ]; then
+    # The serial log often ends before a firmware or kernel stall. Keep
+    # the live PC, instructions and registers before destroying the VM.
+    if [ -S "$RUN/$mon" ] && command -v socat >/dev/null; then
+      (cd "$RUN" && printf '%s\n' 'stop' 'info registers' 'x/12i $pc' |
+        timeout 2 socat -t1 - "UNIX-CONNECT:$mon") >"$serial.monitor" 2>/dev/null
+    fi
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; stop_shot
     # Where the guest stopped: still in the firmware (it never started a
     # boot option), in the loader, or in the kernel or later.
