@@ -371,6 +371,28 @@ run_faults() {
       else record pass "$suite" "$name"; fi
     done
   done
+  # The network driver, under netfault (eight pings in flight to the
+  # user-mode gateway, nothing restarted on purpose): every ping after the
+  # driver's recovery must be answered, the driver restarted at most once,
+  # and nothing but the driver may say ERROR. Which request the fault lands
+  # on (a frame sent, or a buffer offered for one to arrive in) decides
+  # whether the driver ends or absorbs it.
+  for fault in garbage stuck spurious missed reset; do
+    name=fault_virtio_net_$fault
+    log=$(logfile "$suite" "build.$name")
+    img=$(build_system_image "$arch" "$log" "checks=netfault inject=virtio-net:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+    serial=$(logfile "$suite" "$name")
+    "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user >"$serial.qemu" 2>&1
+    rc=$?
+    text=$(tr -d '\r\0' <"$serial")
+    restarts=$(grep -c "^devmgr: virtio-net for .* started again" <<<"$text")
+    other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: virtio-net: " | head -1 | cut -c1-140)
+    if [ $rc != 0 ] || ! grep -qx 'NETFAULT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+    elif ! grep -q "^inject: [A-Za-z]* now" <<<"$text"; then record fail "$suite" "$name" "the fault was never committed (serial: $serial)"
+    elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
+    elif [ "$restarts" -gt 1 ]; then record fail "$suite" "$name" "the driver was started again $restarts times (serial: $serial)"
+    else record pass "$suite" "$name"; fi
+  done
 }
 
 # run_recovery <arch> <suite>: a driver killed under load (spec/MILESTONES.md
@@ -517,30 +539,44 @@ run_power() {
 # the device manager's line for the fault on writing configuration space.
 # The system must have come up (BOOT OK) and nothing may have failed.
 run_rogue() {
-  local arch=$1 suite=$2 log img serial rc name text want
-  log=$(logfile "$suite" build.rogue)
-  img=$(build_system_image "$arch" "$log" "driver=1af4:1042=virtio-rogue checks=") || { record fail "$suite" rogue "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" rogue)
+  rogue_on "$1" "$2" "" 1af4:1042 '00:01\.0'
+}
+
+# run_rogue_net <arch> <suite>: the same hostile driver in the network
+# device's place (on QEMU's user-mode network, behind the IOMMU): the
+# network device's DMA must be confined as the disk's is.
+run_rogue_net() {
+  rogue_on "$1" "$2" _net 1af4:1041 '00:02\.0' --net user
+}
+
+# rogue_on <arch> <suite> <suffix> <vendor:device> <address regex> [qemu.sh arguments]
+rogue_on() {
+  local arch=$1 suite=$2 sfx=$3 id=$4 at=$5 log img serial rc name text want
+  shift 5
+  log=$(logfile "$suite" "build.rogue$sfx")
+  img=$(build_system_image "$arch" "$log" "driver=$id=virtio-rogue checks=") || { record fail "$suite" "rogue$sfx" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "rogue$sfx")
   # The system stays up; the run ends when the driver's second run is over.
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
-    --until '^devmgr: virtio-rogue for 00:01\.0 ended with status 0' >"$serial.qemu" 2>&1
+    --until "^devmgr: virtio-rogue for $at ended with status 0" "$@" >"$serial.qemu" 2>&1
   rc=$?
-  text=$(tr -d '\r' <"$serial")
+  text=$(tr -d '\r\0' <"$serial")
   for name in rogue_other_device rogue_other_interrupt rogue_physical_address rogue_address_above_the_top \
               rogue_write_read_only rogue_recovers rogue_restart; do
-    if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name"
-    else record fail "$suite" "$name" "$(grep -m1 -a "^ERROR: virtio-rogue: $name" <<<"$text" | cut -c1-160) (no PASS line; serial: $serial)"; fi
+    if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name$sfx"
+    else record fail "$suite" "$name$sfx" "$(grep -m1 -a "^ERROR: virtio-rogue: $name" <<<"$text" | cut -c1-160) (no PASS line; serial: $serial)"; fi
   done
   while IFS='|' read -r name want; do
-    if grep -qE "$want" <<<"$text"; then record pass "$suite" "$name"
-    else record fail "$suite" "$name" "the serial log has no line matching: $want (serial: $serial)"; fi
+    want=${want//@/$at}
+    if grep -qE "$want" <<<"$text"; then record pass "$suite" "$name$sfx"
+    else record fail "$suite" "$name$sfx" "the serial log has no line matching: $want (serial: $serial)"; fi
   done <<'CHECKS'
-rogue_write_unmapped|^kernel: device 00:01\.0 was refused a write at 0x100000 
-rogue_read_unmapped|^kernel: device 00:01\.0 was refused a read at 0x200000 
-rogue_config_space|^devmgr: virtio-rogue for 00:01\.0 touched memory it may not \(page fault\)
+rogue_write_unmapped|^kernel: device @ was refused a write at 0x100000 
+rogue_read_unmapped|^kernel: device @ was refused a read at 0x200000 
+rogue_config_space|^devmgr: virtio-rogue for @ touched memory it may not \(page fault\)
 CHECKS
-  if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" rogue_system_survives; return 0; fi
-  record fail "$suite" rogue_system_survives "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+  if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" "rogue_system_survives$sfx"; return 0; fi
+  record fail "$suite" "rogue_system_survives$sfx" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
   return 1
 }
 
