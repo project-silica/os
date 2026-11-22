@@ -11,13 +11,12 @@
 #
 # What is measured, and what is not (spec/TESTING.md 4.1, "Linux is locked"
 # and "Measured once"):
-# - Linux is not measured. It is not what is being built, and its numbers
-#   on this host do not change: they are locked in bench/reference.tsv
-#   (Linux at its best over the clean sessions that were run), and Silica's
-#   target on every metric is MARGIN percent better than that. A run boots
-#   no Linux. --linux boots it beside Silica and prints what it measures
-#   next to the locked numbers, for new hardware or a doubt about them; it
-#   changes neither the file nor any gate.
+# - Silica is compared with Linux's final numbers in bench/reference.tsv
+#   (Linux at its best over the clean sessions that were run), and its
+#   target on every metric is MARGIN percent better than that. Every boot
+#   of a run is Silica's; a metric with no number there is held by its
+#   ratchet. --linux is the owner's instrument for a decision about that
+#   file.
 # - The instruction counts are a function of the kernel's source: counted
 #   when it changed, all eight boots at once.
 # - Silica's timings come in two groups with their own boots: the kernel
@@ -96,6 +95,9 @@ export LC_ALL=C
 #   gate: win  ours/linux strictly below limit     le   ours/linux at most limit
 #         min  ours at least limit (no Linux value needed)
 #         max  ours at most limit                  none ratchet only
+#   A new metric with a number in bench/reference.tsv takes win or le; one
+#   without takes none, min or max, and its ratchet holds it from its first
+#   measurement.
 METRICS='ipc_roundtrip ns lower win 0.5 2
 ctx_switch ns lower le 1 2
 boot_userspace ms lower win 1 2
@@ -389,7 +391,7 @@ if [ -z "$compare$sweep" ]; then
   IN_KERNEL=(repo+:kernel crate:os:silica-image "${MACHINE[@]}" "runs:$runs" "file:${SILICA_BENCH_IMG:-}")
   IN_IO=(repo+:system repo+:kernel path:os:bench/net crate:os:silica-image "${MACHINE[@]}" "runs:$runs")
   do_linux=0 do_kernel=0 do_io=0 do_counts=0
-  # Linux is booted only when asked for (--linux), and then only to be shown.
+  # The baseline image is built for the owner's --linux alone.
   do_linux=$relinux
   kept bench.kernel "${IN_KERNEL[@]}" || do_kernel=$need_kernel; f_kernel=$EV_FILE k_kernel=$EV_KEY t_kernel=$EV_TEXT
   kept bench.io "${IN_IO[@]}" || do_io=$need_io; f_io=$EV_FILE k_io=$EV_KEY t_io=$EV_TEXT
