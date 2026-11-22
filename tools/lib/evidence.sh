@@ -88,13 +88,19 @@ plain_hash() { # a file or a directory that Git does not track: its contents
 # tree_now <repo>: the Git tree of the checkout as it is now. The index is
 # copied and everything not ignored is added to the copy; the objects go to
 # the run's directory, so nothing in the checkout or its repository changes.
+# Markdown is left out: no build, test or image reads a repository's .md
+# files (the workshop's own, spec/ among them, are named one by one as ws:
+# inputs), and with them in, an edit to a README made every check that
+# depends on the repository run again.
 tree_now() {
   local r=$1 d idx
   d=$(checkout_of "$r")
   if [ "${EV_GIT[$r]}" = 1 ]; then
     idx=$RUN/index.${r//[!A-Za-z0-9]/_}
     cp "$(git -C "$d" rev-parse --absolute-git-dir)/index" "$idx" 2>/dev/null || rm -f "$idx"
-    GIT_INDEX_FILE=$idx ev_git "$r" add -A . >/dev/null 2>&1 && GIT_INDEX_FILE=$idx ev_git "$r" write-tree 2>/dev/null && return 0
+    GIT_INDEX_FILE=$idx ev_git "$r" add -A . >/dev/null 2>&1 &&
+      GIT_INDEX_FILE=$idx ev_git "$r" rm -r -q --cached --ignore-unmatch -- '*.md' >/dev/null 2>&1 &&
+      GIT_INDEX_FILE=$idx ev_git "$r" write-tree 2>/dev/null && return 0
   fi
   plain_hash "$d"
 }

@@ -79,6 +79,12 @@ gx -C "$LIBR" add -A; gx -C "$LIBR" commit -qm two; held_now "committing what wa
 # two steps ago, and that is held; a tree never seen is not.
 rm "$LIBR/new.txt"; held_now "back to a tree that passed before" "$U"
 rm "$LIBR/c/src/lib.rs"; runs_now "a file removed" "$U"
+# Markdown is no input of a check: a README or a document beside the code
+# changes no build and no result; the source beside it still does.
+echo "# lib" >"$LIBR/README.md"; mkdir -p "$LIBR/a/doc"; echo notes >"$LIBR/a/doc/notes.md"
+held_now "a Markdown file added or changed is not an input" "$U"
+echo "pub fn c_md() {}" >"$LIBR/c/src/lib.rs"; runs_now "the source beside it still is" "$U"
+rm "$LIBR/c/src/lib.rs"; rm -rf "$LIBR/README.md" "$LIBR/a/doc"; held_now "back to the tree without them" "$U"
 echo "pub fn c() {}" >"$LIBR/c/src/lib.rs"
 gx -C "$LIBR" add -A; gx -C "$LIBR" commit -qm three
 
