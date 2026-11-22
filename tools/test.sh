@@ -3,7 +3,7 @@
 # Use --fast, --full or --deep; --repo limits the scope. --guest NAME
 # runs just the named x86_64 guest test (repeatable): a kernel test, or one
 # of the system image's (system, rogue, rogue_net, power, recovery, shutdown, console,
-# nvme, faults, net, net_recovery, hotplug).
+# nvme, faults, net, net_recovery, hotplug, partitions).
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
 . "$TOOLS/lib/tests.sh"
@@ -407,7 +407,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
   manifest="$(checkout_of kernel)/tests/inos-x86_64.txt"
   for guest in "${guests[@]}"; do
     # The system image's own tests, by name.
-    case "$guest" in system|rogue|rogue_net|power|recovery|shutdown|console|nvme|faults|net|net_recovery|hotplug) "run_$guest" x86_64 system.x86_64; continue ;; esac
+    case "$guest" in system|rogue|rogue_net|power|recovery|shutdown|console|nvme|faults|net|net_recovery|hotplug|partitions) "run_$guest" x86_64 system.x86_64; continue ;; esac
     opts=$(awk -v t="$guest" '$1 == t { $1 = ""; print; exit }' "$manifest" 2>/dev/null)
     inos_machine x86_64 "$guest" "$opts" "$manifest" || continue
     run_inos x86_64 inos.x86_64 "$guest"
@@ -431,7 +431,7 @@ else
     # The system image's guest tests, all at once: each boots its own
     # machine (images are built one at a time), and the host has the
     # processors; one after another they no longer fit the fast tier's minute.
-    system_tests=(system rogue rogue_net power recovery shutdown console nvme net net_recovery hotplug) pids=()
+    system_tests=(system rogue rogue_net power recovery shutdown console nvme net net_recovery hotplug partitions) pids=()
     # One boot per fault and driver: ten, so not in the fast tier.
     [ "$tier" != fast ] && system_tests+=(faults)
     for t in "${system_tests[@]}"; do "run_$t" x86_64 system.x86_64 & pids+=($!); done

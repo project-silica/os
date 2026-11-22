@@ -336,6 +336,26 @@ run_hotplug() {
   else record fail "$suite" hotplug "$bad (serial: $serial)"; fi
 }
 
+# run_partitions <arch> <suite>: the block server (spec/MILESTONES.md M3).
+# partcheck opens the boot disk's first partition through it, as a disk of
+# its own (a capability the driver narrowed to the partition), and checks
+# its size, that its block 0 is the disk's block where it starts, that
+# nothing past its end is reached, and that a write lands in the right
+# place on the disk.
+run_partitions() {
+  local arch=$1 suite=$2 log img serial rc text name
+  log=$(logfile "$suite" build.partitions)
+  img=$(build_system_image "$arch" "$log" "checks=partitions") || { record fail "$suite" partitions "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" partitions)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  for name in size offset confined write; do
+    if grep -qx "TEST partitions.$name PASS" <<<"$text"; then record pass "$suite" "partitions_$name"
+    else record fail "$suite" "partitions_$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
+  done
+}
+
 # run_faults <arch> <suite>: a device that misbehaves (spec/MILESTONES.md
 # M3, fault injection). One boot per fault and block driver, the driver
 # committing the fault at its 50th request (inject=<driver>:<fault>@50,
