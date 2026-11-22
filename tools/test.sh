@@ -99,19 +99,19 @@ suite_fmt() {
 suite_clippy() {
   local r=$1 s="$1.clippy" log; log=$(logfile "$s" clippy)
   if cargo_run "$r" "$log" clippy --all-targets -- -D warnings; then record pass "$s" clippy
-  else record fail "$s" clippy "$(grep -m1 -E '^(error|warning)' "$log" | cut -c1-140)"; fi
+  else record fail "$s" clippy "$({ grep -m1 -E '^error' "$log" || grep -m1 -E '^warning' "$log"; } | cut -c1-140)"; fi
   # The documentation is the interface (a driver or an application is
   # written from it alone): it builds with no broken links or warnings.
   log=$(logfile "$s" docs)
   if RUSTDOCFLAGS="-D warnings" cargo_run "$r" "$log" doc --no-deps; then record pass "$s" docs
-  else record fail "$s" docs "$(grep -m1 -E '^(error|warning)' "$log" | cut -c1-140)"; fi
+  else record fail "$s" docs "$({ grep -m1 -E '^error' "$log" || grep -m1 -E '^warning' "$log"; } | cut -c1-140)"; fi
   # The system repository's programs only build for Silica: lint them there.
   if [ "$r" = system ] && [ -f "$(checkout_of kernel)/targets/x86_64-silica-user.json" ]; then
     local vend; log=$(logfile "$s" programs)
     if vend=$(merged_vendor system) && cargo_run system "$log" clippy --workspace --bins \
         --target "$(checkout_of kernel)/targets/x86_64-silica-user.json" -Zjson-target-spec "${BUILD_STD_USER[@]}" \
         --config "source.vendored-sources.directory=\"$vend\"" -- -D warnings; then record pass "$s" programs
-    else record fail "$s" programs "$(grep -m1 -E '^(error|warning)' "$log" | cut -c1-140)"; fi
+    else record fail "$s" programs "$({ grep -m1 -E '^error' "$log" || grep -m1 -E '^warning' "$log"; } | cut -c1-140)"; fi
   fi
 }
 
