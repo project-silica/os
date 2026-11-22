@@ -628,7 +628,8 @@ run_console() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device \
     --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
     --type '^silica> $=log console\n' --type '^  silica> log console$=services\n' \
-    --type '^  shell +running=caps console\n' --type '^  thread .* on processor=log devmgr\n' --type '^  devmgr: 00:01\.0 =trace\n' \
+    --type '^  shell +running=caps console\n' --type '^  thread .* on processor=log devmgr\n' --type '^  devmgr: 00:01\.0 =caps 00:01.0\n' \
+    --type '^process virtio-blk@00:01\.0: [0-9]+ capabilities, [0-9]+ threads$=trace\n' \
     --type '^           seen by this client +[0-9]+ ns$=devices\n' \
     --type '^  00:03\.0 input +virtio-input$=restart-driver 0001:00:03.0\n' \
     --type '^restart-driver: 0001:00:03\.0: Error\(NoSuchDevice\)$=restart-driver 00:03.0\n' \
@@ -643,6 +644,7 @@ run_console() {
   for want in '^console: on the display and the serial line, reading the keyboard$' '^silica> services$' '^  console +running +failures 0  silica\.console\.Terminal$' \
               '^silica> log console$' '^  silica> log console$' '^silica> caps console$' '^process console: [0-9]+ capabilities, 1 threads$' '^  slot [0-9]+: Endpoint rights ' \
               '^silica> log devmgr$' '^  devmgr: 00:01\.0 1af4:1042 class 01\.00\.00' \
+              '^silica> caps 00:01\.0$' '^process virtio-blk@00:01\.0: [0-9]+ capabilities, [0-9]+ threads$' \
               '^silica> trace$' '^  partition 0x800 \(EFI System\) opened through the block server' '^           taken by the driver +[0-9]+ ns$' \
               '^silica> devices$' '^  00:02\.0 display +fbdisplay$' '^  00:03\.0 input +virtio-input$' \
               '^restart-driver: 0001:00:03\.0: Error\(NoSuchDevice\)$' '^restart-driver: 00:03\.0: done$' \
