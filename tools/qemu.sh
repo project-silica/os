@@ -3,15 +3,19 @@
 #   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--serial <file>] [--timeout <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
-#           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>]
+#           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
+#           [--on '<extended regex>=<monitor command>']...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
 # --nvme adds an NVMe controller (QEMU's model) whose one namespace is a
-# snapshot of the given disk image.
+# snapshot of the given disk image. --disk adds a second virtio disk that
+# is written for real (not a snapshot): the host reads it afterwards.
 # --no-exit-device leaves out the debug-exit device (x86_64): the guest
 # must turn the machine off itself (ACPI), and exit status 0 then means the
 # emulator stopped because the guest turned it off or reset it.
+# --on sends a command to QEMU's monitor (system_powerdown: the power
+# button) the first time a serial line matches the expression.
 # --until ends the run, as a success, when a serial line matches: for a
 # system that stays up (it does not turn the machine off when it is ready).
 # --pin runs the emulator on the given host processors (taskset), for
@@ -27,10 +31,10 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
-arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme=""
+arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -50,6 +54,8 @@ while [ $# -gt 0 ]; do
     --device) devices+=(-device "$2"); shift 2 ;;
     --until) until=$2; shift 2 ;;
     --nvme) nvme=$2; shift 2 ;;
+    --disk) disk2=$2; shift 2 ;;
+    --on) on+=("$2"); shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
 done
@@ -80,7 +86,7 @@ cp "$vars" "$RUN/vars.fd"
 # The monitor socket is addressed relative to $RUN (QEMU and socat run there):
 # a unix socket path is limited to about 100 bytes and deep run directories exceed it.
 mon=monitor.sock
-for v in image serial shot stamp nvme; do # the guest runs in $RUN, so every other path must be absolute
+for v in image serial shot stamp nvme disk2; do # the guest runs in $RUN, so every other path must be absolute
   case "${!v}" in ''|/*) ;; *) printf -v "$v" '%s' "$PWD/${!v}" ;; esac
 done
 case "$arch" in
@@ -93,7 +99,8 @@ case "$arch" in
     # its DMA through it (without that, QEMU's virtio devices bypass it).
     disk=(-device "virtio-blk-pci,drive=boot,disable-legacy=on${iommu:+,iommu_platform=on}")
     [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48)
-    [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=on" -device nvme,serial=silica-nvme,drive=nvm) ;;
+    [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=on" -device nvme,serial=silica-nvme,drive=nvm)
+    [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}") ;;
   aarch64)
     bin=qemu-system-aarch64
     # --el2: the firmware runs at EL2, as on most servers; the loader drops to EL1.
@@ -200,6 +207,13 @@ while kill -0 "$pid" 2>/dev/null; do
     echo "ERROR: qemu: $arch: timeout after ${after}s$where (serial: $serial)"
     exit 124
   fi
+  for k in "${!on[@]}"; do
+    rule=${on[$k]}
+    if tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "${rule%%=*}"; then
+      (cd "$RUN" && printf '%s\n' "${rule#*=}" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon") >/dev/null 2>&1
+      unset "on[$k]"
+    fi
+  done
   if [ -n "$until" ] && tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "$until"; then
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; stop_shot
     [ -z "$stamper" ] || wait "$stamper" 2>/dev/null

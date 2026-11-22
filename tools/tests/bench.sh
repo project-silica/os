@@ -31,7 +31,11 @@ cat >"$OS/tools/qemu.sh" <<STUB
 # the number of milliseconds in <serials>/<image>.boot.
 img="" ser="" st=""
 while [ \$# -gt 0 ]; do
-  case "\$1" in --image) img=\$(basename "\$2") ;; --serial) ser=\$2 ;; --stamp) st=\$2 ;; esac
+  case "\$1" in
+    --image) img=\$(basename "\$2") ;; --serial) ser=\$2 ;; --stamp) st=\$2 ;;
+    # Flags without a value.
+    --no-iommu|--no-exit-device|--el2) shift; continue ;;
+  esac
   shift 2
 done
 n=\$(( \$(cat "$FX/count.\$img" 2>/dev/null || echo 0) + 1 )); echo \$n >"$FX/count.\$img"
@@ -78,7 +82,9 @@ has '^bench: ipc_roundtrip: silica 400 ns .*linux 1200 ns, ratio 0\.3333' || bad
 has '^bench: boot_userspace: silica 600 ms .*linux 800 ms, ratio 0\.75' || bad "good run: boot time must come from the host stamps: $OUT"
 has '^bench: ipc_scaling: silica 7\.5 x' || bad "good run: a metric with no Linux value passes on its own limit: $OUT"
 has '^bench: behind Linux' && bad "good run: nothing is slower than Linux (a scaling factor, unit x, below Linux's is not), so nothing is named behind it: $OUT"
-has '^RESULT: pass=19 fail=0 skipped=0 ' || bad "good run: RESULT wrong: $OUT"
+# The six block metrics come from the system image, which a stubbed run
+# does not boot: before M3 they are SKIP.
+has '^RESULT: pass=19 fail=0 skipped=6 ' || bad "good run: RESULT wrong: $OUT"
 [ "$(tr '\n' ' ' <"$FX/calls")" = "silica.img linux.img silica.img linux.img " ] || bad "boots must alternate, Silica first: $(tr '\n' ' ' <"$FX/calls")"
 jq -e '.schema == 2 and .metrics.ipc_roundtrip.ratio < 0.34 and .metrics.ipc_scaling.linux == null' "$WS/target/logs/bench/results.json" >/dev/null 2>&1 ||
   bad "good run: results.json wrong"

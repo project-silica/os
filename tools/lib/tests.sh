@@ -243,6 +243,50 @@ run_system() {
   return 1
 }
 
+# run_recovery <arch> <suite>: a driver killed under load (spec/MILESTONES.md
+# M3). blkload writes every block of a scratch disk while the device manager
+# restarts the disk's driver every 200 ms; it fails if a recovery took over
+# 250 ms or a request was lost or failed. Then the host reads the scratch
+# image: every block b must hold the words 4 << 40 | b << 16 | i (its last
+# round's), so a write the guest was told had completed and was flushed,
+# and was then lost or overtaken by an older one, fails it.
+run_recovery() {
+  local arch=$1 suite=$2 log img serial rc scratch bad
+  log=$(logfile "$suite" build.recovery)
+  img=$(build_system_image "$arch" "$log" "checks=load") || { record fail "$suite" recovery "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" recovery)
+  scratch=$(dirname "$serial")/scratch.img
+  rm -f "$scratch"; truncate -s 16M "$scratch" || { record fail "$suite" recovery "cannot create $scratch"; return 1; }
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-120}" --disk "$scratch" >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc != 0 ] || ! tr -d '\r' <"$serial" | grep -qx 'BLKLOAD OK'; then
+    record fail "$suite" recovery "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; return 1
+  fi
+  record pass "$suite" recovery
+  # Every block on the host's disk image, as written.
+  bad=$(od -An -v -tx8 -w8 -N $((16384 * 512)) "$scratch" | awk '{ w = strtonum("0x" $1); b = int((NR - 1) / 64); i = (NR - 1) % 64; if (w != 4 * 2^40 + b * 65536 + i) { n++; if (n == 1) first = b } } END { if (n) printf "%d words wrong, the first in block %d", n, first }')
+  if [ -z "$bad" ]; then record pass "$suite" recovery_no_write_lost
+  else record fail "$suite" recovery_no_write_lost "the scratch disk read by the host: $bad ($scratch)"; fi
+}
+
+# run_shutdown <arch> <suite>: the power button shuts the system down in
+# order. The system stays up (no checks); once it says BOOT OK the host
+# presses the button (QEMU's system_powerdown, an ACPI fixed event); the
+# device manager hears it and asks the service manager to shut down, which
+# stops the services last-started first and turns the machine off.
+run_shutdown() {
+  local arch=$1 suite=$2 log img serial rc
+  log=$(logfile "$suite" build.shutdown)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" shutdown "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" shutdown)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --on '^BOOT OK$=system_powerdown' >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -q '^init: shutting down' && tr -d '\r' <"$serial" | grep -q '^init: devmgr stopped' \
+      && ! tr -d '\r' <"$serial" | grep -q '^ERROR'; then record pass "$suite" shutdown
+  else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+}
+
 # run_power <arch> <suite>: the machine is turned off, and reset, by the
 # system itself. The system image boots without the harness's exit device,
 # so nothing ends the emulator but the guest turning the machine off (ACPI

@@ -371,6 +371,8 @@ else
     run_system x86_64 system.x86_64
     run_rogue x86_64 system.x86_64
     run_power x86_64 system.x86_64
+    run_recovery x86_64 system.x86_64
+    run_shutdown x86_64 system.x86_64
     [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
     # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
     # "aarch64 boots to the same test"), emulated, so not in the fast tier.

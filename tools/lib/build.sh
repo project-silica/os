@@ -74,6 +74,18 @@ build_system() {
   # program being the package's binary.
   jq -r '.packages[] | select(.metadata.silica.drivers) | . as $p
     | ($p.targets[] | select(.kind[] == "bin") | .name) as $bin | $p.metadata.silica.drivers[] | "\(.) \($bin)"' <<<"$meta" >"$out/drivers.list" || return 1
+  # The services list the service manager reads (init's manifest module):
+  # one line per package declaring [package.metadata.silica.service].
+  jq -r '.packages[] | select(.metadata.silica.service) | . as $p | .metadata.silica.service as $s
+    | ($p.targets[] | select(.kind[] == "bin") | .name) as $bin
+    | [$p.name, "program=\($bin)"]
+      + (if $s.memory then ["memory=\($s.memory)"] else [] end)
+      + (if $s.provides then ["provides=\($s.provides)"] else [] end)
+      + (if ($s.needs // []) != [] then ["needs=\($s.needs | join(","))"] else [] end)
+      + (if $s.machine then ["machine"] else [] end)
+      + (if $s.start then ["start=\($s.start)"] else [] end)
+      + (if $s.restart then ["restart=\($s.restart)"] else [] end)
+    | join(" ")' <<<"$meta" >"$out/services.list" || return 1
   echo "$out"
 }
 
@@ -123,7 +135,7 @@ build_system_image() {
     case "$n" in "$root"|*.debug) continue ;; esac
     entries+=(--ramdisk-entry "$n=$f")
   done
-  entries+=(--ramdisk-entry "drivers=$sys/drivers.list")
+  entries+=(--ramdisk-entry "drivers=$sys/drivers.list" --ramdisk-entry "services=$sys/services.list")
   if [ -n "$cmdline" ]; then
     # This run's alone, as for build_image.
     [ -n "${RUN:-}" ] && out=$RUN/$(basename "$out")
