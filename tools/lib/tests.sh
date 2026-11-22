@@ -264,6 +264,43 @@ run_nvme() {
   else record fail "$suite" nvme "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_faults <arch> <suite>: a device that misbehaves (spec/MILESTONES.md
+# M3, fault injection). One boot per fault and block driver, the driver
+# committing the fault at its 50th request (inject=<driver>:<fault>@50,
+# silica_driver::inject): for virtio-blk in the middle of blkcheck's 128
+# reads in flight. Every check of blkcheck's on that disk must still pass
+# (its requests are sent again to the driver started in place of one that
+# gave up), the system must come up, and nothing but the driver may say
+# ERROR. A completion of a request never offered, a request the device
+# never sees and a device that resets itself end the driver (the device
+# manager starts another); an interrupt with nothing done and a completion
+# without an interrupt do not.
+run_faults() {
+  local arch=$1 suite=$2 log img serial rc text driver fault restarts other want name
+  local -a machine
+  for driver in virtio-blk nvme; do
+    machine=(); [ $driver = nvme ] && machine=(--nvme "$(build_system_image "$arch" "$(logfile "$suite" build.faults_disk)")")
+    for fault in garbage stuck spurious missed reset; do
+      name=fault_${driver//-/_}_$fault
+      log=$(logfile "$suite" "build.$name")
+      img=$(build_system_image "$arch" "$log" "checks=block inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+      serial=$(logfile "$suite" "$name")
+      "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" "${machine[@]}" >"$serial.qemu" 2>&1
+      rc=$?
+      text=$(tr -d '\r\0' <"$serial")
+      restarts=$(grep -c "^devmgr: $driver for .* started again" <<<"$text")
+      other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: $driver: " | head -1 | cut -c1-140)
+      case $fault in garbage|stuck|reset) want=1 ;; *) want=0 ;; esac
+      if [ $rc != 0 ] || ! grep -qx 'BOOT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+      elif ! grep -q "^inject: [A-Za-z]* now" <<<"$text"; then record fail "$suite" "$name" "the fault was never committed (serial: $serial)"
+      elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
+      elif [ "$(grep -c "^TEST $driver\.[a-z_]* PASS" <<<"$text")" != 5 ]; then record fail "$suite" "$name" "blkcheck did not pass every check on the disk (serial: $serial)"
+      elif [ "$restarts" != $want ]; then record fail "$suite" "$name" "the driver was started again $restarts times, not $want (serial: $serial)"
+      else record pass "$suite" "$name"; fi
+    done
+  done
+}
+
 # run_recovery <arch> <suite>: a driver killed under load (spec/MILESTONES.md
 # M3). blkload writes every block of a scratch disk while the device manager
 # restarts the disk's driver every 200 ms; it fails if a recovery took over

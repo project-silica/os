@@ -3,7 +3,7 @@
 # Use --fast, --full or --deep; --repo limits the scope. --guest NAME
 # runs just the named x86_64 guest test (repeatable): a kernel test, or one
 # of the system image's (system, rogue, power, recovery, shutdown, console,
-# nvme).
+# nvme, faults).
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
 . "$TOOLS/lib/tests.sh"
@@ -357,7 +357,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
   manifest="$(checkout_of kernel)/tests/inos-x86_64.txt"
   for guest in "${guests[@]}"; do
     # The system image's own tests, by name.
-    case "$guest" in system|rogue|power|recovery|shutdown|console|nvme) "run_$guest" x86_64 system.x86_64; continue ;; esac
+    case "$guest" in system|rogue|power|recovery|shutdown|console|nvme|faults) "run_$guest" x86_64 system.x86_64; continue ;; esac
     opts=$(awk -v t="$guest" '$1 == t { $1 = ""; print; exit }' "$manifest" 2>/dev/null)
     inos_machine x86_64 "$guest" "$opts" "$manifest" || continue
     run_inos x86_64 inos.x86_64 "$guest"
@@ -384,6 +384,8 @@ else
     run_shutdown x86_64 system.x86_64
     run_console x86_64 system.x86_64
     run_nvme x86_64 system.x86_64
+    # One boot per fault and driver: ten, so not in the fast tier.
+    [ "$tier" != fast ] && run_faults x86_64 system.x86_64
     [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
     # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
     # "aarch64 boots to the same test"), emulated, so not in the fast tier.
