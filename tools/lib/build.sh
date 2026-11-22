@@ -64,10 +64,16 @@ build_system() {
   mkdir -p "$out"; vend=$(merged_vendor system) || return 1
   cargo_run system "$log" build --release --workspace --bins --target "$k/targets/$arch-silica-user.json" \
     -Zjson-target-spec "${BUILD_STD_USER[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
-  for n in $(cd "$s" && cargo metadata --no-deps --format-version 1 --offline 2>/dev/null | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name'); do
+  local meta; meta=$(cd "$s" && cargo metadata --no-deps --format-version 1 --offline 2>/dev/null) || { echo "cargo metadata failed in $s" >>"$log"; return 1; }
+  for n in $(jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' <<<"$meta"); do
     cp "$(cache_of system)/target/$arch-silica-user/release/$n" "$out/$n.debug.elf" || return 1
     strip_debug "$out/$n.debug.elf" "$out/$n.elf" "$log" || return 1
   done
+  # The drivers list the device manager reads: "<match> <program>" for each
+  # match a package declares ([package.metadata.silica] drivers), its
+  # program being the package's binary.
+  jq -r '.packages[] | select(.metadata.silica.drivers) | . as $p
+    | ($p.targets[] | select(.kind[] == "bin") | .name) as $bin | $p.metadata.silica.drivers[] | "\(.) \($bin)"' <<<"$meta" >"$out/drivers.list" || return 1
   echo "$out"
 }
 
@@ -117,6 +123,7 @@ build_system_image() {
     case "$n" in "$root"|*.debug) continue ;; esac
     entries+=(--ramdisk-entry "$n=$f")
   done
+  entries+=(--ramdisk-entry "drivers=$sys/drivers.list")
   if [ -n "$cmdline" ]; then
     # This run's alone, as for build_image.
     [ -n "${RUN:-}" ] && out=$RUN/$(basename "$out")

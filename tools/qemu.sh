@@ -3,10 +3,12 @@
 #   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--serial <file>] [--timeout <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
-#           [--until <extended regex>] [--no-exit-device]
+#           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>]
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
+# --nvme adds an NVMe controller (QEMU's model) whose one namespace is a
+# snapshot of the given disk image.
 # --no-exit-device leaves out the debug-exit device (x86_64): the guest
 # must turn the machine off itself (ACPI), and exit status 0 then means the
 # emulator stopped because the guest turned it off or reset it.
@@ -25,10 +27,10 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
-arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1
+arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -47,6 +49,7 @@ while [ $# -gt 0 ]; do
     --no-exit-device) exitdev=""; shift ;;
     --device) devices+=(-device "$2"); shift 2 ;;
     --until) until=$2; shift 2 ;;
+    --nvme) nvme=$2; shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
 done
@@ -77,7 +80,7 @@ cp "$vars" "$RUN/vars.fd"
 # The monitor socket is addressed relative to $RUN (QEMU and socat run there):
 # a unix socket path is limited to about 100 bytes and deep run directories exceed it.
 mon=monitor.sock
-for v in image serial shot stamp; do # the guest runs in $RUN, so every other path must be absolute
+for v in image serial shot stamp nvme; do # the guest runs in $RUN, so every other path must be absolute
   case "${!v}" in ''|/*) ;; *) printf -v "$v" '%s' "$PWD/${!v}" ;; esac
 done
 case "$arch" in
@@ -89,7 +92,8 @@ case "$arch" in
     # The boot disk is a virtio 1.0 device; with the IOMMU it is told to do
     # its DMA through it (without that, QEMU's virtio devices bypass it).
     disk=(-device "virtio-blk-pci,drive=boot,disable-legacy=on${iommu:+,iommu_platform=on}")
-    [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48) ;;
+    [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48)
+    [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=on" -device nvme,serial=silica-nvme,drive=nvm) ;;
   aarch64)
     bin=qemu-system-aarch64
     # --el2: the firmware runs at EL2, as on most servers; the loader drops to EL1.

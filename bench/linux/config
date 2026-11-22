@@ -23,6 +23,12 @@ CONFIG_EFI=y
 CONFIG_EFI_STUB=y
 CONFIG_ACPI=y
 CONFIG_PCI=y
+# Message-signalled interrupts, as every PCI Express machine uses them: the
+# virtio devices interrupt per queue through MSI-X, as Silica's drivers do.
+# (Missing until the block benchmarks: tinyconfig leaves it out and
+# merge_config does not say so, so the baseline's disk interrupted through a
+# legacy wire, and CONFIG_INTEL_IOMMU, which needs it, was dropped too.)
+CONFIG_PCI_MSI=y
 CONFIG_FUTEX=y
 CONFIG_EPOLL=y
 CONFIG_POSIX_TIMERS=y
@@ -39,6 +45,15 @@ CONFIG_BLOCK=y
 CONFIG_VIRTIO_BLK=y
 # Direct block reads at depth (the block benchmarks): io_uring.
 CONFIG_IO_URING=y
+# DMA confined by the IOMMU where the machine has one (the *_confined block
+# benchmarks), in Linux's fastest mode for it: lazy invalidation through a
+# flush queue (a freed buffer stays reachable by the device for a while,
+# which Silica's Unmap never allows). On a machine without an IOMMU none of
+# this does anything.
+CONFIG_IOMMU_SUPPORT=y
+CONFIG_INTEL_IOMMU=y
+CONFIG_INTEL_IOMMU_DEFAULT_ON=y
+CONFIG_IOMMU_DEFAULT_DMA_LAZY=y
 CONFIG_CMDLINE_BOOL=y
 # Idle polling for a guest (cpuidle-haltpoll): an idle processor watches for
 # work before it halts, as Silica's does (IDLE_WATCH_NS), so that a wake-up
@@ -48,4 +63,4 @@ CONFIG_CMDLINE_BOOL=y
 CONFIG_CPU_IDLE=y
 CONFIG_CPU_IDLE_GOV_HALTPOLL=y
 CONFIG_HALTPOLL_CPUIDLE=y
-CONFIG_CMDLINE="console=ttyS0,115200 quiet panic=-1 tsc=reliable cpuidle_haltpoll.force=1"
+CONFIG_CMDLINE="console=ttyS0,115200 quiet panic=-1 tsc=reliable cpuidle_haltpoll.force=1 intel_iommu=on"

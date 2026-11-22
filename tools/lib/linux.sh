@@ -51,6 +51,16 @@ build_linux() {
     echo "CONFIG_INITRAMFS_SOURCE=\"$b/initramfs.list\"" >>"$b/fragment"
     ./scripts/kconfig/merge_config.sh -m .config "$b/fragment"
     make -s olddefconfig
+    # Every option the baseline asks for must be in the result: kconfig
+    # drops one whose dependencies are unmet without a word (that is how
+    # the baseline once ran without MSI and without its IOMMU).
+    while IFS= read -r line; do
+      case "$line" in
+        CONFIG_*=n) grep -qx "# ${line%=n} is not set" .config || ! grep -q "^${line%=n}=" .config ;;
+        CONFIG_*=*) grep -qxF "$line" .config ;;
+        *) true ;;
+      esac || { echo "error: the Linux baseline's config asks for $line, which kconfig dropped (an unmet dependency)"; exit 1; }
+    done <"$b/fragment"
     make -s -j"$jobs" bzImage
   ) >>"$log" 2>&1 || return 1
   t=$(build_image_tool "$log.tool") || { cat "$log.tool" >>"$log"; return 1; }

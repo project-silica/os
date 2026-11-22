@@ -74,7 +74,10 @@ insns_ctx_switch insns lower none 0 2
 insns_page_fault insns lower none 0 2
 blk_read4k_qd1 ns lower le 1 3
 blk_read4k_qd1_p99 ns lower le 1 3
-blk_read4k_qd32 ops/s higher le 1 3'
+blk_read4k_qd32 ops/s higher le 1 3
+blk_read4k_qd1_confined ns lower le 1 3
+blk_read4k_qd1_p99_confined ns lower le 1 3
+blk_read4k_qd32_confined ops/s higher le 1 3'
 
 runs=5 out="" update=0 compare="" sweep=""
 while [ $# -gt 0 ]; do
@@ -160,20 +163,34 @@ elif [ $rc != 0 ]; then
 fi
 fi
 
-# boot <system> <image> <run> [<values>]: one boot; appends "<metric> <value>" lines to
-# $RUN/<values>.values (default: <system>), and its boot time unless the values are another system's.
+# The machines (spec/TESTING.md 4.1, "Confinement is compared with
+# confinement"): the kernel paths and boot compare Silica as it runs, its
+# devices confined by the IOMMU, with Linux at its fastest, on the machine
+# without one; the block path compares both on the machine without an
+# IOMMU (blk_*), and both confining DMA on the machine with one
+# (blk_*_confined: Linux with intel_iommu=on, its fastest lazy mode).
+# boot <system> <image> <run> [<values> [<machine> [<keep>]]]: one boot;
+# appends "<metric> <value>" lines to $RUN/<values>.values (default:
+# <system>), and its boot time when <keep> is "all" (the default). <machine>:
+# "iommu" (the default) or "plain". <keep> "blk" keeps only the blk_ metrics,
+# "confined" keeps them as blk_*_confined.
 boot() {
-  local sys=$1 img=$2 i=$3 vals=${4:-$1} ser=$RUN/$1.$3.serial st=$RUN/$1.$3.stamp qlog=$LOGS/bench/$1.$3.log rc t0 t1
+  local sys=$1 img=$2 i=$3 vals=${4:-$1} machine=${5:-iommu} keep=${6:-all} ser=$RUN/$1.$3.serial st=$RUN/$1.$3.stamp qlog=$LOGS/bench/$1.$3.log rc t0 t1
+  local -a margs=()
+  [ "$machine" = plain ] && margs=(--no-iommu)
+  # $SILICA_BENCH_MACHINE: further qemu.sh arguments, the same for every boot.
   "$TOOLS/qemu.sh" --image "$img" --serial "$ser" --stamp "$st" --timeout "${SILICA_BENCH_TIMEOUT:-300}" \
-    --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} >"$qlog" 2>&1
+    --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} "${margs[@]+"${margs[@]}"}" ${SILICA_BENCH_MACHINE:-} >"$qlog" 2>&1
   rc=$?
   if [ $rc = 2 ]; then err "$sys: qemu.sh setup error: $(head -c 200 "$qlog" | tr '\n' ' ')"; echo "RESULT: pass=$pass fail=1 skipped=$skipped time=$((SECONDS - start))"; exit 2; fi
   if ! tr -d '\r' <"$ser" 2>/dev/null | grep -qx 'BENCH DONE'; then
     echo "ERROR: bench::$sys: run $i did not finish (qemu.sh exit $rc, no BENCH DONE; serial $ser)"
     echo "RESULT: pass=$pass fail=1 skipped=$skipped time=$((SECONDS - start))"; exit 1
   fi
-  tr -d '\r' <"$ser" | awk '$1 == "BENCH" && NF == 4 && $3 ~ /^[0-9]+([.][0-9]+)?$/ { print $2, $3, $4 }' >>"$RUN/$vals.values"
-  [ "$vals" = "$sys" ] || return 0
+  tr -d '\r' <"$ser" | awk -v k="$keep" '$1 == "BENCH" && NF == 4 && $3 ~ /^[0-9]+([.][0-9]+)?$/ {
+      if (k != "all" && $2 !~ /^blk_/) next
+      print (k == "confined" ? $2 "_confined" : $2), $3, $4 }' >>"$RUN/$vals.values"
+  [ "$keep" = all ] || return 0
   # Boot time, by the host's clock: from the firmware starting the boot
   # option (the operating system's loader) to the first line from userspace.
   # The firmware before that is the same code for both systems and moves by
@@ -220,8 +237,12 @@ if [ -z "$compare$sweep" ]; then
   counts
   for ((i = 1; i <= runs; i++)); do
     boot silica "$silica" "$i"
-    [ -z "$silica_sys" ] || boot silica-system "$silica_sys" "$i" silica
-    boot linux "$linux" "$i"
+    if [ -n "$silica_sys" ]; then
+      boot silica-system "$silica_sys" "$i" silica plain blk
+      boot silica-system-confined "$silica_sys" "$i" silica iommu confined
+      boot linux-confined "$linux" "$i" linux iommu confined
+    fi
+    boot linux "$linux" "$i" linux plain
   done
 fi
 
