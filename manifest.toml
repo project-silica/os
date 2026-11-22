@@ -8,7 +8,7 @@ commit = "e33378aa1a9c3011dacddad6429ec39a4d0be2d5"
 [repos.kernel]
 url = "https://github.com/project-silica/kernel"
 milestone = 0
-commit = "6f6c470958093b0c7cc387e1bf3fd95721a8ab15"
+commit = "fff033309dae58356b6220032378eb88e4a1e47d"
 
 [repos.system]
 url = "https://github.com/project-silica/system"
