@@ -174,7 +174,7 @@ silica=${SILICA_BENCH_IMG:-$(build_image x86_64 "$log" bench)} && [ -f "$silica"
 log=$LOGS/bench/build.silica-system.log
 silica_sys=""
 if [ -z "${SILICA_BENCH_IMG:-}" ]; then
-  silica_sys=$(build_system_image x86_64 "$log" "checks=block net bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; echo "RESULT: pass=0 fail=1 skipped=0 time=$((SECONDS - start))"; exit 2; }
+  silica_sys=$(build_system_image x86_64 "$log" "checks=block,net bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; echo "RESULT: pass=0 fail=1 skipped=0 time=$((SECONDS - start))"; exit 2; }
 fi
 log=$LOGS/bench/build.linux.log
 linux=$(build_linux "$log"); rc=$?

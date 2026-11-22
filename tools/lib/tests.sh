@@ -303,6 +303,39 @@ run_net_recovery() {
   else record fail "$suite" net_recovery "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_hotplug <arch> <suite>: a disk put in while the system runs, used,
+# and taken out (spec/MILESTONES.md M3). The machine has an empty PCI
+# Express root port with native hot-plug (qemu.sh --hotplug) and a keyboard;
+# once the device manager has armed the port the host adds a virtio disk
+# there (a copy of the system image, so it has a partition table), types
+# `start blkcheck` when the device manager says it arrived (blkcheck checks
+# every disk: both must pass all five checks), and takes the disk out again
+# once blkcheck has ended. The device manager must give it addresses and a
+# driver, and end the driver when the disk is asked out; nothing may say
+# ERROR.
+run_hotplug() {
+  local arch=$1 suite=$2 log img serial rc text hot bad=""
+  log=$(logfile "$suite" build.hotplug)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" hotplug "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" hotplug)
+  hot=$(dirname "$serial")/hot.img
+  cp "$img" "$hot" || { record fail "$suite" hotplug "cannot copy the image to $hot"; return 1; }
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --hotplug "$hot" --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --on '^devmgr: 00:02\.0 takes devices while the system runs$=device_add virtio-blk-pci,id=hotdisk,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on' \
+    --type '^devmgr: 01:00\.0 1af4:1042 class 01\.00\.00 arrived: virtio-blk$=start blkcheck\n' \
+    --on '^init: blkcheck ended$=device_del hotdisk' \
+    --until '^devmgr: 01:00\.0 was taken out; virtio-blk ended$' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  [ $rc = 0 ] || bad="the disk was not taken out (exit status $rc)"
+  [ -n "$bad" ] || [ "$(grep -c '^TEST virtio-blk\.[a-z_]* PASS$' <<<"$text")" = 10 ] || bad="blkcheck did not pass every check on both disks"
+  [ -n "$bad" ] || grep -q '^blkcheck: disk 0x100, driven by virtio-blk$' <<<"$text" || bad="blkcheck did not check the disk put in"
+  [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
+  if [ -z "$bad" ]; then record pass "$suite" hotplug
+  else record fail "$suite" hotplug "$bad (serial: $serial)"; fi
+}
+
 # run_faults <arch> <suite>: a device that misbehaves (spec/MILESTONES.md
 # M3, fault injection). One boot per fault and block driver, the driver
 # committing the fault at its 50th request (inject=<driver>:<fault>@50,
