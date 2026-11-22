@@ -242,10 +242,39 @@ run_system() {
   serial=$(logfile "$suite" boot)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
-  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'BOOT OK'; then record pass "$suite" boot; return 0; fi
+  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'BOOT OK'; then
+    # The x86_64 machine has an IOMMU: the system must not call itself unconfined there.
+    if [ "$arch" = x86_64 ] && grep -aq '^devmgr: this machine cannot confine DMA' "$serial"; then
+      record fail "$suite" boot "the device manager says it cannot confine DMA on a machine with an IOMMU (serial: $serial)"; return 1
+    fi
+    record pass "$suite" boot; return 0
+  fi
   [ -x "$TOOLS/symbolize.sh" ] && "$TOOLS/symbolize.sh" --arch "$arch" "$serial" >"$serial.symbolized" 2>&1
   record fail "$suite" boot "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   return 1
+}
+
+# run_unconfined <arch> <suite>: the same image on a machine without an
+# IOMMU (spec/MILESTONES.md M3: "the same image booting on a machine without
+# an IOMMU and saying that it is unconfined"). The device manager must say
+# that every driver it starts is trusted with all of memory, the drivers
+# must still work (blkcheck's five checks on the disk), the system must come
+# up, and nothing may say ERROR.
+run_unconfined() {
+  local arch=$1 suite=$2 log img serial rc text bad=""
+  log=$(logfile "$suite" build.unconfined)
+  img=$(build_system_image "$arch" "$log") || { record fail "$suite" unconfined "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" unconfined)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-iommu >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  { [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text"; } || bad="the system did not come up (exit status $rc)"
+  [ -n "$bad" ] || grep -q '^devmgr: this machine cannot confine DMA: every driver started here is trusted with all of memory$' <<<"$text" ||
+    bad="the device manager did not say that the drivers are unconfined"
+  [ -n "$bad" ] || [ "$(grep -c '^TEST virtio-blk\.[a-z_]* PASS$' <<<"$text")" = 5 ] || bad="blkcheck did not pass every check on the disk"
+  [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
+  if [ -z "$bad" ]; then record pass "$suite" unconfined
+  else record fail "$suite" unconfined "$bad (serial: $serial)"; fi
 }
 
 # nvme_machine <config> <image>: an NVMe controller the NVMe driver is

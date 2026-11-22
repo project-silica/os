@@ -6,12 +6,12 @@
 #   1. an os checkout whose image builder takes the disk GUID from the
 #      clock must give "REPRO: FAILED", one ERROR line naming disk.img, and
 #      identical kernel and loader;
-#   2. the same checkout with the plant removed must give "REPRO: OK" and three identical
-#      artifacts.
+#   2. with the plant removed, both the kernel test disk and the system
+#      disk containing the services and drivers must be byte-identical.
 # Both runs build twice (about a minute each, so --fast does not run this test;
 # see suite_tools in test.sh). Nothing outside the disposable workshop is
 # written. One "ERROR:" line per failed check.
-# inputs: kernel
+# inputs: system
 set -uo pipefail
 SRC_OS=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd -P)
 find_ws() {
@@ -38,7 +38,7 @@ gx() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
 copy_repo() { # copy_repo <source checkout> <dest>: tracked and not ignored files, as a fresh one-commit repository
   mkdir -p "$2"
   gx -C "$1" ls-files -z --cached --others --exclude-standard |
-    tar -C "$1" --null -T - --ignore-failed-read -cf - 2>/dev/null | tar -C "$2" -xf -
+    tar -C "$1" --null -T - --ignore-failed-read -cf - 2>/dev/null | tar -C "$2" -xf - || return 1
   (cd "$2" && gx init -q -b main . && gx add -A && gx commit -qm base) >/dev/null 2>&1
 }
 
@@ -65,7 +65,15 @@ repro "$FX/planted.out"
 cp -r "$W/target/logs/repro" "$FX/planted-logs" 2>/dev/null
 gx -C "$W/os" checkout -q -- image-builder/src/lib.rs
 [ -z "$(gx -C "$W/os" status --porcelain)" ] || bad "the plant was not removed from the os checkout"
-repro "$FX/clean.out"
+for r in idl system; do
+  copy_repo "$REAL_WS/$r" "$W/$r" || { bad "cannot copy the $r checkout"; exit 2; }
+done
+repro "$FX/clean.out" --system
+if [ "$(cat "$FX/clean.out.rc")" != 0 ]; then
+  saved=$(mktemp -d "$BASE/repro-failure.XXXX") || exit 2
+  mv "$W/target/logs/repro" "$saved/" || exit 2
+  echo "repro-real: clean build logs and differing artifacts kept in $saved/repro"
+fi
 
 # ---- 1. the planted nondeterministic image builder ------------------------------------------
 OUT=$(cat "$FX/planted.out"); RC=$(cat "$FX/planted.out.rc" 2>/dev/null)
@@ -86,9 +94,9 @@ OUT=$(cat "$FX/clean.out"); RC=$(cat "$FX/clean.out.rc" 2>/dev/null)
 printf '%s\n' "$OUT" | grep -qx 'REPRO: OK' || bad "unmodified: no REPRO: OK line: $OUT"
 printf '%s\n' "$OUT" | grep -q 'REPRO: FAILED' && bad "unmodified: REPRO: FAILED printed: $OUT"
 [ "$(printf '%s\n' "$OUT" | grep -c '^ERROR:')" = 0 ] || bad "unmodified: unexpected ERROR: $OUT"
-for a in kernel.elf BOOTX64.EFI disk.img; do
+for a in kernel.elf BOOTX64.EFI disk.img system.img; do
   printf '%s\n' "$OUT" | grep -q "$a identical" || bad "unmodified: no line saying $a is identical: $OUT"
 done
 
-[ $fails = 0 ] && echo "repro-real: OK"
+[ $fails = 0 ] && { grep '^repro: .* identical' "$FX/clean.out"; echo "repro-real: OK"; }
 exit $((fails > 0))

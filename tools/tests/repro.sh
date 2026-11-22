@@ -58,6 +58,11 @@ fake_build() { # fake_build <stage> <log> <file> <content-extra>
 build_kernel() { fake_build kernel "$2" kernel.elf; }
 build_loader() { fake_build loader "$1" BOOTX64.EFI; }
 build_image() { fake_build image "$2" disk.img; }
+build_system_image() {
+  [ "$(cat "$(checkout_of system)/input")" = service ] && [ "$(cat "$(checkout_of idl)/input")" = protocol ] || return 1
+  [ "$(checkout_of system)" != "$WS/system" ] && [ "$(checkout_of idl)" != "$WS/idl" ] || return 1
+  fake_build system "$2" system.img
+}
 EOF2
 
 ORIG_STATUS=$(cd "$K" && git status --porcelain --ignored; cd "$OS" && git status --porcelain --ignored)
@@ -139,7 +144,7 @@ done
 # ---- 5. a differing artifact: exit 1, one ERROR naming the first one ----------------------
 expect_diff() { # expect_diff <case> <FAKE_DIFF> <artifact that must be named> <artifacts that must not be named>
   local c=$1 want=$3 a
-  ENVX=(FAKE_DIFF="$2"); run; ENVX=()
+  ENVX=(FAKE_DIFF="$2"); run "${@:5}"; ENVX=()
   [ $RC = 1 ] || bad "$c: exit $RC, want 1: $OUT"
   [ "$(errs)" = 1 ] || bad "$c: want exactly one ERROR line, got $(errs): $OUT"
   printf '%s\n' "$OUT" | grep '^ERROR: repro: ' | grep -q -- "$want" || bad "$c: the ERROR line does not name $want: $OUT"
@@ -154,6 +159,13 @@ expect_diff "loader-differs" "loader" "BOOTX64.EFI" "kernel.elf disk.img"
 expect_diff "image-differs" "image" "disk.img" "kernel.elf BOOTX64.EFI"
 expect_diff "all-differ-first-named" "image loader kernel" "kernel.elf" "BOOTX64.EFI disk.img"
 expect_diff "loader-and-image-differ" "image loader" "BOOTX64.EFI" "kernel.elf disk.img"
+run --system
+[ $RC = 2 ] && [ ! -s "$CALLS" ] || bad "a missing checkout did not stop the system check before building"
+for r in idl system; do
+  git init -q "$WS/$r" || exit 2
+done
+echo service >"$WS/system/input"; echo protocol >"$WS/idl/input"
+expect_diff "only-system-differs" "system" "system.img" "kernel.elf BOOTX64.EFI disk.img" --system
 # The pass and the failure leave no stale copies of an earlier failure.
 run
 [ $RC = 0 ] && [ ! -e "$WS/target/logs/repro/kernel.elf" ] || bad "a later passing run keeps the earlier failure's artifacts"
