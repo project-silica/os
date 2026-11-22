@@ -2,7 +2,8 @@
 # Host tests, target builds, QEMU guest tests and size checks.
 # Use --fast, --full or --deep; --repo limits the scope. --guest NAME
 # runs just the named x86_64 guest test (repeatable): a kernel test, or one
-# of the system image's (system, rogue, power, recovery, shutdown, console).
+# of the system image's (system, rogue, power, recovery, shutdown, console,
+# nvme).
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
 . "$TOOLS/lib/tests.sh"
@@ -39,6 +40,11 @@ suite_clippy() {
   local r=$1 s="$1.clippy" log; log=$(logfile "$s" clippy)
   if cargo_run "$r" "$log" clippy --all-targets -- -D warnings; then record pass "$s" clippy
   else record fail "$s" clippy "$(grep -m1 -E '^(error|warning)' "$log" | cut -c1-140)"; fi
+  # The documentation is the interface (a driver or an application is
+  # written from it alone): it builds with no broken links or warnings.
+  log=$(logfile "$s" docs)
+  if RUSTDOCFLAGS="-D warnings" cargo_run "$r" "$log" doc --no-deps; then record pass "$s" docs
+  else record fail "$s" docs "$(grep -m1 -E '^(error|warning)' "$log" | cut -c1-140)"; fi
   # The system repository's programs only build for Silica: lint them there.
   if [ "$r" = system ] && [ -f "$(checkout_of kernel)/targets/x86_64-silica-user.json" ]; then
     local vend; log=$(logfile "$s" programs)
@@ -351,7 +357,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
   manifest="$(checkout_of kernel)/tests/inos-x86_64.txt"
   for guest in "${guests[@]}"; do
     # The system image's own tests, by name.
-    case "$guest" in system|rogue|power|recovery|shutdown|console) "run_$guest" x86_64 system.x86_64; continue ;; esac
+    case "$guest" in system|rogue|power|recovery|shutdown|console|nvme) "run_$guest" x86_64 system.x86_64; continue ;; esac
     opts=$(awk -v t="$guest" '$1 == t { $1 = ""; print; exit }' "$manifest" 2>/dev/null)
     inos_machine x86_64 "$guest" "$opts" "$manifest" || continue
     run_inos x86_64 inos.x86_64 "$guest"
@@ -377,6 +383,7 @@ else
     run_recovery x86_64 system.x86_64
     run_shutdown x86_64 system.x86_64
     run_console x86_64 system.x86_64
+    run_nvme x86_64 system.x86_64
     [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
     # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
     # "aarch64 boots to the same test"), emulated, so not in the fast tier.

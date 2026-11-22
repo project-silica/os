@@ -243,6 +243,27 @@ run_system() {
   return 1
 }
 
+# run_nvme <arch> <suite>: the second block driver, written from the class
+# protocol's documentation alone (spec/MILESTONES.md M3). The system image
+# boots with an NVMe controller beside the virtio disk (its namespace a
+# snapshot of the image itself), and blkcheck runs the same checks on each:
+# every one of NVMe's must pass, and the system must come up.
+run_nvme() {
+  local arch=$1 suite=$2 log img serial rc text name
+  log=$(logfile "$suite" build.nvme)
+  img=$(build_system_image "$arch" "$log") || { record fail "$suite" nvme "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" nvme)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --nvme "$img" >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  for name in nvme.block_read nvme.block_write_read_back nvme.block_refusals nvme.block_in_flight nvme.block_many_pages; do
+    if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name"
+    else record fail "$suite" "$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
+  done
+  if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" nvme
+  else record fail "$suite" nvme "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+}
+
 # run_recovery <arch> <suite>: a driver killed under load (spec/MILESTONES.md
 # M3). blkload writes every block of a scratch disk while the device manager
 # restarts the disk's driver every 200 ms; it fails if a recovery took over
