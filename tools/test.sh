@@ -129,7 +129,11 @@ suite_unsafe() {
       local rel=${f#"$dir"/} ok=0
       for p in "${allowed[@]}"; do case "$rel" in "$p"*) ok=1; break ;; esac; done
       [ $ok = 1 ] || bad="$bad $r/$rel"
-    done < <(grep -rlE --include='*.rs' '^[^/]*(unsafe *\{|unsafe impl)' "$dir" 2>/dev/null | grep -v '/target/\|/vendor/')
+    # (Build output and vendored crates are left out by their place in the
+    # checkout, not by the checkout's own path: filtered on the whole path,
+    # every file of a worktree kept under target/ was left out, and the
+    # check passed there whatever the code held.)
+    done < <(grep -rlE --include='*.rs' --exclude-dir=target --exclude-dir=vendor '^[^/]*(unsafe *\{|unsafe impl)' "$dir" 2>/dev/null)
   done
   if [ -z "$bad" ]; then record pass "$s" modules
   else record fail "$s" modules "unsafe code outside spec/UNSAFE_MODULES.md:$bad"; fi
