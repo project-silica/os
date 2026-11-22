@@ -55,6 +55,27 @@ suite_clippy() {
   fi
 }
 
+# spec/UNSAFE_MODULES.md: unsafe blocks and impls only in the paths its
+# table lists for each repository (comments and `unsafe fn` declarations,
+# which state a contract, are not uses).
+suite_unsafe() {
+  local s=unsafe table="$WS/spec/UNSAFE_MODULES.md" r dir f bad="" n=0
+  [ -f "$table" ] || { record fail "$s" table "no $table"; return; }
+  for r in $(all_repos); do
+    dir=$(checkout_of "$r"); [ -d "$dir" ] || continue
+    local -a allowed=()
+    while IFS= read -r p; do allowed+=("$p"); done < <(awk -F'|' -v r="$r" '{ gsub(/ /, "", $2) } $2 == r { print $3 }' "$table" | grep -o '`[^`]*`' | tr -d '`')
+    while IFS= read -r f; do
+      n=$((n + 1))
+      local rel=${f#"$dir"/} ok=0
+      for p in "${allowed[@]}"; do case "$rel" in "$p"*) ok=1; break ;; esac; done
+      [ $ok = 1 ] || bad="$bad $r/$rel"
+    done < <(grep -rlE --include='*.rs' '^[^/]*(unsafe *\{|unsafe impl)' "$dir" 2>/dev/null | grep -v '/target/\|/vendor/')
+  done
+  if [ -z "$bad" ]; then record pass "$s" modules
+  else record fail "$s" modules "unsafe code outside spec/UNSAFE_MODULES.md:$bad"; fi
+}
+
 suite_host() { # every host test of the repo's default members
   local r=$1 s="$1.host" n d def log
   while IFS=$'\t' read -r n d def; do
@@ -369,6 +390,7 @@ else
     [ -f "$(checkout_of "$r")/Cargo.toml" ] || continue
     suite_fmt "$r"; suite_clippy "$r"; suite_host "$r"
   done
+  [ -z "$repo" ] && suite_unsafe
   if { in_scope kernel || in_scope os; } && [ -f "$(checkout_of kernel)/targets/x86_64-silica.json" ]; then
     suite_builds
     in_scope kernel && suite_kani_build
