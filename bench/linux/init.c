@@ -247,7 +247,7 @@ static void block_reads(void)
 	int n = 0;
 	for (int i = 0; i < BLOCK_READS; i++) {
 		unsigned long t = now_ns();
-		if (pread(fd, block_buf, 4096, block_at(i)) != 4096) {
+		if (syscall(__NR_pread64, fd, block_buf, 4096UL, block_at(i)) != 4096) {
 			printf("ERROR: bench: a direct read failed\n");
 			return;
 		}
