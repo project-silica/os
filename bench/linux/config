@@ -43,6 +43,16 @@ CONFIG_VIRTIO_MENU=y
 CONFIG_VIRTIO_PCI=y
 CONFIG_BLOCK=y
 CONFIG_VIRTIO_BLK=y
+# Raw frames on the virtio network device (the network benchmarks).
+CONFIG_NET=y
+CONFIG_PACKET=y
+CONFIG_NETDEVICES=y
+CONFIG_NET_CORE=y
+CONFIG_VIRTIO_NET=y
+# AF_XDP: raw frames sent from a program's own memory by the driver, zero-copy
+# where it can (the fastest way Linux has to do what netcheck does).
+CONFIG_BPF_SYSCALL=y
+CONFIG_XDP_SOCKETS=y
 # Direct block reads at depth (the block benchmarks): io_uring.
 CONFIG_IO_URING=y
 # DMA confined by the IOMMU where the machine has one (the *_confined block

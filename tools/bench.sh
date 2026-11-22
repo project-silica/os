@@ -77,7 +77,13 @@ blk_read4k_qd1_p99 ns lower le 1 3
 blk_read4k_qd32 ops/s higher le 1 3
 blk_read4k_qd1_confined ns lower le 1 3
 blk_read4k_qd1_p99_confined ns lower le 1 3
-blk_read4k_qd32_confined ops/s higher le 1 3'
+blk_read4k_qd32_confined ops/s higher le 1 3
+net_rtt ns lower le 1 3
+net_rtt_p99 ns lower le 1 3
+net_tx frames/s higher le 1 3
+net_rtt_confined ns lower le 1 3
+net_rtt_p99_confined ns lower le 1 3
+net_tx_confined frames/s higher le 1 3'
 
 runs=5 out="" update=0 compare="" sweep=""
 while [ $# -gt 0 ]; do
@@ -124,6 +130,11 @@ fmt() { awk -v x="$1" 'BEGIN { printf "%.4g", x }'; }
 # Host processors for the guests: $SILICA_BENCH_CPUS, else one hardware thread
 # of each of the fastest cores, as many as the guest has processors.
 pin=${SILICA_BENCH_CPUS:-$(fastest_cpus "$SMP")}
+# The network benchmarks' other end: the host's echo (os/bench/net/echo.c)
+# on a tap interface with vhost-net, the same for both systems, spinning on
+# one more processor of the fastest kind, held like the guests'.
+tap=silica-bench0 netargs=() echo_pid=""
+echo_cpu=$(fastest_cpus "$((SMP + 1))" | tr , '\n' | grep -vxF -f <(echo "$pin" | tr , '\n') | head -n 1)
 # Those processors are held at one policy for both systems while the guests
 # run (host_tune), and put back afterwards, whichever way this script ends.
 # A host left on its power-saving default measures its own frequency ramps
@@ -135,13 +146,26 @@ host_restore "$policy"   # left by a run that was killed
 # (The tool's own test boots nothing: there is no host to hold.)
 [ -n "${SILICA_BENCH_IMG:-}" ] && tuned=stub
 if [ $accel = kvm ] && [ -n "$pin" ] && [ $tuned = no ]; then
-  trap 'host_restore "$policy"' EXIT
+  trap 'host_restore "$policy"; net_down' EXIT
   trap 'exit 130' INT TERM
-  if host_tune "$pin" "$policy"; then tuned=yes
+  if host_tune "$pin${echo_cpu:+,$echo_cpu}" "$policy"; then tuned=yes
   else host_restore "$policy"; echo "bench: host not tuned (needs passwordless sudo): timings carry its power-saving policy"; fi
 fi
 
+# net_up: the tap and the echo, or return 1 (no sudo, no spare processor).
+net_up() {
+  [ -n "$echo_cpu" ] && sudo -n true 2>/dev/null || return 1
+  gcc -O2 -Wall -o "$RUN/echo" "$OS/bench/net/echo.c" >>"$LOGS/bench/echo.log" 2>&1 || return 1
+  ip link show "$tap" >/dev/null 2>&1 || sudo -n ip tuntap add dev "$tap" mode tap user "$(id -un)" || return 1
+  sudo -n ip link set "$tap" up && sudo -n sysctl -q -w "net.ipv6.conf.$tap.disable_ipv6=1" || return 1
+  sudo -n taskset -c "$echo_cpu" chrt -f 50 "$RUN/echo" "$tap" >>"$LOGS/bench/echo.log" 2>&1 &
+  echo_pid=$!
+  netargs=(--net "tap:$tap")
+}
+net_down() { [ -z "$echo_pid" ] || sudo -n pkill -P "$echo_pid" 2>/dev/null; echo_pid=""; }
+
 if [ -z "$compare$sweep" ]; then
+[ -n "${SILICA_BENCH_IMG:-}" ] || net_up || echo "bench: no network benchmarks: the tap and the host's echo need passwordless sudo and a spare processor"
 log=$LOGS/bench/build.silica.log
 # $SILICA_BENCH_IMG names a ready-made Silica image (used by the tool's own test).
 silica=${SILICA_BENCH_IMG:-$(build_image x86_64 "$log" bench)} && [ -f "$silica" ] || { err "cannot build the Silica benchmark image (log: $log)"; echo "RESULT: pass=0 fail=1 skipped=0 time=$((SECONDS - start))"; exit 2; }
@@ -150,7 +174,7 @@ silica=${SILICA_BENCH_IMG:-$(build_image x86_64 "$log" bench)} && [ -f "$silica"
 log=$LOGS/bench/build.silica-system.log
 silica_sys=""
 if [ -z "${SILICA_BENCH_IMG:-}" ]; then
-  silica_sys=$(build_system_image x86_64 "$log" "checks=block bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; echo "RESULT: pass=0 fail=1 skipped=0 time=$((SECONDS - start))"; exit 2; }
+  silica_sys=$(build_system_image x86_64 "$log" "checks=block net bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; echo "RESULT: pass=0 fail=1 skipped=0 time=$((SECONDS - start))"; exit 2; }
 fi
 log=$LOGS/bench/build.linux.log
 linux=$(build_linux "$log"); rc=$?
@@ -172,15 +196,15 @@ fi
 # boot <system> <image> <run> [<values> [<machine> [<keep>]]]: one boot;
 # appends "<metric> <value>" lines to $RUN/<values>.values (default:
 # <system>), and its boot time when <keep> is "all" (the default). <machine>:
-# "iommu" (the default) or "plain". <keep> "blk" keeps only the blk_ metrics,
-# "confined" keeps them as blk_*_confined.
+# "iommu" (the default) or "plain". <keep> "blk" keeps only the device
+# metrics (blk_, net_), "confined" keeps them as *_confined.
 boot() {
   local sys=$1 img=$2 i=$3 vals=${4:-$1} machine=${5:-iommu} keep=${6:-all} ser=$RUN/$1.$3.serial st=$RUN/$1.$3.stamp qlog=$LOGS/bench/$1.$3.log rc t0 t1
   local -a margs=()
   [ "$machine" = plain ] && margs=(--no-iommu)
   # $SILICA_BENCH_MACHINE: further qemu.sh arguments, the same for every boot.
   "$TOOLS/qemu.sh" --image "$img" --serial "$ser" --stamp "$st" --timeout "${SILICA_BENCH_TIMEOUT:-300}" \
-    --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} "${margs[@]+"${margs[@]}"}" ${SILICA_BENCH_MACHINE:-} >"$qlog" 2>&1
+    --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} "${margs[@]+"${margs[@]}"}" "${netargs[@]+"${netargs[@]}"}" ${SILICA_BENCH_MACHINE:-} >"$qlog" 2>&1
   rc=$?
   if [ $rc = 2 ]; then err "$sys: qemu.sh setup error: $(head -c 200 "$qlog" | tr '\n' ' ')"; echo "RESULT: pass=$pass fail=1 skipped=$skipped time=$((SECONDS - start))"; exit 2; fi
   if ! tr -d '\r' <"$ser" 2>/dev/null | grep -qx 'BENCH DONE'; then
@@ -188,7 +212,7 @@ boot() {
     echo "RESULT: pass=$pass fail=1 skipped=$skipped time=$((SECONDS - start))"; exit 1
   fi
   tr -d '\r' <"$ser" | awk -v k="$keep" '$1 == "BENCH" && NF == 4 && $3 ~ /^[0-9]+([.][0-9]+)?$/ {
-      if (k != "all" && $2 !~ /^blk_/) next
+      if (k != "all" && $2 !~ /^(blk|net)_/) next
       print (k == "confined" ? $2 "_confined" : $2), $3, $4 }' >>"$RUN/$vals.values"
   [ "$keep" = all ] || return 0
   # Boot time, by the host's clock: from the firmware starting the boot

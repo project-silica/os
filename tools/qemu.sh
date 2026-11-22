@@ -111,8 +111,11 @@ case "$arch" in
     [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}")
     case "$net" in
       "") ;;
-      user) extra+=(-netdev user,id=net0 -device "virtio-net-pci,netdev=net0,disable-legacy=on${iommu:+,iommu_platform=on}") ;;
-      tap:*) extra+=(-netdev "tap,id=net0,ifname=${net#tap:},script=no,downscript=no,vhost=on" -device "virtio-net-pci,netdev=net0,disable-legacy=on${iommu:+,iommu_platform=on}") ;;
+      # The network device does its DMA through the platform's translation
+      # (iommu_platform), as every real PCI device does, on both machines:
+      # Linux's AF_XDP zero-copy, its fastest raw path, needs it.
+      user) extra+=(-netdev user,id=net0 -device virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on) ;;
+      tap:*) extra+=(-netdev "tap,id=net0,ifname=${net#tap:},script=no,downscript=no,vhost=on" -device virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on) ;;
       *) die "--net: user or tap:<interface>, not $net" ;;
     esac ;;
   aarch64)

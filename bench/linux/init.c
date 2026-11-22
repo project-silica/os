@@ -12,6 +12,9 @@
 // minimum, median and 99th percentile.
 
 #include <linux/io_uring.h>
+#include <linux/if_packet.h>
+#include <linux/if_xdp.h>
+#include <linux/sockios.h>
 
 #define SAMPLES 20000
 #define WARMUP 2000
@@ -320,6 +323,202 @@ static void block_reads(void)
 	close(fd);
 }
 
+// The network benchmarks, as netcheck runs them on Silica: frames of
+// EtherType 0x88B5 come back from the host's echo (os/bench/net/echo.c on
+// the tap interface), 0x88B6 are dropped there. Raw frames through
+// AF_PACKET, the closest Linux has to a program driving the interface
+// itself: a 60-byte frame's round trip (blocking send and receive), and
+// 1514-byte frames sent for a second in batches of 32 (sendmmsg), past the
+// queueing discipline (PACKET_QDISC_BYPASS), as fast as Linux sends them.
+#define NET_RTTS 22000
+#define NET_WARMUP 2000
+#define NET_BATCH 32
+struct net_iovec { void *base; unsigned long len; };
+struct net_msghdr { void *name; int namelen; struct net_iovec *iov; unsigned long iovlen; void *control; unsigned long controllen; unsigned flags; };
+struct net_mmsghdr { struct net_msghdr hdr; unsigned len; };
+// struct ifreq, without the libc headers <linux/if.h> wants.
+struct net_ifreq {
+	char name[16];
+	union {
+		short flags;
+		int index;
+		struct { unsigned short family; unsigned char data[14]; } hwaddr;
+		char pad[24];
+	};
+};
+static unsigned char net_out[1514], net_in[2048];
+
+static unsigned short be16(unsigned short v) { return (unsigned short)(v << 8 | v >> 8); }
+
+// Transmit through an AF_XDP socket on queue 0, zero-copy where the driver
+// can (the device's DMA through the platform's API), else copying: the same
+// 1514-byte frame, as fast as the ring takes them, for a second. Returns
+// frames a second, or 0 where AF_XDP is unavailable (and says why).
+#define XDP_FRAMES 1024
+#define XDP_RING 512
+static unsigned long net_tx_xdp(int ifindex)
+{
+	int x = syscall(__NR_socket, 44 /* AF_XDP */, 3, 0);
+	unsigned char *umem = (unsigned char *)syscall(__NR_mmap, 0UL, XDP_FRAMES * 2048UL, 3 /* RW */, 0x22 | 0x8000 /* PRIVATE ANON POPULATE */, -1, 0UL);
+	if (x < 0 || (long)umem < 0) {
+		printf("bench: no AF_XDP socket (%d)\n", x);
+		return 0;
+	}
+	struct xdp_umem_reg reg = { (unsigned long)umem, XDP_FRAMES * 2048UL, 2048, 0, 0, 0 };
+	int ring = XDP_RING;
+	struct xdp_mmap_offsets off;
+	unsigned len = sizeof(off);
+	if (syscall(__NR_setsockopt, x, 283 /* SOL_XDP */, XDP_UMEM_REG, &reg, sizeof(reg)) != 0 ||
+	    syscall(__NR_setsockopt, x, 283, XDP_UMEM_FILL_RING, &ring, 4) != 0 ||
+	    syscall(__NR_setsockopt, x, 283, XDP_UMEM_COMPLETION_RING, &ring, 4) != 0 ||
+	    syscall(__NR_setsockopt, x, 283, XDP_TX_RING, &ring, 4) != 0 ||
+	    syscall(__NR_getsockopt, x, 283, XDP_MMAP_OFFSETS, &off, &len) != 0) {
+		printf("bench: cannot set up an AF_XDP socket\n");
+		return 0;
+	}
+	unsigned char *tx = (unsigned char *)syscall(__NR_mmap, 0UL, off.tx.desc + XDP_RING * sizeof(struct xdp_desc), 3, 0x1 | 0x8000 /* SHARED POPULATE */, x, XDP_PGOFF_TX_RING);
+	unsigned char *cr = (unsigned char *)syscall(__NR_mmap, 0UL, off.cr.desc + XDP_RING * 8UL, 3, 0x1 | 0x8000, x, XDP_UMEM_PGOFF_COMPLETION_RING);
+	unsigned char *fr = (unsigned char *)syscall(__NR_mmap, 0UL, off.fr.desc + XDP_RING * 8UL, 3, 0x1 | 0x8000, x, XDP_UMEM_PGOFF_FILL_RING);
+	if ((long)tx < 0 || (long)cr < 0 || (long)fr < 0) {
+		printf("bench: cannot map the AF_XDP rings\n");
+		return 0;
+	}
+	struct sockaddr_xdp sx = { 44, XDP_ZEROCOPY | XDP_USE_NEED_WAKEUP, (unsigned)ifindex, 0, 0 };
+	const char *mode = "zero-copy";
+	if (syscall(__NR_bind, x, &sx, sizeof(sx)) != 0) {
+		sx.sxdp_flags = XDP_COPY | XDP_USE_NEED_WAKEUP;
+		mode = "copying";
+		if (syscall(__NR_bind, x, &sx, sizeof(sx)) != 0) {
+			printf("bench: cannot bind an AF_XDP socket\n");
+			return 0;
+		}
+	}
+	for (int i = 0; i < XDP_FRAMES; i++)
+		memcpy(umem + i * 2048UL, net_out, 1514);
+	unsigned *tx_prod = (unsigned *)(tx + off.tx.producer), *tx_cons = (unsigned *)(tx + off.tx.consumer);
+	unsigned *tx_flags = (unsigned *)(tx + off.tx.flags);
+	struct xdp_desc *desc = (struct xdp_desc *)(tx + off.tx.desc);
+	unsigned *cr_prod = (unsigned *)(cr + off.cr.producer), *cr_cons = (unsigned *)(cr + off.cr.consumer);
+	unsigned long done = 0, start = now_ns(), end = start + 1000000000UL;
+	unsigned prod = *tx_prod, outstanding = 0;
+	while (now_ns() < end) {
+		unsigned room = XDP_RING - (prod - __atomic_load_n(tx_cons, __ATOMIC_ACQUIRE));
+		unsigned limit = XDP_RING - outstanding;
+		if (room > limit)
+			room = limit;
+		for (unsigned i = 0; i < room; i++, prod++) {
+			desc[prod & (XDP_RING - 1)].addr = (prod & (XDP_FRAMES - 1)) * 2048UL;
+			desc[prod & (XDP_RING - 1)].len = 1514;
+			desc[prod & (XDP_RING - 1)].options = 0;
+		}
+		outstanding += room;
+		__atomic_store_n(tx_prod, prod, __ATOMIC_RELEASE);
+		if (__atomic_load_n(tx_flags, __ATOMIC_ACQUIRE) & XDP_RING_NEED_WAKEUP)
+			syscall(__NR_sendto, x, 0UL, 0UL, 0x40 /* MSG_DONTWAIT */, 0UL, 0UL);
+		unsigned c = __atomic_load_n(cr_prod, __ATOMIC_ACQUIRE), cc = *cr_cons;
+		done += c - cc;
+		outstanding -= c - cc;
+		__atomic_store_n(cr_cons, c, __ATOMIC_RELEASE);
+	}
+	unsigned long rate = done * 1000000000UL / (now_ns() - start);
+	printf("bench: AF_XDP (%s) transmit %lu frames/s\n", mode, rate);
+	syscall(__NR_close, x);
+	return rate;
+}
+
+static void net_bench(void)
+{
+	int s = syscall(__NR_socket, 17 /* AF_PACKET */, 3 /* SOCK_RAW */, be16(0x88B5));
+	struct net_ifreq ifr;
+	memset(&ifr, 0, sizeof(ifr));
+	memcpy(ifr.name, "eth0", 5);
+	if (s < 0 || syscall(__NR_ioctl, s, SIOCGIFFLAGS, &ifr) != 0) {
+		printf("bench: no network interface\n");
+		return;
+	}
+	ifr.flags |= 1; // IFF_UP
+	syscall(__NR_ioctl, s, SIOCSIFFLAGS, &ifr);
+	syscall(__NR_ioctl, s, SIOCGIFHWADDR, &ifr);
+	unsigned char mac[6];
+	memcpy(mac, ifr.hwaddr.data, 6);
+	syscall(__NR_ioctl, s, SIOCGIFINDEX, &ifr);
+	struct sockaddr_ll at;
+	memset(&at, 0, sizeof(at));
+	at.sll_family = 17;
+	at.sll_protocol = be16(0x88B5);
+	at.sll_ifindex = ifr.index;
+	if (syscall(__NR_bind, s, &at, sizeof(at)) != 0) {
+		printf("ERROR: bench: cannot bind a packet socket\n");
+		return;
+	}
+	// A link that is still coming up: the probe is repeated for a while.
+	long timeout[2] = { 0, 250000 };
+	syscall(__NR_setsockopt, s, 1 /* SOL_SOCKET */, 20 /* SO_RCVTIMEO */, timeout, sizeof(timeout));
+	memset(net_out, 0xFF, 6);
+	memcpy(net_out + 6, mac, 6);
+	net_out[12] = 0x88;
+	net_out[13] = 0xB5;
+	int found = 0;
+	for (int i = 0; i < 20 && !found; i++) {
+		unsigned seq = 0;
+		memcpy(net_out + 14, &seq, 4);
+		syscall(__NR_sendto, s, net_out, 60UL, 0, 0UL, 0UL);
+		long n = syscall(__NR_recvfrom, s, net_in, sizeof(net_in), 0, 0UL, 0UL);
+		found = n >= 18 && memcmp(net_in, mac, 6) == 0;
+	}
+	if (!found) {
+		printf("bench: no benchmark echo on this network\n");
+		return;
+	}
+	long none[2] = { 0, 0 };
+	syscall(__NR_setsockopt, s, 1, 20, none, sizeof(none));
+	int n = 0;
+	for (unsigned seq = 1; seq <= NET_RTTS; seq++) {
+		memcpy(net_out + 14, &seq, 4);
+		unsigned long t = now_ns();
+		syscall(__NR_sendto, s, net_out, 60UL, 0, 0UL, 0UL);
+		for (;;) {
+			long got = syscall(__NR_recvfrom, s, net_in, sizeof(net_in), 0, 0UL, 0UL);
+			if (got >= 18 && memcmp(net_in + 14, &seq, 4) == 0)
+				break;
+		}
+		t = now_ns() - t;
+		if (seq > NET_WARMUP)
+			samples[n++] = t;
+	}
+	sort(samples, n);
+	printf("BENCH net_rtt %lu ns\n", samples[n / 2]);
+	printf("BENCH net_rtt_p99 %lu ns\n", samples[n * 99 / 100]);
+
+	int t = syscall(__NR_socket, 17, 3, 0);
+	at.sll_protocol = 0;
+	int one = 1;
+	syscall(__NR_setsockopt, t, 263 /* SOL_PACKET */, PACKET_QDISC_BYPASS, &one, sizeof(one));
+	if (t < 0 || syscall(__NR_bind, t, &at, sizeof(at)) != 0) {
+		printf("ERROR: bench: cannot bind a sending packet socket\n");
+		return;
+	}
+	memset(net_out, 0xFF, 6);
+	net_out[13] = 0xB6;
+	unsigned long xdp = net_tx_xdp(ifr.index);
+	struct net_iovec iov = { net_out, 1514 };
+	struct net_mmsghdr batch[NET_BATCH];
+	memset(batch, 0, sizeof(batch));
+	for (int i = 0; i < NET_BATCH; i++) {
+		batch[i].hdr.iov = &iov;
+		batch[i].hdr.iovlen = 1;
+	}
+	unsigned long sent = 0, start = now_ns(), end = start + 1000000000UL;
+	while (now_ns() < end) {
+		long k = syscall(__NR_sendmmsg, t, batch, NET_BATCH, 0);
+		if (k > 0)
+			sent += k;
+	}
+	unsigned long packet = sent * 1000000000UL / (now_ns() - start);
+	printf("bench: transmit through AF_PACKET %lu frames/s, AF_XDP %lu\n", packet, xdp);
+	printf("BENCH net_tx %lu frames/s\n", packet > xdp ? packet : xdp);
+}
+
 int main(void)
 {
 	// The host stamps this line: the first instruction-level sign of userspace.
@@ -358,6 +557,7 @@ int main(void)
 		}
 	}
 	block_reads();
+	net_bench();
 	printf("BENCH DONE\n");
 
 	// Wait until the console has sent everything (TCSBRK with a non-zero
