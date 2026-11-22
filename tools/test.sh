@@ -428,17 +428,14 @@ else
   fi
   # The system image: the kernel with the system repository's init as root task.
   if { in_scope kernel || in_scope os || in_scope system; } && [ -f "$(checkout_of system)/Cargo.toml" ]; then
-    run_system x86_64 system.x86_64
-    run_rogue x86_64 system.x86_64
-    run_power x86_64 system.x86_64
-    run_recovery x86_64 system.x86_64
-    run_shutdown x86_64 system.x86_64
-    run_console x86_64 system.x86_64
-    run_nvme x86_64 system.x86_64
-    run_net x86_64 system.x86_64
-    run_net_recovery x86_64 system.x86_64
+    # The system image's guest tests, all at once: each boots its own
+    # machine (images are built one at a time), and the host has the
+    # processors; one after another they no longer fit the fast tier's minute.
+    system_tests=(system rogue power recovery shutdown console nvme net net_recovery) pids=()
     # One boot per fault and driver: ten, so not in the fast tier.
-    [ "$tier" != fast ] && run_faults x86_64 system.x86_64
+    [ "$tier" != fast ] && system_tests+=(faults)
+    for t in "${system_tests[@]}"; do "run_$t" x86_64 system.x86_64 & pids+=($!); done
+    wait "${pids[@]}"
     [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
     # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
     # "aarch64 boots to the same test"), emulated, so not in the fast tier.

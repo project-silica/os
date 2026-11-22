@@ -117,8 +117,14 @@ build_image_tool() {
 # is the system repository's program <root> (default: init), with every other
 # program of that repository in the ramdisk under its own name. Prints the
 # image path (system.img, or system-<root>.img for another root task).
+# One image at a time (the builds share their artifacts): the guest tests
+# that boot them run at once.
 build_system_image() {
-  local arch=$1 log=$2 cmdline=${3:-} root=${4:-init} k l t sys out f n lp
+  ( flock 9; build_system_image_locked "$@" ) 9>"$OUTBASE/build.lock"
+}
+
+build_system_image_locked() {
+  local arch=$1 log=$2 cmdline=${3:-} root=${4:-init} k l t sys out f n lp tag
   lp=$(loader_path "$arch") || { echo "no image layout for $arch (no UEFI loader)" >"$log"; return 1; }
   # As for build_image: on aarch64 the harness hears the status through semihosting.
   [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
@@ -137,8 +143,10 @@ build_system_image() {
   done
   entries+=(--ramdisk-entry "drivers=$sys/drivers.list" --ramdisk-entry "services=$sys/services.list")
   if [ -n "$cmdline" ]; then
-    # This run's alone, as for build_image.
-    [ -n "${RUN:-}" ] && out=$RUN/$(basename "$out")
+    # This run's alone, as for build_image, and one per command line, so
+    # tests booting different images at once do not share one.
+    tag=$(printf '%s' "$cmdline" | cksum | cut -d' ' -f1)
+    [ -n "${RUN:-}" ] && { mkdir -p "$RUN/image-$tag" && out=$RUN/image-$tag/$(basename "$out"); }
     printf '%s\n' "$cmdline" >"$(dirname "$out")/SYSTEM-CMDLINE.TXT" || return 1
     extra=("SILICA/CMDLINE.TXT=$(dirname "$out")/SYSTEM-CMDLINE.TXT")
   fi
