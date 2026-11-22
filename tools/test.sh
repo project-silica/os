@@ -551,6 +551,8 @@ guests() {
         gin aarch64 system
         unit any system.aarch64/system "${GIN[@]}" -- run_system aarch64 system.aarch64
         unit any systest.aarch64/systest "${GIN[@]}" -- run_systest aarch64 systest.aarch64
+        # The NVMe driver where the processor reorders memory (its DMA barriers).
+        unit any system.aarch64/nvme "${GIN[@]}" -- run_nvme aarch64 system.aarch64
       fi
     fi
   fi
