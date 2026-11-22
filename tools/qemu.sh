@@ -130,9 +130,6 @@ case "$arch" in
     # threads, a hand-off more per request).
     disk=(-object iothread,id=io0 -device "virtio-blk-pci,drive=boot,iothread=io0,disable-legacy=on${iommu:+,iommu_platform=on}${disk_props:+,$disk_props}")
     [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48)
-    [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=$nvme_snapshot")
-    [ -z "$nvme" ] && [ ${#nvme_ns[@]} = 0 ] || extra+=(-device "nvme,id=nvme0,serial=silica-nvme${nvme:+,drive=nvm}${nvme_props:+,$nvme_props}")
-    for ns in "${nvme_ns[@]+"${nvme_ns[@]}"}"; do extra+=(-device "nvme-ns,bus=nvme0,$ns"); done
     [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}")
     [ -z "$hotplug" ] || extra+=(-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off -device pcie-root-port,id=hp0,chassis=1,slot=1,mem-reserve=8M,pref64-reserve=64M
       -drive "format=raw,file=$hotplug,if=none,id=hot")
@@ -157,6 +154,10 @@ case "$arch" in
 esac
 command -v "$bin" >/dev/null || die "$bin is not installed (run tools/init.sh)"
 for d in "${drives[@]+"${drives[@]}"}"; do extra+=(-drive "format=raw,file=${d#*=},if=none,id=${d%%=*},snapshot=on"); done
+# The NVMe controller: the same on every architecture.
+[ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=$nvme_snapshot")
+[ -z "$nvme" ] && [ ${#nvme_ns[@]} = 0 ] || extra+=(-device "nvme,id=nvme0,serial=silica-nvme${nvme:+,drive=nvm}${nvme_props:+,$nvme_props}")
+for ns in "${nvme_ns[@]+"${nvme_ns[@]}"}"; do extra+=(-device "nvme-ns,bus=nvme0,$ns"); done
 
 vga=(-vga none); [ -n "$shot" ] && vga=(-vga std)
 : >"$serial"
