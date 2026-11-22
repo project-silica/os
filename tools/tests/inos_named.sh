@@ -28,7 +28,7 @@ for a in x86_64 aarch64 riscv64; do echo '{}' >"$K/targets/$a-silica.json"; done
 # Builds are not under test: the kernel, the loader and the image tool are
 # placeholders, appended to the real build.sh so the real build_image runs.
 cat >>"$OS/tools/lib/build.sh" <<'EOF'
-build_kernel() { local o; o=$(art_dir "$1")/kernel.elf; echo k >"$o"; echo "$o"; }
+build_kernel() { local o; o=$(art_dir "$1")/kernel.elf; echo k >"$o"; echo k >"${o%.elf}.stripped"; echo "$o"; }
 build_loader() { local o; o=$(art_dir x86_64)/BOOTX64.EFI; echo l >"$o"; echo "$o"; }
 build_image_tool() {
   local o; o=$(cache_of os)/fake-silica-image; mkdir -p "$(dirname "$o")"

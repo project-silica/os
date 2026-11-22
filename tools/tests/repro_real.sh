@@ -11,6 +11,7 @@
 # Both runs build twice (about a minute each, so --fast does not run this test;
 # see suite_tools in test.sh). Nothing outside the disposable workshop is
 # written. One "ERROR:" line per failed check.
+# inputs: kernel
 set -uo pipefail
 SRC_OS=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd -P)
 find_ws() {

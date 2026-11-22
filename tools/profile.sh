@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Profile of one kernel path (spec/TESTING.md section 4.1).
 #   profile.sh [--bench <name>] [--kvm] [--times <n>] [--per <n>] [--top <n>] [--lines]
-#              [--kernel <dir>] [--count] [--out <dir>]
+#              [--kernel <dir>] [--count] [--out <dir>] [--image <disk image>]
 #
 # Builds the x86_64 image whose root task runs "bench=<name>[:<times>]"
 # (default ipc: only the IPC round trip; null, ctx, fault, timer), boots it,
@@ -29,13 +29,15 @@
 # instruction processor 0 executed in the whole boot; bench.sh takes the
 # difference between --times 2 and --times 1 as the exact count of one
 # benchmark. --out puts the work files in <dir> (default target/profile), so
-# several profiles can run at once.
+# several profiles can run at once. --image boots a ready image (built with
+# "bench=<name>:<times>" on its command line) instead of building one:
+# bench.sh builds its counting images once and counts them all at once.
 # Output: the benchmark's own BENCH lines, then "<figure> <function>" lines,
 # largest first, then "TOTAL <n>" (operations' instructions, or samples).
 # Exit 0, or 2 on a setup error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
-mode=ipc per=22000 top=40 lines=0 kvm=0 times="" count=0 out=$OUTBASE/profile
+mode=ipc per=22000 top=40 lines=0 kvm=0 times="" count=0 out=$OUTBASE/profile image=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --bench) mode=$2; shift 2 ;;
@@ -47,6 +49,7 @@ while [ $# -gt 0 ]; do
     --kernel) SRC[kernel]=$(readlink -f "$2"); shift 2 ;;
     --count) count=1; shift ;;
     --out) out=$2; shift 2 ;;
+    --image) image=$2; shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
 done
@@ -88,10 +91,10 @@ else
   if [ ! -f "$plugin" ] || [ "$TOOLS/profile/insncount.c" -nt "$plugin" ]; then
     gcc -O2 -shared -fPIC -o "$plugin" "$TOOLS/profile/insncount.c" $(pkg-config --cflags --libs glib-2.0) || die "cannot build the plugin"
   fi
-  code=""; for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/OVMF/OVMF_CODE.fd; do [ -f "$f" ] && { code=$f; break; }; done
-  vars=""; for f in /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd /usr/share/OVMF/OVMF_VARS.fd; do [ -f "$f" ] && { vars=$f; break; }; done
+  code=$(firmware_of x86_64 code); vars=$(firmware_of x86_64 vars)
   [ -n "$code" ] && [ -n "$vars" ] || die "no x86_64 UEFI firmware (run tools/init.sh)"
-  img=$(build_image x86_64 "$out/build.log" "bench=$mode:$times") || die "image build failed (log: $out/build.log)"
+  img=$image
+  [ -n "$img" ] || img=$(build_image x86_64 "$out/build.log" "bench=$mode:$times") || die "image build failed (log: $out/build.log)"
   elf=$(art_dir x86_64)/kernel.elf
   # The emulated firmware occasionally hangs before it starts the loader
   # (as in qemu.sh); such a boot is tried once more. Nothing of Silica ran.

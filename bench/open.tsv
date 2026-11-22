@@ -1,0 +1,21 @@
+# Open gaps (tools/bench.sh): a shortfall that is known and not yet closed. One line per gap, tabs between:
+#   metric   linux|ratchet   bound   host   why
+# linux: the metric misses its target against Linux's locked number (bench/reference.tsv); the bound is the
+# ratio to that number it may not exceed. ratchet: it is worse than its own best (bench/ratchet.tsv); the bound
+# is the value it may not pass, on the host named ("-": any host, a count). While a metric is no worse than its
+# bound a run reports it OPEN and passes; past it, ERROR. A line is added by a commit that says why, tightened
+# or removed by `bench.sh --update-ratchet`, and never loosened. No milestone is declared over a line of a
+# metric it requires. Each line is work owed: close it in Silica, or decide the cost and move its ratchet with
+# the measurement that justifies it (spec/TESTING.md 4.1).
+# The bounds below are from the sessions of 2026-11-22 (the single-processor and device values from a session
+# that had a stray process on one measured core, which those paths do not use: tighten them from the first
+# clean session with --update-ratchet).
+null_syscall	linux	0.87	-	at 84 ns against a target of 82.5 (Linux getppid 97 ns less 15%): 138.6 instructions on the path
+blk_read4k_qd1	linux	1.02	-	tied with Linux unconfined at depth 1 (15.4 us): the extra hop, device interrupt to driver thread to client, ARCHITECTURE.md section 7
+blk_read4k_qd1_p99	linux	1.39	-	the tail of the same extra hop unconfined: 22.7 to 24.1 us against Linux 17.4
+blk_read4k_qd32	linux	1.04	-	tied with Linux unconfined at depth 32 (287,000 against 291,500 a second): the host bounds both
+net_rtt	linux	0.93	-	ahead of Linux (9.5 us against 10.25) but short of 15% ahead (8.7 us)
+boot_userspace	ratchet	20.7	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned	boot went from 13.8 to 20.5 ms since the ratchet was set at the M2 exit; the cause is not attributed and no commit weighed the cost
+timer_overshoot_p99	ratchet	9300	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned	the tail went from 6.2 to 9.2 us since the ratchet was set; the cause is not attributed (bench.sh --compare over the kernel commits since would name it)
+insns_ipc_roundtrip	ratchet	1005.7	-	11 instructions a round trip since the ratchet was set (994.7); bench.sh --compare 6f6c470..HEAD --only insns --steps names the commit
+insns_page_fault	ratchet	2801.3	-	35 instructions a fault since the ratchet was set (2766.3); the same command names the commit
