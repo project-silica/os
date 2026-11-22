@@ -128,10 +128,19 @@ build_system_image_locked() {
   lp=$(loader_path "$arch") || { echo "no image layout for $arch (no UEFI loader)" >"$log"; return 1; }
   # As for build_image: on aarch64 the harness hears the status through semihosting.
   [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
-  k=$(build_kernel "$arch" "$log.kernel") || { cat "$log.kernel" >"$log"; return 1; }
-  l=$(build_loader "$log.loader" "$arch") || { cat "$log.loader" >"$log"; return 1; }
-  sys=$(build_system "$arch" "$log.system") || { cat "$log.system" >"$log"; return 1; }
-  t=$(build_image_tool "$log.tool") || { cat "$log.tool" >"$log"; return 1; }
+  # The pieces, built once per run and architecture (the sources do not
+  # change during a run; a warm build of them still takes some 4 s, which
+  # every one of a run's images paid): the image is all that differs.
+  local built=${RUN:+$RUN/.built-system-$arch}
+  if [ -n "$built" ] && [ -s "$built" ]; then
+    read -r k l sys t <"$built"
+  else
+    k=$(build_kernel "$arch" "$log.kernel") || { cat "$log.kernel" >"$log"; return 1; }
+    l=$(build_loader "$log.loader" "$arch") || { cat "$log.loader" >"$log"; return 1; }
+    sys=$(build_system "$arch" "$log.system") || { cat "$log.system" >"$log"; return 1; }
+    t=$(build_image_tool "$log.tool") || { cat "$log.tool" >"$log"; return 1; }
+    [ -z "$built" ] || printf '%s %s %s %s\n' "$k" "$l" "$sys" "$t" >"$built"
+  fi
   out=$(art_dir "$arch")/system.img
   [ "$root" = init ] || out=$(art_dir "$arch")/system-$root.img
   [ -f "$sys/$root.elf" ] || { echo "the system repository has no program named $root" >"$log"; return 1; }
