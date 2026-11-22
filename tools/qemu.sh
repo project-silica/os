@@ -4,7 +4,7 @@
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
-#           [--net user|tap:<interface>] [--hotplug <disk image>]
+#           [--net user|tap:<interface>] [--hotplug <disk image>] [--emulator <host cpu list>] [--disk-props <k=v,...>]
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
@@ -28,9 +28,17 @@
 # --until ends the run, as a success, when a serial line matches: for a
 # system that stays up (it does not turn the machine off when it is ready).
 # --pin runs the emulator on the given host processors (taskset), for
-# benchmarks. --stamp writes one line per serial line, "<host time in seconds
-# with microseconds> <text>", after a first line "<time> QEMU START", so boot
-# times are measured by the host.
+# benchmarks; with --emulator as well, as a tuned virtualization host does
+# (libvirt's vcpupin and emulatorpin): virtual processor n on the nth
+# processor of --pin alone, the disk's I/O thread alone on the first
+# --emulator processor, the network's (vhost-net) on the second, and the
+# emulator's other threads (the main loop, its workers) on the rest, so a
+# guest that watches for work on a virtual processor never takes the host
+# processor the emulator needs to finish that work. --disk-props adds
+# properties to the boot disk's virtio device (x86_64), as a host tuned for
+# a benchmark sets them. --stamp writes one line per serial line, "<host
+# time in seconds with microseconds> <text>", after a first line "<time>
+# QEMU START", so boot times are measured by the host.
 # Serial goes to a file; a hard timeout kills the guest (counted from the
 # firmware's hand-over to the loader; the firmware has its own allowance). The processors'
 # registers at every reset go to qemu-reset.log beside it, so a guest that
@@ -40,10 +48,10 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
-hotplug="" net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
+disk_props="" emulator="" hotplug="" net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--hotplug)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--hotplug|--emulator|--disk-props)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -65,6 +73,8 @@ while [ $# -gt 0 ]; do
     --nvme) nvme=$2; shift 2 ;;
     --net) net=$2; shift 2 ;;
     --hotplug) hotplug=$2; shift 2 ;;
+    --emulator) emulator=$2; shift 2 ;;
+    --disk-props) disk_props=$2; shift 2 ;;
     --disk) disk2=$2; shift 2 ;;
     --on) on+=("$2"); shift 2 ;;
     --type) typing+=("$2"); shift 2 ;;
@@ -97,7 +107,12 @@ case "$arch" in
     extra=(); [ -z "$exitdev" ] || extra=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
     # The boot disk is a virtio 1.0 device; with the IOMMU it is told to do
     # its DMA through it (without that, QEMU's virtio devices bypass it).
-    disk=(-device "virtio-blk-pci,drive=boot,disable-legacy=on${iommu:+,iommu_platform=on}")
+    # The disk's requests are served by an I/O thread of its own (QEMU's
+    # main loop serves it otherwise, between everything else it does), as
+    # on a host tuned for its guests' disks, which also reads and writes the
+    # host's file through io_uring (below; QEMU's default is a pool of
+    # threads, a hand-off more per request).
+    disk=(-object iothread,id=io0 -device "virtio-blk-pci,drive=boot,iothread=io0,disable-legacy=on${iommu:+,iommu_platform=on}${disk_props:+,$disk_props}")
     [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48)
     [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=on" -device nvme,serial=silica-nvme,drive=nvm)
     [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}")
@@ -126,7 +141,7 @@ command -v "$bin" >/dev/null || die "$bin is not installed (run tools/init.sh)"
 
 vga=(-vga none); [ -n "$shot" ] && vga=(-vga std)
 : >"$serial"
-run=(); [ -n "$pin" ] && command -v taskset >/dev/null && run=(taskset -c "$pin")
+run=(); [ -n "$pin" ] && command -v taskset >/dev/null && run=(taskset -c "$pin${emulator:+,$emulator}")
 serial_arg="file:$serial" stamper=""
 if [ -n "$stamp" ]; then
   # The serial port goes through a pipe to a reader that notes when each line arrived.
@@ -156,8 +171,40 @@ fi
   cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${accel[@]}" -smp "$smp" -m "$mem" \
   "${serial_dev[@]}" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
-  -drive "format=raw,file=$image,if=none,id=boot,snapshot=on" "${disk[@]}" "${vga[@]}" "${extra[@]}" "${devices[@]+"${devices[@]}"}" ) 2>"$RUN/qemu.out" &
+  -drive "format=raw,file=$image,if=none,id=boot,snapshot=on,aio=io_uring" "${disk[@]}" "${vga[@]}" "${extra[@]}" "${devices[@]+"${devices[@]}"}" ) 2>"$RUN/qemu.out" &
 pid=$!
+
+# Each virtual processor on its own host processor; of --emulator, the
+# first takes the disk's I/O thread, the second the network's (vhost-net's
+# worker, made when the guest starts its driver), the rest everything else
+# of the emulator's. Threads are placed as they appear, for as long as the
+# emulator runs.
+if [ -n "$pin" ] && [ -n "$emulator" ]; then
+  (
+    read -ra cpus <<<"$(echo "$pin" | tr , ' ')"
+    read -ra emu <<<"$(echo "$emulator" | tr , ' ')"
+    io=${emu[0]} net=${emu[1]:-${emu[0]}} others=$(IFS=,; echo "${emu[*]:2}")
+    others=${others:-$emulator}
+    # This watch itself stays off the processors being measured.
+    taskset -p -c "$others" "$BASHPID" >/dev/null 2>&1
+    placed=" " n=0
+    while kill -0 "$pid" 2>/dev/null; do
+      for c in /proc/$pid/task/*/comm; do
+        tid=$(basename "$(dirname "$c")")
+        case "$placed" in *" $tid "*) continue ;; esac
+        name=$(cat "$c" 2>/dev/null) || continue
+        case "$name" in
+          "CPU "*/KVM) v=${name#CPU }; v=${v%/KVM}; to=${cpus[$((v % ${#cpus[@]}))]} ;;
+          "IO "*) to=$io ;;
+          vhost-*) to=$net ;;
+          *) to=$others ;;
+        esac
+        taskset -p -c "$to" "$tid" >/dev/null 2>&1 && placed+="$tid "
+      done
+      n=$((n + 1)); sleep "$([ $n -lt 100 ] && echo 0.02 || echo 0.2)"
+    done
+  ) </dev/null >/dev/null 2>&1 &
+fi
 
 shotpid=""
 if [ -n "$shot" ]; then
@@ -236,7 +283,7 @@ while kill -0 "$pid" 2>/dev/null; do
           ch=${text:c:1}
           case "$ch" in
             [a-z0-9]) key=$ch ;; [A-Z]) key=shift-${ch,,} ;; ' ') key=spc ;; '-') key=minus ;; '.') key=dot ;;
-            '/') key=slash ;; ':') key=shift-semicolon ;; '_') key=shift-minus ;; *) continue ;;
+            '/') key=slash ;; ':') key=shift-semicolon ;; '_') key=shift-minus ;; '@') key=shift-2 ;; *) continue ;;
           esac
           printf 'sendkey %s 30\n' "$key" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon" >/dev/null 2>&1; sleep 0.06
         done

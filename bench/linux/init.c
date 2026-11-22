@@ -151,6 +151,54 @@ static void timer_overshoot(void)
 	printf("BENCH timer_overshoot_p99 %lu ns\n", samples[n - n / 100 - 1]);
 }
 
+// Scheduling latency under load (spec/TESTING.md section 4.2): every
+// processor busy with a process that computes and never waits, and on
+// processor 0, beside its load, a process that sleeps 1 ms at a time for
+// SCHED_SECONDS, timing how late it runs again. All at the default
+// priority, as Silica's are (kernel/roottest: bench_sched). Latencies in
+// 100 ns steps up to 2 ms, the maximum kept apart.
+#define SCHED_SECONDS 120
+static unsigned long latency[20001];
+
+static void sched_latency(int ncpu)
+{
+	int hogs[64], n = ncpu < 64 ? ncpu : 64;
+	for (int c = 0; c < n; c++) {
+		hogs[c] = fork();
+		if (hogs[c] == 0) {
+			pin(c);
+			for (;;)
+				__asm__ volatile("pause");
+		}
+	}
+	if (syscall(__NR_prctl, 29 /* PR_SET_TIMERSLACK */, 1UL, 0UL, 0UL, 0UL) != 0)
+		printf("ERROR: bench: prctl(PR_SET_TIMERSLACK) failed\n");
+	unsigned long end = now_ns() + SCHED_SECONDS * 1000000000UL, count = 0, max = 0;
+	while (now_ns() < end) {
+		unsigned long at = now_ns() + 1000000;
+		struct { long sec, nsec; } ts = { at / 1000000000UL, at % 1000000000UL };
+		syscall(__NR_clock_nanosleep, 1, 1 /* TIMER_ABSTIME */, &ts, 0);
+		unsigned long late = now_ns() - at;
+		if (late > max)
+			max = late;
+		latency[late / 100 < 20000 ? late / 100 : 20000]++;
+		count++;
+	}
+	for (int c = 0; c < n; c++) {
+		kill(hogs[c], 9);
+		waitpid(hogs[c], 0, 0);
+	}
+	unsigned long seen = 0, want = count - count / 1000;
+	int b = 0;
+	for (; b < 20000; b++) {
+		seen += latency[b];
+		if (seen >= want)
+			break;
+	}
+	printf("BENCH sched_latency_p999 %lu ns\n", (unsigned long)b * 100 + 100);
+	printf("BENCH sched_latency_max %lu ns\n", max);
+}
+
 // First touch of a fresh anonymous page: the kernel's own pager.
 static void page_fault(void)
 {
@@ -519,8 +567,94 @@ static void net_bench(void)
 	printf("BENCH net_tx %lu frames/s\n", packet > xdp ? packet : xdp);
 }
 
-int main(void)
+// Starting a program: from the parent's fork (or vfork) to the started
+// program's main, which is this one run again as "/init spawned": it
+// writes the timestamp counter as it begins to descriptor 3 and ends. The
+// same as Silica's spawn benchmark (init's checks=spawn: hello asked to
+// answer with the time it started); the faster of fork and vfork is the
+// baseline.
+#define SPAWNS 2000
+#define SPAWN_WARMUP 200
+
+// vfork and exec in one piece of assembly: the child touches no memory
+// (the parent's stack is its own until exec) before it becomes the program.
+static long vfork_exec(const char *path, char *const argv[], char *const envp[])
 {
+	long ret;
+	__asm__ volatile("mov $58, %%eax\n\t"   /* vfork */
+			 "syscall\n\t"
+			 "test %%rax, %%rax\n\t"
+			 "jnz 1f\n\t"
+			 "mov $59, %%eax\n\t"   /* execve(path, argv, envp) */
+			 "syscall\n\t"
+			 "mov $60, %%eax\n\t"   /* exit(127) */
+			 "mov $127, %%edi\n\t"
+			 "syscall\n\t"
+			 "1:\n\t"
+			 : "=a"(ret)
+			 : "D"(path), "S"(argv), "d"(envp)
+			 : "rcx", "r11", "memory");
+	return ret;
+}
+
+static void spawn_one(int use_vfork, unsigned long *took, int fd)
+{
+	static char *argv[] = { "/init", "spawned", 0 };
+	static char *envp[] = { 0 };
+	unsigned long t0 = rdtsc(), t1 = 0;
+	long pid;
+	if (use_vfork) {
+		pid = vfork_exec("/init", argv, envp);
+	} else {
+		pid = fork();
+		if (pid == 0) {
+			execve("/init", argv, envp);
+			_exit(127);
+		}
+	}
+	if (pid < 0 || read(fd, &t1, sizeof(t1)) != sizeof(t1)) {
+		printf("ERROR: bench: a started program did not answer\n");
+		*took = 0;
+		return;
+	}
+	int status;
+	waitpid(pid, &status, 0);
+	*took = t1 - t0;
+}
+
+static void spawn_bench(void)
+{
+	int p[2];
+	if (pipe(p) < 0 || dup2(p[1], 3) < 0) {
+		printf("ERROR: bench: no pipe for the spawn benchmark\n");
+		return;
+	}
+	unsigned long med[2], p99[2];
+	for (int v = 0; v < 2; v++) {
+		for (int i = 0; i < SPAWNS + SPAWN_WARMUP; i++) {
+			unsigned long took;
+			spawn_one(v, &took, p[0]);
+			if (i >= SPAWN_WARMUP)
+				samples[i - SPAWN_WARMUP] = took;
+		}
+		sort(samples, SPAWNS);
+		med[v] = to_ns(samples[SPAWNS / 2]);
+		p99[v] = to_ns(samples[SPAWNS - SPAWNS / 100 - 1]);
+		printf("bench: spawn by %s: median %lu ns, p99 %lu ns\n", v ? "vfork" : "fork", med[v], p99[v]);
+	}
+	int best = med[1] < med[0];
+	printf("BENCH spawn %lu ns\n", med[best]);
+	printf("BENCH spawn_p99 %lu ns\n", p99[best]);
+}
+
+int main(int argc, char **argv)
+{
+	if (argc > 1 && strcmp(argv[1], "spawned") == 0) {
+		// Run again by the spawn benchmark: the time this began, and done.
+		unsigned long t = rdtsc();
+		write(3, &t, sizeof(t));
+		return 0;
+	}
 	// The host stamps this line: the first instruction-level sign of userspace.
 	printf("BENCH MARK userspace\n");
 	// Before pinning, the affinity mask names every processor.
@@ -540,6 +674,7 @@ int main(void)
 	ctx_switch();
 	page_fault();
 	timer_overshoot();
+	spawn_bench();
 	unsigned long one = throughput(1, 0);
 	printf("BENCH ipc_pairs1 %lu ops/s\n", one);
 	if (ncpu >= 8) {
@@ -558,6 +693,7 @@ int main(void)
 	}
 	block_reads();
 	net_bench();
+	sched_latency(ncpu);
 	printf("BENCH DONE\n");
 
 	// Wait until the console has sent everything (TCSBRK with a non-zero

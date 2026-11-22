@@ -487,13 +487,16 @@ run_console() {
   shot=$(cd "$(dirname "$serial")" && pwd)/console.ppm
   rm -f "$shot"
   # The machine: 00:01.0 the disk, 00:02.0 the display, 00:03.0 the keyboard.
+  # (Another program's line may fall between a prompt and what is typed:
+  # the prompt is shown again below it, so the command still reads whole.)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device \
     --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
     --type '^silica> $=services\n' --type '^  shell +running=caps console\n' --type '^  thread .* on processor=log devmgr\n' --type '^  devmgr: 00:01\.0 =trace\n' --type '^           seen by this client +[0-9]+ ns$=devices\n' \
     --type '^  00:03\.0 input +virtio-input$=restart-driver 00:03.0\n' \
     --type "^console: the keyboard's driver ended; reading its successor\$=restart-driver 00:02.0\n" \
     --type "^console: the display's driver ended; showing on its successor\$=echo back\n" \
-    --on "^back\$=screendump $shot" --type '^back$=shutdown\n' >"$serial.qemu" 2>&1
+    --on "^back\$=screendump $shot" --type '^back$=log devmgr/fbdisplay@00:02.0\n' \
+    --type '^  fbdisplay: [0-9]+x[0-9]+, =shutdown\n' >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
   bad=""
@@ -503,15 +506,22 @@ run_console() {
               '^silica> log devmgr$' '^  devmgr: 00:01\.0 1af4:1042 class 01\.00\.00' \
               '^silica> trace$' '^  partition 0x800 \(EFI System\) opened through the block server' '^           taken by the driver +[0-9]+ ns$' \
               '^silica> devices$' '^  00:02\.0 display +fbdisplay$' '^  00:03\.0 input +virtio-input$' \
-              '^restart-driver: 00:03\.0: done$' '^restart-driver: 00:02\.0: done$' '^back$' '^silica> shutdown$' '^init: shutting down'; do
+              '^restart-driver: 00:03\.0: done$' '^restart-driver: 00:02\.0: done$' '^back$' '^silica> log devmgr/fbdisplay@00:02\.0$' \
+              '^silica> shutdown$' '^init: shutting down'; do
     [ -n "$bad" ] || grep -qE "$want" <<<"$text" || bad="the serial log has no line matching: $want"
   done
+  # A driver's log is one source across its restarts: the display's has
+  # what both its drivers said, read in the shell (indented).
+  [ -n "$bad" ] || [ "$(grep -cE '^  fbdisplay: [0-9]+x[0-9]+, ' <<<"$text")" = 2 ] ||
+    bad="the display drivers' log, read in the shell, does not hold both drivers' first line: $(grep -E 'fbdisplay: [0-9]+x' <<<"$text" | tr '\n' '|')"
   [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
   # The picture: rows of 16 pixels; a row holds text if any pixel differs
   # from the top-right corner's (the background). The screen holds the
   # shell's lines from the banner to "back" (the serial line has the other
-  # programs' lines among them), maybe the next prompt.
-  lines=$(sed -n '/^Silica\. Type help/,/^back$/p' <<<"$text" | grep -cvE '^(devmgr|virtio-input|fbdisplay|console|kernel|init): ')
+  # programs' lines among them, and a prompt they cut short shown again
+  # after them, so the line it was cut from is one the screen lacks), maybe
+  # the next prompt.
+  lines=$(sed -n '/^Silica\. Type help/,/^back$/p' <<<"$text" | grep -cvE '^((devmgr|virtio-input|fbdisplay|console|kernel|init|partitions|logd): |silica> $)')
   [ -n "$bad" ] || bad=$(python3 -I - "$shot" "$lines" <<'PY'
 import sys
 try:
@@ -597,13 +607,14 @@ rogue_on() {
     else record fail "$suite" "$name$sfx" "$(grep -m1 -a "^ERROR: virtio-rogue: $name" <<<"$text" | cut -c1-160) (no PASS line; serial: $serial)"; fi
   done
   while IFS='|' read -r name want; do
-    want=${want//@/$at}
+    want=${want//%/$at}
     if grep -qE "$want" <<<"$text"; then record pass "$suite" "$name$sfx"
     else record fail "$suite" "$name$sfx" "the serial log has no line matching: $want (serial: $serial)"; fi
   done <<'CHECKS'
-rogue_write_unmapped|^kernel: device @ was refused a write at 0x100000 
-rogue_read_unmapped|^kernel: device @ was refused a read at 0x200000 
-rogue_config_space|^devmgr: virtio-rogue for @ touched memory it may not \(page fault\)
+rogue_write_unmapped|^kernel: device % was refused a write at 0x100000 
+rogue_read_unmapped|^kernel: device % was refused a read at 0x200000 
+rogue_log_ring|^logd: the log ring of devmgr/virtio-rogue@% made no sense; what it held is skipped$
+rogue_config_space|^devmgr: virtio-rogue for % touched memory it may not \(page fault\)
 CHECKS
   if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" "rogue_system_survives$sfx"; return 0; fi
   record fail "$suite" "rogue_system_survives$sfx" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"

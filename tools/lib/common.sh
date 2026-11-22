@@ -177,6 +177,18 @@ fastest_cpus() {
   done | sort -k1,1nr -k2,2n | head -n "$1" | awk '{ print $2 }' | sort -n | paste -sd, -
 }
 
+# siblings_of <cpu list>: the other hardware threads of those processors'
+# cores, comma-separated (empty where the host has none): where a
+# benchmark's emulator threads go beside its virtual processors.
+siblings_of() {
+  local c s
+  for c in $(echo "$1" | tr , ' '); do
+    for s in $(tr ',-' '  ' <"/sys/devices/system/cpu/cpu$c/topology/thread_siblings_list" 2>/dev/null); do
+      [ "$s" = "$c" ] || echo "$s"
+    done
+  done | sort -nu | paste -sd, -
+}
+
 # host_tune <cpu list> <state file>: hold those processors, and the other
 # hardware threads of their cores, at one fixed policy while a benchmark
 # runs: the "performance" frequency governor and preference (no ramp from a

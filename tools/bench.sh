@@ -11,13 +11,12 @@
 #
 # What is measured, and what is not (spec/TESTING.md 4.1, "Linux is locked"
 # and "Measured once"):
-# - Linux is not measured. It is not what is being built, and its numbers
-#   on this host do not change: they are locked in bench/reference.tsv
-#   (Linux at its best over the clean sessions that were run), and Silica's
-#   target on every metric is MARGIN percent better than that. A run boots
-#   no Linux. --linux boots it beside Silica and prints what it measures
-#   next to the locked numbers, for new hardware or a doubt about them; it
-#   changes neither the file nor any gate.
+# - Silica is compared with Linux's final numbers in bench/reference.tsv
+#   (Linux at its best over the clean sessions that were run), and its
+#   target on every metric is MARGIN percent better than that. Every boot
+#   of a run is Silica's; a metric with no number there is held by its
+#   ratchet. --linux is the owner's instrument for a decision about that
+#   file.
 # - The instruction counts are a function of the kernel's source: counted
 #   when it changed, all eight boots at once.
 # - Silica's timings come in two groups with their own boots: the kernel
@@ -96,6 +95,9 @@ export LC_ALL=C
 #   gate: win  ours/linux strictly below limit     le   ours/linux at most limit
 #         min  ours at least limit (no Linux value needed)
 #         max  ours at most limit                  none ratchet only
+#   A new metric with a number in bench/reference.tsv takes win or le; one
+#   without takes none, min or max, and its ratchet holds it from its first
+#   measurement.
 METRICS='ipc_roundtrip ns lower win 0.5 2
 ctx_switch ns lower le 1 2
 boot_userspace ms lower win 1 2
@@ -126,7 +128,11 @@ net_rtt_p99 ns lower le 1 3
 net_tx frames/s higher le 1 3
 net_rtt_confined ns lower le 1 3
 net_rtt_p99_confined ns lower le 1 3
-net_tx_confined frames/s higher le 1 3'
+net_tx_confined frames/s higher le 1 3
+spawn ns lower win 1 3
+spawn_p99 ns lower le 1 3
+sched_latency_p999 ns lower le 1 3 40
+sched_latency_max ns lower le 1 3 40'
 
 runs=5 out="" update=0 compare="" sweep="" only="" relinux=0 aa=0 steps=0 now=0
 # How much better than Linux's locked number Silica's target is, in percent.
@@ -202,6 +208,30 @@ pin=${SILICA_BENCH_CPUS:-$(fastest_cpus "$SMP")}
 # one more processor of the fastest kind, held like the guests'.
 tap=silica-bench0 netargs=() echo_pid=""
 echo_cpu=$(fastest_cpus "$((SMP + 1))" | tr , '\n' | grep -vxF -f <(echo "$pin" | tr , '\n') | head -n 1)
+# The emulator's own threads (qemu.sh --emulator), each where it neither
+# takes turns with a virtual processor on one host processor nor shares a
+# core with one that works: the disk's I/O thread on the other hardware
+# thread of the last virtual processor's core and the network's (vhost-net)
+# on the one before it, the cores of the processors both systems leave idle
+# longest; the rest (the main loop, its workers) on processors of no
+# virtual processor's core. Left to the host's scheduler, the I/O thread
+# sat beside whichever virtual processor it happened to land by, and a
+# guest spinning there for its next completion slowed the device by a
+# microsecond (host trace of the doorbell and the interrupt,
+# spec/ARCHITECTURE.md section 7); a run's tail depended on where it landed.
+pins=$(echo "$pin" | tr , '\n')
+io_cpu=$(siblings_of "$(tail -n 1 <<<"$pins")")
+net_cpu=$(siblings_of "$(tail -n 2 <<<"$pins" | head -n 1)")
+rest=$(grep -vxF -f <(printf '%s\n' $pins $(siblings_of "$pin" | tr , ' ') "$echo_cpu") \
+  <(ls -d /sys/devices/system/cpu/cpu[0-9]* | sed 's/.*cpu//' | sort -n) | paste -sd, -)
+emu=${SILICA_BENCH_EMULATOR_CPUS:-$(echo "$io_cpu,$net_cpu,${rest:-$(siblings_of "$pin")}" | sed 's/^,*//; s/,,*/,/g; s/,$//')}
+# The boot disk without event indices (VIRTIO_F_RING_EVENT_IDX): QEMU's I/O
+# thread, while it polls the ring, can say "no doorbell needed" only through
+# the ring's flag; with event indices every request rang it, a guest exit
+# each (host trace: 2,940 of 2,940). Off, both systems read at depth 1 in
+# two thirds of the time (Linux 5.4 to 3.4 us), so it is the baseline's
+# tuning as much as ours.
+disk_props=event_idx=off
 # Those processors are held at one policy for both systems while the guests
 # run (host_tune), and put back afterwards, whichever way this script ends.
 # A host left on its power-saving default measures its own frequency ramps
@@ -294,7 +324,7 @@ boot() {
   [ "$machine" = plain ] && margs=(--no-iommu)
   # $SILICA_BENCH_MACHINE: further qemu.sh arguments, the same for every boot.
   "$TOOLS/qemu.sh" --image "$img" --serial "$ser" --stamp "$st" --timeout "${SILICA_BENCH_TIMEOUT:-300}" \
-    --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} "${margs[@]+"${margs[@]}"}" "${netargs[@]+"${netargs[@]}"}" ${SILICA_BENCH_MACHINE:-} >"$qlog" 2>&1
+    --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} ${pin:+${emu:+--emulator "$emu"}} --disk-props "$disk_props" "${margs[@]+"${margs[@]}"}" "${netargs[@]+"${netargs[@]}"}" ${SILICA_BENCH_MACHINE:-} >"$qlog" 2>&1
   rc=$?
   if [ $rc = 2 ]; then err "$sys: qemu.sh setup error: $(head -c 200 "$qlog" | tr '\n' ' ')"; quit 2; fi
   if ! tr -d '\r' <"$ser" 2>/dev/null | grep -qx 'BENCH DONE'; then
@@ -389,7 +419,7 @@ if [ -z "$compare$sweep" ]; then
   IN_KERNEL=(repo+:kernel crate:os:silica-image "${MACHINE[@]}" "runs:$runs" "file:${SILICA_BENCH_IMG:-}")
   IN_IO=(repo+:system repo+:kernel path:os:bench/net crate:os:silica-image "${MACHINE[@]}" "runs:$runs")
   do_linux=0 do_kernel=0 do_io=0 do_counts=0
-  # Linux is booted only when asked for (--linux), and then only to be shown.
+  # The baseline image is built for the owner's --linux alone.
   do_linux=$relinux
   kept bench.kernel "${IN_KERNEL[@]}" || do_kernel=$need_kernel; f_kernel=$EV_FILE k_kernel=$EV_KEY t_kernel=$EV_TEXT
   kept bench.io "${IN_IO[@]}" || do_io=$need_io; f_io=$EV_FILE k_io=$EV_KEY t_io=$EV_TEXT
@@ -405,7 +435,7 @@ if [ -z "$compare$sweep" ]; then
     # The device benchmarks run in the system image: the device manager, the
     # drivers confined by the IOMMU, and blkcheck and netcheck as the clients.
     log=$LOGS/bench/build.silica-system.log
-    silica_sys=$(build_system_image x86_64 "$log" "checks=block,net bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; quit 2; }
+    silica_sys=$(build_system_image x86_64 "$log" "checks=spawn,block,net bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; quit 2; }
   fi
   if [ $do_linux = 1 ]; then
     log=$LOGS/bench/build.linux.log
