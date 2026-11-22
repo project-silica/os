@@ -2,10 +2,9 @@
 # it holds for. Each is Linux at its best (its best session median) over the clean sessions of
 # 2026-11-22 on that host: Linux 7.3.5, the config and benchmark program of bench/linux at that date,
 # 5 boots a session, 8 sessions for the kernel paths and 2 for boot and the devices.
-# bench.sh does not boot Linux: these numbers are the comparison, and Silica's target is 15% better
-# than each (spec/TESTING.md 4.1, "Linux is locked"). They change only by a commit that says why
-# (new hardware, a comparison shown to be unfair to Linux); `bench.sh --linux` measures Linux beside
-# them for that purpose and changes nothing.
+# These numbers are final and are the comparison: Silica's target is 15% better than each
+# (spec/TESTING.md 4.1, "Linux is locked"). Every benchmark boot is spent on Silica, and a metric
+# with no line here is held by its own ratchet.
 ipc_roundtrip	1881	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 ctx_switch	504	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 boot_userspace	356.204	ms	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
