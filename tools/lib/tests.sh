@@ -286,6 +286,23 @@ run_net() {
   else record fail "$suite" net "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_net_recovery <arch> <suite>: the network interface's driver
+# restarted under load (spec/MILESTONES.md M3). netload pings the user-mode
+# gateway with eight requests in flight while the device manager restarts
+# virtio-net every 200 ms for 3 s: no transmit may fail, no recovery may
+# take over 250 ms, and once the restarts stop every ping must be answered.
+run_net_recovery() {
+  local arch=$1 suite=$2 log img serial rc text
+  log=$(logfile "$suite" build.net_recovery)
+  img=$(build_system_image "$arch" "$log" "checks=netload") || { record fail "$suite" net_recovery "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" net_recovery)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if [ $rc = 0 ] && grep -qx 'NETLOAD OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" net_recovery
+  else record fail "$suite" net_recovery "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+}
+
 # run_faults <arch> <suite>: a device that misbehaves (spec/MILESTONES.md
 # M3, fault injection). One boot per fault and block driver, the driver
 # committing the fault at its 50th request (inject=<driver>:<fault>@50,
