@@ -4,7 +4,7 @@
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
-#           [--net user|tap:<interface>]
+#           [--net user|tap:<interface>] [--hotplug <disk image>]
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
@@ -13,6 +13,9 @@
 # snapshot of the given disk image. --net adds a virtio network device on
 # QEMU's user-mode network (the guest is 10.0.2.15, the gateway 10.0.2.2,
 # which answers ARP and ping), or on the host's tap interface (vhost-net).
+# --hotplug gives the machine an empty PCI Express root port with native
+# hot-plug (id hp0; QEMU's ACPI hot-plug off) and a disk image ready to be
+# hot-added there: `--on '<regex>=device_add virtio-blk-pci,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on'`.
 # --disk adds a second virtio disk that
 # is written for real (not a snapshot): the host reads it afterwards.
 # --no-exit-device leaves out the debug-exit device (x86_64): the guest
@@ -37,10 +40,10 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
-net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
+hotplug="" net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--hotplug)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -61,6 +64,7 @@ while [ $# -gt 0 ]; do
     --until) until=$2; shift 2 ;;
     --nvme) nvme=$2; shift 2 ;;
     --net) net=$2; shift 2 ;;
+    --hotplug) hotplug=$2; shift 2 ;;
     --disk) disk2=$2; shift 2 ;;
     --on) on+=("$2"); shift 2 ;;
     --type) typing+=("$2"); shift 2 ;;
@@ -94,7 +98,7 @@ cp "$vars" "$RUN/vars.fd"
 # The monitor socket is addressed relative to $RUN (QEMU and socat run there):
 # a unix socket path is limited to about 100 bytes and deep run directories exceed it.
 mon=monitor.sock
-for v in image serial shot stamp nvme disk2; do # the guest runs in $RUN, so every other path must be absolute
+for v in image serial shot stamp nvme disk2 hotplug; do # the guest runs in $RUN, so every other path must be absolute
   case "${!v}" in ''|/*) ;; *) printf -v "$v" '%s' "$PWD/${!v}" ;; esac
 done
 case "$arch" in
@@ -109,6 +113,8 @@ case "$arch" in
     [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48)
     [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=on" -device nvme,serial=silica-nvme,drive=nvm)
     [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}")
+    [ -z "$hotplug" ] || extra+=(-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off -device pcie-root-port,id=hp0,chassis=1,slot=1
+      -drive "format=raw,file=$hotplug,if=none,id=hot")
     case "$net" in
       "") ;;
       # The network device does its DMA through the platform's translation

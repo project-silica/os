@@ -281,9 +281,38 @@ suite_miri() {
   fi
   log=$(logfile "$s" kernel-core)
   CARGO_ENV=(CARGO_HOME="$c/cargo-home" XDG_CACHE_HOME="$c/xdg" MIRI_SYSROOT="$sys")
-  cargo_run kernel "$log" miri test -p kernel-core --no-fail-fast; rc=$?
+  # Built once; then every test runs in a Miri process of its own, many at
+  # a time (Miri interprets a test binary's tests one after another, and
+  # the slowest few decide the run): the same tests, an hour shorter.
+  cargo_run kernel "$log.build" miri test -p kernel-core --no-run; rc=$?
   CARGO_ENV=()
+  local runner jobs dir=$RUN/miri
+  runner=${SILICA_MIRI_RUNNER:-$(env ${tc:+RUSTUP_TOOLCHAIN="$tc"} rustup which cargo-miri 2>/dev/null)}
+  mkdir -p "$dir"; : >"$log"
+  if [ $rc = 0 ] && [ -x "$runner" ]; then
+    jobs=$(( $(nproc) > 4 ? $(nproc) - 2 : 2 ))
+    sed -n 's/^ *Executable \(.*\) (\(.*\))$/\1\t\2/p' "$log.build" | while IFS=$'\t' read -r kind exe; do
+      env CARGO_HOME="$c/cargo-home" XDG_CACHE_HOME="$c/xdg" MIRI_SYSROOT="$sys" ${tc:+RUSTUP_TOOLCHAIN="$tc"} \
+        "$runner" runner "$exe" --list 2>/dev/null | sed -n 's/: test$//p' | while read -r name; do printf '%s\t%s\t%s\n' "$kind" "$exe" "$name"; done
+    done >"$dir/tests"
+    # One output file per test, in the order listed.
+    awk -F'\t' '{ printf "%s\t%s\t%s\t%d\n", $1, $2, $3, NR }' "$dir/tests" | tr '\n' '\0' |
+      xargs -0 -P "$jobs" -I{} env CARGO_HOME="$c/cargo-home" XDG_CACHE_HOME="$c/xdg" MIRI_SYSROOT="$sys" ${tc:+RUSTUP_TOOLCHAIN="$tc"} \
+        bash -c 'IFS=$(printf "\t") read -r kind exe name n <<<"$1"; "$2" runner "$exe" --exact "$name" >"$3/$n.out" 2>&1' _ {} "$runner" "$dir"
+    # As cargo would have printed it, binary by binary.
+    awk -F'\t' -v d="$dir" '{ if ($1 != last) { printf "     Running %s (%s)\n", $1, $2; last = $1 }
+        f = d "/" NR ".out"; seen = 0
+        while ((getline l < f) > 0) { print l; if (index(l, "test " $3 " ... ") == 1 || index(l, "test " $3 " - should panic ... ") == 1) seen = 1 }
+        close(f)
+        # A test Miri stopped (undefined behaviour) prints no result: a failure.
+        if (!seen) printf "test %s ... FAILED\n", $3 }' "$dir/tests" >"$log"
+    grep -q '^test .* \.\.\. FAILED' "$log" && rc=1
+  fi
   got=$(parse_cargo_tests kernel-core "$log")
+  # No tests at all is a failure, never a quiet pass.
+  if [ -z "$got" ]; then
+    record fail "$s" kernel-core "no Miri test ran: $(first_error "$log.build") (runner: ${runner:-none})"; return
+  fi
   if [ -n "$got" ]; then
     while IFS=$'\t' read -r st id why; do
       case "$st" in ignored) st=skip ;; fail) why=$(miri_error "$log") ;; esac

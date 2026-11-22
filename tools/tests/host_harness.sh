@@ -29,8 +29,8 @@ echo x >"$WS/bootstrap.pins"; echo 0 >"$WS/MILESTONE"
 cp -r "$SRC/lib" "$SRC/test.sh" "$SRC/size.sh" "$SRC/qemu.sh" "$OS/tools/"
 printf '[repos.kernel]\nurl = "https://example.invalid/kernel"\nmilestone = 0\ncommit = "x"\n' >"$OS/manifest.toml"
 # A cargo shim: fmt and clippy succeed, `miri setup`
-# prints a fake sysroot, `miri test` is an ordinary `cargo test` that fails when
-# $FX/miri_fail exists; everything else is the real cargo. Every call is logged
+# prints a fake sysroot, `miri test` is an ordinary `cargo test` (the runner
+# below fails when $FX/miri_fail exists); everything else is the real cargo. Every call is logged
 # with the variables the harness must set.
 cat >"$FX/bin/cargo" <<'EOF'
 #!/bin/bash
@@ -42,14 +42,23 @@ case "${a[0]}" in
   miri)
     case "${a[1]:-}" in
       setup) echo "Preparing a sysroot" >&2; echo "$FAKE_FX/fake-sysroot"; exit 0 ;;
-      test)
-        if [ -e "$FAKE_FX/miri_fail" ]; then echo "error: Undefined Behavior: fake"; exit 1; fi
-        exec "$REAL_CARGO" test "${a[@]:2}" ;;
+      test) exec "$REAL_CARGO" test "${a[@]:2}" ;;
     esac ;;
 esac
 exec "$REAL_CARGO" "$@"
 EOF
 chmod +x "$FX/bin/cargo"
+# Miri's runner, as the harness calls it for each test (`cargo-miri runner
+# <test binary> <arguments>`): the test binary itself, natively, or the
+# undefined behaviour Miri reports when $FX/miri_fail exists.
+cat >"$FX/bin/fake-cargo-miri" <<'EOF'
+#!/bin/bash
+[ "$1" = runner ] || exit 2
+if [ -e "$FAKE_FX/miri_fail" ] && [ "${3:-}" != --list ]; then echo "error: Undefined Behavior: fake"; exit 1; fi
+exec "$2" "${@:3}"
+EOF
+chmod +x "$FX/bin/fake-cargo-miri"
+export SILICA_MIRI_RUNNER=$FX/bin/fake-cargo-miri
 
 # ---- the fake kernel repository: a real std-for-tests no_std crate -----------
 cat >"$K/Cargo.toml" <<'EOF'
@@ -96,7 +105,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.invalid GIT_COMMITTER_NAME=t GIT_C
 run() {
   : >"$CALLS"
   OUT=$(cd "$FX" && env -i PATH="$FX/bin:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" RUSTUP_HOME="$RUSTUP_HOME" \
-    SILICA_WS="$WS" FAKE_CALLS="$CALLS" FAKE_FX="$FX" REAL_CARGO="$REAL_CARGO" \
+    SILICA_WS="$WS" FAKE_CALLS="$CALLS" FAKE_FX="$FX" REAL_CARGO="$REAL_CARGO" SILICA_MIRI_RUNNER="$SILICA_MIRI_RUNNER" \
     bash "$OS/tools/test.sh" "$@" 2>&1)
   RC=$?
 }
@@ -141,7 +150,7 @@ has '^kernel\.miri: pass=1 fail=0 skipped=0$' || bad "green: Miri must be its ow
 has '^kernel\.loom\.queue_model: pass=1 fail=0 skipped=0$' || bad "green: model queue_model must be its own suite: $OUT"
 has '^kernel\.loom\.models\.lib_model: pass=1 fail=0 skipped=0$' || bad "green: model models::lib_model must be its own suite: $OUT"
 has '^kernel\.loom: ' && bad "green: with models present there must be no aggregate kernel.loom line: $OUT"
-has '^RESULT: pass=7 fail=0 skipped=0 time=[0-9]+$' || bad "green: RESULT wrong (fmt, clippy, host, miri, 2 models, size): $(last)"
+has '^RESULT: pass=8 fail=0 skipped=0 time=[0-9]+$' || bad "green: RESULT wrong (fmt, clippy, docs, host, miri, 2 models, size): $(last)"
 called 'RUSTFLAGS=[^ ]*--cfg loom.* :: test .*-p kernel-core.* --list' || bad "green: models are not found with --cfg loom: $(cat "$CALLS")"
 called ':: miri test .*-p kernel-core' || bad "green: Miri was not run on kernel-core: $(cat "$CALLS")"
 called 'MIRI_SYSROOT=[^ ]*fake-sysroot .*:: miri test' || bad "green: the Miri sysroot prepared by 'miri setup' is not used: $(cat "$CALLS")"
@@ -164,7 +173,7 @@ has '^kernel\.loom\.lost_wakeup_model: pass=0 fail=1 skipped=0$' || bad "failing
 has '^kernel\.loom\.queue_model: pass=1 fail=0 skipped=0$' || bad "failing model: the other models still run and pass: $OUT"
 has '^kernel\.host: pass=1 fail=0 skipped=0$' || bad "failing model: the host suite must stay green: $OUT"
 has '^kernel\.miri: pass=1 fail=0 skipped=0$' || bad "failing model: Miri suite unaffected: $OUT"
-has '^RESULT: pass=7 fail=1 skipped=0 time=[0-9]+$' || bad "failing model: RESULT wrong: $(last)"
+has '^RESULT: pass=8 fail=1 skipped=0 time=[0-9]+$' || bad "failing model: RESULT wrong: $(last)"
 shape failing-model
 grep -Rq 'lost wakeup' "$WS/target/logs/kernel.loom.lost_wakeup_model" 2>/dev/null || bad "failing model: the panic message is not kept under target/logs/kernel.loom.lost_wakeup_model/"
 
