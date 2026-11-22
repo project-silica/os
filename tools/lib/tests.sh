@@ -443,7 +443,8 @@ run_console() {
   # The machine: 00:01.0 the disk, 00:02.0 the display, 00:03.0 the keyboard.
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device \
     --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
-    --type '^silica> $=services\n' --type '^  shell +running=caps console\n' --type '^  thread .* on processor=log devmgr\n' --type '^  devmgr: 00:01\.0 =devices\n' \
+    --type '^silica> $=log console\n' --type '^  silica> log console$=services\n' \
+    --type '^  shell +running=caps console\n' --type '^  thread .* on processor=log devmgr\n' --type '^  devmgr: 00:01\.0 =devices\n' \
     --type '^  00:03\.0 input +virtio-input$=restart-driver 00:03.0\n' \
     --type "^console: the keyboard's driver ended; reading its successor\$=restart-driver 00:02.0\n" \
     --type "^console: the display's driver ended; showing on its successor\$=echo back\n" \
@@ -453,7 +454,7 @@ run_console() {
   bad=""
   [ $rc = 0 ] || bad="the machine was not turned off (exit status $rc)"
   for want in '^console: on the display and the serial line, reading the keyboard$' '^silica> services$' '^  console +running +failures 0  silica\.console\.Terminal$' \
-              '^silica> caps console$' '^process console: [0-9]+ capabilities, 1 threads$' '^  slot [0-9]+: Endpoint rights ' \
+              '^silica> log console$' '^  silica> log console$' '^silica> caps console$' '^process console: [0-9]+ capabilities, 1 threads$' '^  slot [0-9]+: Endpoint rights ' \
               '^silica> log devmgr$' '^  devmgr: 00:01\.0 1af4:1042 class 01\.00\.00' \
               '^silica> devices$' '^  00:02\.0 display +fbdisplay$' '^  00:03\.0 input +virtio-input$' \
               '^restart-driver: 00:03\.0: done$' '^restart-driver: 00:02\.0: done$' '^back$' '^silica> shutdown$' '^init: shutting down'; do
