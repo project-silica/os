@@ -5,13 +5,14 @@
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
 #           [--net user|tap:<interface>] [--hotplug <disk image>]
-#           [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
+#           [--nvme-disk <disk image>] [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
 # --nvme adds an NVMe controller (QEMU's model, id nvme0) whose namespace 1
-# is a snapshot of the given disk image; --nvme-props gives it properties
+# is a snapshot of the given disk image (--nvme-disk: the image itself,
+# written for real, for the host to read afterwards); --nvme-props gives it properties
 # (msix_qsize=1: one interrupt vector; logical_block_size=4096,
 # physical_block_size=4096: 4 KiB blocks); --nvme-ns gives it another
 # namespace (`nvme-ns` properties: drive=, nsid=, ms= ...), and with no
@@ -46,7 +47,7 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
-nvme_props="" nvme_ns=() drives=()
+nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
 hotplug="" net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -73,6 +74,7 @@ while [ $# -gt 0 ]; do
     --net) net=$2; shift 2 ;;
     --hotplug) hotplug=$2; shift 2 ;;
     --disk) disk2=$2; shift 2 ;;
+    --nvme-disk) [ $# -ge 2 ] || die "$1 needs a value"; nvme=$2 nvme_snapshot=off; shift 2 ;;
     --nvme-props) [ $# -ge 2 ] || die "$1 needs a value"; nvme_props=$2; shift 2 ;;
     --nvme-ns) [ $# -ge 2 ] || die "$1 needs a value"; nvme_ns+=("$2"); shift 2 ;;
     --drive) [ $# -ge 2 ] && [[ $2 == ?*=?* ]] || die "--drive needs <id>=<disk image>"; drives+=("$2"); shift 2 ;;
@@ -113,7 +115,7 @@ case "$arch" in
     # its DMA through it (without that, QEMU's virtio devices bypass it).
     disk=(-device "virtio-blk-pci,drive=boot,disable-legacy=on${iommu:+,iommu_platform=on}")
     [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48)
-    [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=on")
+    [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=$nvme_snapshot")
     [ -z "$nvme" ] && [ ${#nvme_ns[@]} = 0 ] || extra+=(-device "nvme,id=nvme0,serial=silica-nvme${nvme:+,drive=nvm}${nvme_props:+,$nvme_props}")
     for ns in "${nvme_ns[@]+"${nvme_ns[@]}"}"; do extra+=(-device "nvme-ns,bus=nvme0,$ns"); done
     [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}")

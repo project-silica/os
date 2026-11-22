@@ -476,31 +476,40 @@ run_faults() {
   done
 }
 
-# run_recovery <arch> <suite>: a driver killed under load (spec/MILESTONES.md
-# M3). blkload writes every block of a scratch disk while the device manager
+# run_recovery <arch> <suite> [nvme]: a driver killed under load
+# (spec/MILESTONES.md M3). blkload writes every block of a scratch disk (a
+# virtio disk, or with nvme namespace 1 of an NVMe controller) while the device manager
 # restarts the disk's driver every 200 ms; it fails if a recovery took over
 # 250 ms or a request was lost or failed. Then the host reads the scratch
 # image: every block b must hold the words 4 << 40 | b << 16 | i (its last
 # round's), so a write the guest was told had completed and was flushed,
 # and was then lost or overtaken by an older one, fails it.
 run_recovery() {
-  local arch=$1 suite=$2 log img serial rc scratch bad
-  log=$(logfile "$suite" build.recovery)
-  img=$(build_system_image "$arch" "$log" "checks=load") || { record fail "$suite" recovery "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" recovery)
-  scratch=$(dirname "$serial")/scratch.img
-  rm -f "$scratch"; truncate -s 16M "$scratch" || { record fail "$suite" recovery "cannot create $scratch"; return 1; }
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-120}" --disk "$scratch" >"$serial.qemu" 2>&1
+  local arch=$1 suite=$2 test=recovery${3:+_$3} log img serial rc scratch bad driver
+  local -a disk
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=load") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  scratch=$(dirname "$serial")/$test.scratch.img
+  rm -f "$scratch"; truncate -s 16M "$scratch" || { record fail "$suite" "$test" "cannot create $scratch"; return 1; }
+  disk=(--disk "$scratch"); [ "${3:-}" != nvme ] || disk=(--nvme-disk "$scratch")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-120}" "${disk[@]}" >"$serial.qemu" 2>&1
   rc=$?
   if [ $rc != 0 ] || ! tr -d '\r' <"$serial" | grep -qx 'BLKLOAD OK'; then
-    record fail "$suite" recovery "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; return 1
+    record fail "$suite" "$test" "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; return 1
   fi
-  record pass "$suite" recovery
+  # The driver killed is the scratch disk's.
+  driver=virtio-blk; [ "${3:-}" != nvme ] || driver=nvme
+  if ! tr -d '\r' <"$serial" | grep -q "^devmgr: restarting $driver for "; then
+    record fail "$suite" "$test" "blkload did not restart $driver (serial: $serial)"; return 1
+  fi
+  record pass "$suite" "$test"
   # Every block on the host's disk image, as written.
   bad=$(od -An -v -tx8 -w8 -N $((16384 * 512)) "$scratch" | awk '{ w = strtonum("0x" $1); b = int((NR - 1) / 64); i = (NR - 1) % 64; if (w != 4 * 2^40 + b * 65536 + i) { n++; if (n == 1) first = b } } END { if (n) printf "%d words wrong, the first in block %d", n, first }')
-  if [ -z "$bad" ]; then record pass "$suite" recovery_no_write_lost
-  else record fail "$suite" recovery_no_write_lost "the scratch disk read by the host: $bad ($scratch)"; fi
+  if [ -z "$bad" ]; then record pass "$suite" "${test}_no_write_lost"
+  else record fail "$suite" "${test}_no_write_lost" "the scratch disk read by the host: $bad ($scratch)"; fi
 }
+run_recovery_nvme() { run_recovery "$1" "$2" nvme; }
 
 # run_shutdown <arch> <suite>: the power button shuts the system down in
 # order. The system stays up (no checks); once it says BOOT OK the host
