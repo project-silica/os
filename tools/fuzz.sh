@@ -113,10 +113,12 @@ first_err() { grep -m1 -E '^(error|ERROR|Error)|panicked|assertion' "$1" | cut -
 
 # coverage_row <id> <edges> <features> <corpus> <execs> <status>
 coverage_row() {
-  local tmp="$COV.$$"
+  local lock; exec {lock}>>"$FUZZ_OUT/.lock"; flock "$lock"
+  local tmp="$COV.$BASHPID"
   { [ -f "$COV" ] && awk -F'\t' -v id="$1" '$1 != id && $1 != "id"' "$COV"; } >"$tmp" 2>/dev/null
   { printf 'id\tedges\tfeatures\tcorpus\texecs\tstatus\n'; cat "$tmp"; printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6"; } >"$tmp.2"
   mv "$tmp.2" "$COV"; rm -f "$tmp"
+  exec {lock}>&-
 }
 
 # The cargo that cargo-fuzz invokes: the checkout's patch config and a merged
@@ -154,8 +156,10 @@ floor_of() { [ -f "$1/coverage-floor.tsv" ] && awk -F'\t' -v n="$2" '$1 == n { p
 # seed_cov <out> <fuzz dir> <name>: edges the committed seeds reach (0 without seeds).
 seed_cov() {
   local d=$2/corpus/$3 c
+  rm -f "$1/seed.log"
   [ -d "$d" ] && [ -n "$(ls -A "$d")" ] || { echo 0; return; }
-  fz_run "$((unit * 4 + 300))" "$1/seed.log" -runs=0 -timeout="$unit" "$d"
+  # A seed that fails leaves its reproducer with the others, not in the checkout.
+  fz_run "$((unit * 4 + 300))" "$1/seed.log" -runs=0 -timeout="$unit" -artifact_prefix="$1/crashes/" "$d"
   c=$(inited_cov "$1/seed.log"); echo "${c:-0}"
 }
 
@@ -211,6 +215,11 @@ run_target() { # run_target <id> <repo> <fuzz dir> <name>
     fail_line "$id" "no coverage floor: $fd/coverage-floor.tsv has no non-zero row for $name (run fuzz.sh --target $id --save and commit the corpus and floor)"
     coverage_row "$id" "$seeded" 0 0 0 no-floor; return
   fi
+  if grep -q -E '^SUMMARY: libFuzzer: |^==[0-9]+==ERROR' "$out/seed.log" 2>/dev/null; then
+    why=$(grep -m1 -A1 -E 'panicked at|^==[0-9]+==ERROR|^SUMMARY' "$out/seed.log" | tr '\n' ' ' | cut -c1-160)
+    fail_line "$id" "a committed seed fails: $why (log: $out/seed.log)"
+    coverage_row "$id" "$seeded" 0 0 0 seed-crash; return
+  fi
   if [ -n "$floor" ] && [ "$seeded" -lt "$floor" ]; then
     fail_line "$id" "coverage dropped: the committed seeds reach $seeded edges, the floor is $floor (log: $out/seed.log)"
     coverage_row "$id" "$seeded" 0 0 0 coverage-drop; return
@@ -248,9 +257,12 @@ run_target() { # run_target <id> <repo> <fuzz dir> <name>
       fail_line "$id" "merge into $seeds failed (log: $out/merge.log)"; coverage_row "$id" "$cov" "$ft" "$corp" "$execs" failed; return
     fi
     seeded=$(seed_cov "$out" "$fd" "$name")
+    # Targets of one crate share its floor file: one writer at a time.
+    local lock; exec {lock}>>"$FUZZ_OUT/.lock"; flock "$lock"
     { [ -f "$fd/coverage-floor.tsv" ] && awk -F'\t' -v n="$name" '$1 != n && $1 != "target"' "$fd/coverage-floor.tsv"
       printf '%s\t%s\n' "$name" "$seeded"; } | sort >"$out/floor.tsv"
     { printf 'target\tedges\n'; cat "$out/floor.tsv"; } >"$fd/coverage-floor.tsv"
+    exec {lock}>&-
     floor=$seeded
   fi
   echo "fuzz: $id: ok execs=$execs cov=$cov ft=$ft corpus=$corp floor=$floor seeds=$seeded time=$(($(date +%s) - t0))s"
@@ -258,8 +270,24 @@ run_target() { # run_target <id> <repo> <fuzz dir> <name>
   coverage_row "$id" "$cov" "$ft" "$corp" "$execs" ok
 }
 
+# Targets run side by side (each libFuzzer process uses one processor), at
+# most $SILICA_FUZZ_JOBS at once (default half the processors); each one's
+# lines are printed together, in the order the targets were listed.
+jobs_max=${SILICA_FUZZ_JOBS:-$(($(nproc) / 2))}
+num "$jobs_max" || jobs_max=1
+# Each repository's cargo wrapper is written once, before any target runs.
+for r in $(cut -f2 <<<"$ALL" | sort -u); do make_wrapper "$r"; done
+lines=$(mktemp -d "$FUZZ_OUT/.lines.XXXXXX")
+n=0
 while IFS=$'\t' read -r id repo fd name; do
-  run_target "$id" "$repo" "$fd" "$name"
+  while [ "$(jobs -rp | wc -l)" -ge "$jobs_max" ]; do wait -n; done
+  run_target "$id" "$repo" "$fd" "$name" >"$lines/$n" 2>&1 &
+  n=$((n + 1))
 done <<<"$ALL"
+wait
+for ((i = 0; i < n; i++)); do cat "$lines/$i"; done
+pass=$(cat "$lines"/* | grep -c '^fuzz: .*: ok ')
+fail=$(cat "$lines"/* | grep -c '^ERROR: fuzz: ')
+rm -rf -- "$lines"
 echo "RESULT: pass=$pass fail=$fail skipped=0 time=$(($(date +%s) - start))"
 [ "$fail" = 0 ]

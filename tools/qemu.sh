@@ -259,6 +259,16 @@ while kill -0 "$pid" 2>/dev/null; do
     # PCs, a stop one), then with the VM stopped every processor's registers,
     # the code around the PC and around its caller, and the interrupt
     # controller's state where QEMU can show it (x86_64).
+    # First the emulator's own threads, before the monitor disturbs them:
+    # a monitor that does not answer means QEMU itself is stuck (its main
+    # loop, or a processor's thread outside the guest), and this says where.
+    # Each thread's name, state and kernel wait channel need no ptrace (a
+    # host with Yama's ptrace scope above 0 refuses the stacks).
+    { for t in /proc/$pid/task/*; do
+        printf '%s %s %s %s\n' "${t##*/}" "$(tr ' ' _ <"$t/comm" 2>/dev/null)" \
+          "$(awk '{print $3}' "$t/stat" 2>/dev/null)" "$(cat "$t/wchan" 2>/dev/null)"
+      done
+      command -v eu-stack >/dev/null && timeout 20 eu-stack -p "$pid" 2>&1; } >"$serial.stacks"
     if [ -S "$RUN/$mon" ] && command -v socat >/dev/null; then
       (cd "$RUN" && {
         for _ in 1 2 3 4 5 6 7 8; do printf '%s\n' 'p/x $pc'; sleep 0.125; done

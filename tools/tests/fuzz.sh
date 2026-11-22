@@ -79,6 +79,10 @@ done
 for a in "$@"; do
   case "$a" in
     -runs=0) # load the corpus only: 4 edges plus one per input
+      if grep -rqs SEEDCRASH "${pos[@]}"; then
+        echo "thread '<unnamed>' panicked at fuzz_targets/x.rs:1:1:"; echo "a seed broke it"
+        printf SEEDCRASH >"${prefix}crash-5eed"; echo "SUMMARY: libFuzzer: deadly signal"; exit 77
+      fi
       n=0; for d in "${pos[@]}"; do n=$((n + $(ls "$d" 2>/dev/null | wc -l))); done
       echo "#$n	INITED cov: $((4 + n)) ft: $((4 + n)) corp: $n/${n}b exec/s: 0 rss: 30Mb"; exit 0 ;;
     -merge=1) # the first directory receives every input of the others it lacks
@@ -299,5 +303,23 @@ has '^ERROR: fuzz::os::crash_root: crash: ' || bad "deep with a crash: wrong ERR
 has '^fuzz: pass=1 fail=1 skipped=0$' || bad "deep with a crash: wrong suite line: $OUT"
 has '^RESULT: .* fail=1 ' || bad "deep with a crash: RESULT: $OUT"
 rm -rf "$OS/fuzz/fuzz_targets/crash_root.rs" "$OS/fuzz/corpus/crash_root"; sed -i '/^crash_root\t/d' "$OS/fuzz/coverage-floor.tsv"
+
+# A committed seed that fails is said to be one, and its reproducer is kept
+# with the others under target/fuzz/, never in the checkout.
+SD=$K/kernel-core/fuzz
+echo SEEDCRASH >"$SD/corpus/ok_parse/seed-bad"
+run --target ok_parse --time 1
+[ "$RC" != 0 ] && printf '%s\n' "$OUT" | grep -q '^ERROR: fuzz: kernel/kernel-core::ok_parse: a committed seed fails: .*a seed broke it' ||
+  bad "a failing seed: not said as one: $OUT"
+ls "$SD" | grep -q '^crash-' && bad "a failing seed left a reproducer in the checkout: $(ls "$SD")"
+find "$WS/target/fuzz" -name crash-5eed | grep -q . || bad "a failing seed's reproducer was not kept under target/fuzz"
+rm -f "$SD/corpus/ok_parse/seed-bad"; find "$WS/target/fuzz" -name crash-5eed -delete
+
+# Several targets run side by side, their lines in the order the targets were listed.
+ENVX=(SILICA_FUZZ_JOBS=4)
+run --target ok_parse --target ok_root --time 1
+ENVX=()
+[ "$(printf '%s\n' "$OUT" | grep -o '^fuzz: [^:]*::[a-z_]*' | tr '\n' ' ')" = "fuzz: kernel/kernel-core::ok_parse fuzz: os::ok_root " ] ||
+  bad "side by side: lines out of order or missing: $OUT"
 
 [ "$fails" = 0 ]
