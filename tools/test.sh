@@ -187,6 +187,21 @@ suite_kani() {
   return 0
 }
 
+# The proofs are compiled only by Kani (cfg(kani)), so nothing else notices
+# when a kernel change stops them building: every tier builds them (about a
+# second), and --deep runs them.
+suite_kani_build() {
+  local s=kernel.kani log dir; dir=$(checkout_of kernel); log=$(logfile "$s" build)
+  if ! command -v cargo-kani >/dev/null 2>&1; then
+    if [ "$ms" -ge 2 ]; then record fail "$s" build "Kani is not installed (cargo install --locked kani-verifier && cargo kani setup)"
+    else record skip "$s" build "Kani is not installed"; fi
+    return 0
+  fi
+  if (cd "$dir" && timeout 600 cargo kani -p kernel-core --only-codegen) >"$log" 2>&1; then record pass "$s" build
+  else record fail "$s" build "the proofs do not build: $(first_error "$log")"; fi
+  return 0
+}
+
 suite_size() {
   local s=size log; log=$(logfile "$s" size)
   "$TOOLS/size.sh" >"$log" 2>&1
@@ -339,6 +354,7 @@ else
   done
   if { in_scope kernel || in_scope os; } && [ -f "$(checkout_of kernel)/targets/x86_64-silica.json" ]; then
     suite_builds
+    in_scope kernel && suite_kani_build
     suite_inos x86_64
     [ "$tier" != fast ] && suite_matrix
   fi

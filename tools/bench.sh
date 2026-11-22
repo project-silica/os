@@ -177,9 +177,11 @@ boot() {
 # 4.1), counted under TCG with icount by tools/profile.sh: a boot running
 # the benchmark twice minus one running it once is exactly one benchmark.
 # Each value is recorded <runs> times so it carries the noise of a
-# deterministic count: a boot's count moves by a few hundred instructions
-# with the other processor's timing, under 0.05 per operation, so a
-# tolerance of one instruction per operation is added in the ratchet check.
+# deterministic count: a boot's count moves by up to 4,000 instructions
+# with the other processor's timing (measured over repeated boots), under
+# 0.5 per operation over the 8,192 or more operations of the difference,
+# so a tolerance of one instruction per operation is added in the ratchet
+# check.
 # $SILICA_BENCH_COUNTS names a file of ready "insns_<metric> <n> insns"
 # lines instead (the tool's own test).
 counts() {
@@ -187,14 +189,18 @@ counts() {
   if [ -n "${SILICA_BENCH_COUNTS:-}" ]; then
     for ((i = 1; i <= runs; i++)); do cat "$SILICA_BENCH_COUNTS" >>"$RUN/silica.values"; done; return
   fi
-  for spec in "null null_syscall 22000" "ipc ipc_roundtrip 22000" "ctx ctx_switch 44000" "fault page_fault 2048"; do
-    read -r b name per <<<"$spec"
+  # The second boot runs the benchmark `more` times more than the first: a
+  # benchmark of few operations (2048 page faults) takes four more, so that
+  # what the boot itself varies by is spread over as many operations as
+  # the others have.
+  for spec in "null null_syscall 22000 1" "ipc ipc_roundtrip 22000 1" "ctx ctx_switch 44000 1" "fault page_fault 2048 4"; do
+    read -r b name per more <<<"$spec"
     one=$("$TOOLS/profile.sh" --count --bench "$b" --times 1 --out "$RUN/count.$b.1" 2>"$LOGS/bench/count.$b.log" | awk '$1 == "COUNT" { print $2 }')
-    two=$("$TOOLS/profile.sh" --count --bench "$b" --times 2 --out "$RUN/count.$b.2" 2>>"$LOGS/bench/count.$b.log" | awk '$1 == "COUNT" { print $2 }')
+    two=$("$TOOLS/profile.sh" --count --bench "$b" --times $((1 + more)) --out "$RUN/count.$b.2" 2>>"$LOGS/bench/count.$b.log" | awk '$1 == "COUNT" { print $2 }')
     if [ -z "$one" ] || [ -z "$two" ]; then
       echo "bench: no instruction count for $name (log: $LOGS/bench/count.$b.log)"; continue
     fi
-    v=$(awk -v a="$one" -v b="$two" -v p="$per" 'BEGIN { printf "%.1f", (b - a) / p }')
+    v=$(awk -v a="$one" -v b="$two" -v p="$((per * more))" 'BEGIN { printf "%.1f", (b - a) / p }')
     for ((i = 1; i <= runs; i++)); do echo "insns_$name $v insns" >>"$RUN/silica.values"; done
   done
 }
@@ -322,7 +328,7 @@ while read -r name unit better gate limit from repeat; do
   # instructions of interrupt timing, which is under 0.1 per operation over
   # 22,000 operations and about 1 over the page fault's 2,048: one kernel
   # read 2764, 2765 and 2766 there. So that count allows 2.)
-  vnoise=$(awk -v m="$omad" -v u="$unit" -v n="$name" 'BEGIN { print 3 * m + (u == "insns" ? (n == "insns_page_fault" ? 2 : 1) : 0) }')
+  vnoise=$(awk -v m="$omad" -v u="$unit" -v n="$name" 'BEGIN { print 3 * m + (u == "insns" ? 1 : 0) }')
   vworse=$([ "$better" = lower ] && echo higher || echo lower)
   worse_than() { awk -v n="$1" -v b="$2" -v e="$3" -v w="$4" 'BEGIN { exit !((w == "higher") ? (n > b + e) : (n < b - e)) }'; }
   better_than() { awk -v n="$1" -v b="$2" -v w="$3" 'BEGIN { exit !((w == "higher") ? (n < b) : (n > b)) }'; }
