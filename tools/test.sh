@@ -38,6 +38,14 @@ suite_clippy() {
   local r=$1 s="$1.clippy" log; log=$(logfile "$s" clippy)
   if cargo_run "$r" "$log" clippy --all-targets -- -D warnings; then record pass "$s" clippy
   else record fail "$s" clippy "$(grep -m1 -E '^(error|warning)' "$log" | cut -c1-140)"; fi
+  # The system repository's programs only build for Silica: lint them there.
+  if [ "$r" = system ] && [ -f "$(checkout_of kernel)/targets/x86_64-silica-user.json" ]; then
+    local vend; log=$(logfile "$s" programs)
+    if vend=$(merged_vendor system) && cargo_run system "$log" clippy --workspace --bins \
+        --target "$(checkout_of kernel)/targets/x86_64-silica-user.json" -Zjson-target-spec "${BUILD_STD_USER[@]}" \
+        --config "source.vendored-sources.directory=\"$vend\"" -- -D warnings; then record pass "$s" programs
+    else record fail "$s" programs "$(grep -m1 -E '^(error|warning)' "$log" | cut -c1-140)"; fi
+  fi
 }
 
 suite_host() { # every host test of the repo's default members
@@ -361,6 +369,7 @@ else
   # The system image: the kernel with the system repository's init as root task.
   if { in_scope kernel || in_scope os || in_scope system; } && [ -f "$(checkout_of system)/Cargo.toml" ]; then
     run_system x86_64 system.x86_64
+    run_rogue x86_64 system.x86_64
     [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
     # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
     # "aarch64 boots to the same test"), emulated, so not in the fast tier.

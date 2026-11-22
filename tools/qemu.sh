@@ -2,7 +2,10 @@
 # Headless QEMU boot (component A04).
 #   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--serial <file>] [--timeout <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
-#           [--pin <host cpu list>] [--stamp <file>]
+#           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
+# The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
+# DMA through it, which is the machine Silica confines drivers on;
+# --no-iommu boots the machine without one. --device adds a device.
 # --pin runs the emulator on the given host processors (taskset), for
 # benchmarks. --stamp writes one line per serial line, "<host time in seconds
 # with microseconds> <text>", after a first line "<time> QEMU START", so boot
@@ -16,10 +19,10 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
-arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp=""
+arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -34,6 +37,8 @@ while [ $# -gt 0 ]; do
     --mem) mem=$2; shift 2 ;;
     --pin) pin=$2; shift 2 ;;
     --stamp) stamp=$2; shift 2 ;;
+    --no-iommu) iommu=""; shift ;;
+    --device) devices+=(-device "$2"); shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
 done
@@ -72,14 +77,19 @@ case "$arch" in
     bin=qemu-system-x86_64
     # TCG needs -cpu max: the kernel requires x2APIC, the TSC-deadline timer and XSAVE.
     accel=(-machine q35 -cpu max); [ -w /dev/kvm ] && [ -z "${SILICA_NO_KVM:-}" ] && accel=(-machine q35,accel=kvm -cpu host)
-    extra=(-device isa-debug-exit,iobase=0xf4,iosize=0x04) ;;
+    extra=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
+    # The boot disk is a virtio 1.0 device; with the IOMMU it is told to do
+    # its DMA through it (without that, QEMU's virtio devices bypass it).
+    disk=(-device "virtio-blk-pci,drive=boot,disable-legacy=on${iommu:+,iommu_platform=on}")
+    [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48) ;;
   aarch64)
     bin=qemu-system-aarch64
     # --el2: the firmware runs at EL2, as on most servers; the loader drops to EL1.
     accel=(-machine "virt,gic-version=3${el2:+,virtualization=on}" -cpu max)
     # Test images report their status through semihosting, from the kernel
     # (EL1) or the root task (EL0).
-    extra=(-semihosting-config enable=on,target=native,userspace=on,chardev=con) ;;
+    extra=(-semihosting-config enable=on,target=native,userspace=on,chardev=con)
+    disk=(-device virtio-blk-pci,drive=boot) ;;
   *) die "unsupported architecture $arch" ;;
 esac
 command -v "$bin" >/dev/null || die "$bin is not installed (run tools/init.sh)"
@@ -116,7 +126,7 @@ fi
   cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${accel[@]}" -smp "$smp" -m "$mem" \
   "${serial_dev[@]}" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
-  -drive "format=raw,file=$image,if=virtio,snapshot=on" "${vga[@]}" "${extra[@]}" ) 2>"$RUN/qemu.out" &
+  -drive "format=raw,file=$image,if=none,id=boot,snapshot=on" "${disk[@]}" "${vga[@]}" "${extra[@]}" "${devices[@]+"${devices[@]}"}" ) 2>"$RUN/qemu.out" &
 pid=$!
 
 shotpid=""

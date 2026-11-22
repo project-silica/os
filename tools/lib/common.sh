@@ -59,6 +59,12 @@ export TMPDIR=${TMPDIR:-$OUTBASE/tmp}
 mkdir -p "$TMPDIR" || die "cannot create scratch directory $TMPDIR"
 LOGS=$OUTBASE/logs
 new_run() { # private per-run directory
+  # A run directory is a tool's working space; what is worth keeping of a run
+  # is under logs/. Nothing removed them, and three days of work left 7,000.
+  # Each new run removes those older than three days (longer than any run
+  # there is; a soak longer than that must touch its directory as it goes).
+  find "$OUTBASE/runs" -mindepth 1 -maxdepth 1 -mmin +4320 \
+    -exec sh -c 'chmod -R u+rwx "$@" 2>/dev/null; rm -rf "$@"' sh {} + 2>/dev/null
   RUN=$(mktemp -d "$OUTBASE/runs/$TOOL_NAME.$(date +%Y%m%dT%H%M%S).XXXX") || die "cannot create a run under $OUTBASE/runs"
   case "$TOOL_NAME" in
     test)

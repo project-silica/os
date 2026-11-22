@@ -11,6 +11,8 @@
 # checkout's private cache, never in a source tree.
 
 BUILD_STD=(-Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem)
+# Programs have a heap (silica_rt::heap), so they also get Rust's alloc.
+BUILD_STD_USER=(-Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=compiler-builtins-mem)
 
 # strip_debug <in> <out> <log>: the copy that goes into the image. The file
 # with debug information stays beside it for symbolize.sh.
@@ -61,7 +63,7 @@ build_system() {
   [ -f "$s/Cargo.toml" ] || { echo "no checkout of the system repository" >"$log"; return 1; }
   mkdir -p "$out"; vend=$(merged_vendor system) || return 1
   cargo_run system "$log" build --release --workspace --bins --target "$k/targets/$arch-silica-user.json" \
-    -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
+    -Zjson-target-spec "${BUILD_STD_USER[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
   for n in $(cd "$s" && cargo metadata --no-deps --format-version 1 --offline 2>/dev/null | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name'); do
     cp "$(cache_of system)/target/$arch-silica-user/release/$n" "$out/$n.debug.elf" || return 1
     strip_debug "$out/$n.debug.elf" "$out/$n.elf" "$log" || return 1

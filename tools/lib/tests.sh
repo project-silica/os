@@ -243,6 +243,39 @@ run_system() {
   return 1
 }
 
+# run_rogue <arch> <suite>: what a driver cannot do. The system image boots
+# with a hostile driver in place of the disk's (driver=...=virtio-rogue), on
+# the machine with an IOMMU. One result per check: the driver's own `TEST
+# <name> PASS` lines, and three it cannot see for itself, taken from who
+# enforces them: the kernel's line for each access the IOMMU refused, and
+# the device manager's line for the fault on writing configuration space.
+# The run must still end with BOOT OK: the system survives the driver.
+run_rogue() {
+  local arch=$1 suite=$2 log img serial rc name text want
+  log=$(logfile "$suite" build.rogue)
+  img=$(build_system_image "$arch" "$log" "driver=1af4:1042=virtio-rogue") || { record fail "$suite" rogue "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" rogue)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r' <"$serial")
+  for name in rogue_other_device rogue_other_interrupt rogue_physical_address rogue_address_above_the_top \
+              rogue_write_read_only rogue_recovers rogue_restart; do
+    if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name"
+    else record fail "$suite" "$name" "$(grep -m1 -a "^ERROR: virtio-rogue: $name" <<<"$text" | cut -c1-160) (no PASS line; serial: $serial)"; fi
+  done
+  while IFS='|' read -r name want; do
+    if grep -qE "$want" <<<"$text"; then record pass "$suite" "$name"
+    else record fail "$suite" "$name" "the serial log has no line matching: $want (serial: $serial)"; fi
+  done <<'CHECKS'
+rogue_write_unmapped|^kernel: device 00:01\.0 was refused a write at 0x100000 
+rogue_read_unmapped|^kernel: device 00:01\.0 was refused a read at 0x200000 
+rogue_config_space|^devmgr: virtio-rogue for 00:01\.0 touched memory it may not \(page fault\)
+CHECKS
+  if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" rogue_system_survives; return 0; fi
+  record fail "$suite" rogue_system_survives "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+  return 1
+}
+
 # run_systest <arch> <suite>: the tests of what programs do to each other
 # (root task: the system repository's systest) on eight processors. Each
 # `TEST <name> PASS` line is one result; an `ERROR: systest: <name>: ...`
