@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Reproducible builds check (spec/ARCHITECTURE.md section 16 "Builds are
 # reproducible"; component A10).
-#   repro.sh
+#   repro.sh [--system]
+# With --system, also build and compare the bootable image containing init,
+# the services, their drivers and the manifests, from copies of system and idl.
 # Builds the x86_64 kernel, the UEFI loader and the disk image twice, each time
 # from its own copy of the kernel and os checkouts (tracked files and files not
 # ignored, so uncommitted work is checked too) in a different directory with its
@@ -16,11 +18,16 @@
 # Exit 0 reproducible, 1 not reproducible or a build failed, 2 usage error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
-[ $# = 0 ] || die "unknown argument $1 (usage: repro.sh)"
-for r in kernel os; do [ -d "$(checkout_of "$r")" ] || die "no checkout of $r"; done
+repos=(kernel os)
+artifacts=(kernel.elf BOOTX64.EFI disk.img)
+case "$#:${1:-}" in
+  0:) ;;
+  1:--system) repos+=(idl system); artifacts+=(system.img) ;;
+  *) die "unknown argument $1 (usage: repro.sh [--system])" ;;
+esac
+for r in "${repos[@]}"; do [ -d "$(checkout_of "$r")" ] || die "no checkout of $r"; done
 
 new_run
-KSRC=$(checkout_of kernel); OSRC=$(checkout_of os)
 OUT=$LOGS/repro
 rm -rf "${OUT:?}"; mkdir -p "$OUT"
 trap 'rm -rf "${RUN:?}"' EXIT
@@ -38,17 +45,24 @@ copy_tree() { # copy_tree <checkout> <dir>: the working tree without ignored fil
 }
 
 # build <n> <dir-name>: builds in $RUN/<dir-name> and keeps the artifacts in $RUN/out<n>.
-build() {
-  local n=$1 base=$RUN/$2 sysroot flags p f
-  SRC[kernel]=$base/kernel; SRC[os]=$base/os
-  copy_tree "$KSRC" "$base/kernel"; copy_tree "$OSRC" "$base/os"
-  sysroot=$(cd "$KSRC" && rustc --print sysroot 2>/dev/null)
+build() (
+  local n=$1 base=$RUN/$2 sysroot flags p r
+  # These cold builds have no later cache consumer. Removing the run
+  # reclaims their caches as well as their source copies.
+  OUTBASE=$base
+  unset PIECES_ONCE PIECES_DIR UNIT_DIR PATCH_DONE
+  for r in "${repos[@]}"; do
+    copy_tree "$(checkout_of "$r")" "$base/$r" || fail "build $n: cannot copy $r"
+    SRC[$r]=$base/$r
+  done
+  sysroot=$(cd "$base/kernel" && rustc --print sysroot 2>/dev/null)
   # Everything that differs between the two builds is mapped to the same name.
   # rustc uses the last matching mapping, so the broad ones come first.
   flags="--remap-path-prefix=$WS=/silica/workshop"
   [ -n "$sysroot" ] && flags+=" --remap-path-prefix=$sysroot=/rust"
-  flags+=" --remap-path-prefix=$base/kernel=/silica/kernel --remap-path-prefix=$base/os=/silica/os"
-  flags+=" --remap-path-prefix=$(cache_of kernel)=/silica/cache/kernel --remap-path-prefix=$(cache_of os)=/silica/cache/os"
+  for r in "${repos[@]}"; do
+    flags+=" --remap-path-prefix=$base/$r=/silica/$r --remap-path-prefix=$(cache_of "$r")=/silica/cache/$r"
+  done
   CARGO_ENV=("RUSTFLAGS=$flags")
   p=$(build_kernel x86_64 "$OUT/build$n.kernel.log") || fail "build $n: kernel: $(first_error "$OUT/build$n.kernel.log")"
   mkdir -p "$RUN/out$n"
@@ -59,14 +73,18 @@ build() {
   cp "$p" "$RUN/out$n/BOOTX64.EFI"
   p=$(build_image x86_64 "$OUT/build$n.image.log") || fail "build $n: disk image: $(first_error "$OUT/build$n.image.log")"
   [ -f "$p" ] || fail "build $n: disk.img was not produced"
-  cp "$p" "$RUN/out$n/disk.img"
-}
+  cp "$p" "$RUN/out$n/disk.img" || fail "build $n: cannot keep disk.img"
+  if [ -n "${SRC[system]:-}" ]; then
+    p=$(build_system_image x86_64 "$OUT/build$n.system.log") || fail "build $n: system image: $(first_error "$OUT/build$n.system.log")"
+    cp "$p" "$RUN/out$n/system.img" || fail "build $n: cannot keep system.img"
+  fi
+)
 
 # The two builds run in directories that differ in name and in length.
-build 1 build-one
-build 2 build-two-in-another-directory
+build 1 build-one || exit 1
+build 2 build-two-in-another-directory || exit 1
 
-for name in kernel.elf BOOTX64.EFI disk.img; do
+for name in "${artifacts[@]}"; do
   a=$RUN/out1/$name; b=$RUN/out2/$name
   if cmp -s "$a" "$b"; then
     echo "repro: $name identical ($(stat -c %s "$a") bytes, sha256 $(sha256sum "$a" | cut -c1-16))"

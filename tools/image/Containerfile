@@ -10,8 +10,8 @@
 # compiler cache (target/cache) after the lock files, the pins and that tag.
 FROM ubuntu:24.04
 
-# Moved together with rust-toolchain.toml in os and kernel, nowhere else.
-ARG RUST_CHANNEL=nightly-2026-10-01
+# Moved together with rust-toolchain.toml in kernel, idl, system and os, nowhere else.
+ARG RUST_CHANNEL=nightly-2026-11-11
 # rust-src: -Zbuild-std for the custom targets. miri: the T2 runs.
 # llvm-tools: symbolization and size checks.
 ARG RUST_COMPONENTS=rust-src,miri,clippy,rustfmt,llvm-tools
