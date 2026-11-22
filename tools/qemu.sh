@@ -4,12 +4,16 @@
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
+#           [--net user|tap:<interface>]
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
 # --nvme adds an NVMe controller (QEMU's model) whose one namespace is a
-# snapshot of the given disk image. --disk adds a second virtio disk that
+# snapshot of the given disk image. --net adds a virtio network device on
+# QEMU's user-mode network (the guest is 10.0.2.15, the gateway 10.0.2.2,
+# which answers ARP and ping), or on the host's tap interface (vhost-net).
+# --disk adds a second virtio disk that
 # is written for real (not a snapshot): the host reads it afterwards.
 # --no-exit-device leaves out the debug-exit device (x86_64): the guest
 # must turn the machine off itself (ACPI), and exit status 0 then means the
@@ -33,10 +37,10 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
-arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
+net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -56,6 +60,7 @@ while [ $# -gt 0 ]; do
     --device) devices+=(-device "$2"); shift 2 ;;
     --until) until=$2; shift 2 ;;
     --nvme) nvme=$2; shift 2 ;;
+    --net) net=$2; shift 2 ;;
     --disk) disk2=$2; shift 2 ;;
     --on) on+=("$2"); shift 2 ;;
     --type) typing+=("$2"); shift 2 ;;
@@ -103,7 +108,13 @@ case "$arch" in
     disk=(-device "virtio-blk-pci,drive=boot,disable-legacy=on${iommu:+,iommu_platform=on}")
     [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48)
     [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=on" -device nvme,serial=silica-nvme,drive=nvm)
-    [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}") ;;
+    [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}")
+    case "$net" in
+      "") ;;
+      user) extra+=(-netdev user,id=net0 -device "virtio-net-pci,netdev=net0,disable-legacy=on${iommu:+,iommu_platform=on}") ;;
+      tap:*) extra+=(-netdev "tap,id=net0,ifname=${net#tap:},script=no,downscript=no,vhost=on" -device "virtio-net-pci,netdev=net0,disable-legacy=on${iommu:+,iommu_platform=on}") ;;
+      *) die "--net: user or tap:<interface>, not $net" ;;
+    esac ;;
   aarch64)
     bin=qemu-system-aarch64
     # --el2: the firmware runs at EL2, as on most servers; the loader drops to EL1.

@@ -264,6 +264,28 @@ run_nvme() {
   else record fail "$suite" nvme "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_net <arch> <suite>: the network interface's driver and data path
+# (spec/MILESTONES.md M3). The system image boots with a virtio network
+# device on QEMU's user-mode network (behind the IOMMU) and netcheck runs:
+# an ARP request for the gateway must be answered, then 200 pings, with
+# frames built by hand and sent from, and received into, the program's own
+# memory. The system must come up and nothing may report an error.
+run_net() {
+  local arch=$1 suite=$2 log img serial rc text name
+  log=$(logfile "$suite" build.net)
+  img=$(build_system_image "$arch" "$log" "checks=net") || { record fail "$suite" net "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" net)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  for name in virtio-net.arp virtio-net.ping; do
+    if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name"
+    else record fail "$suite" "$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
+  done
+  if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" net
+  else record fail "$suite" net "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+}
+
 # run_faults <arch> <suite>: a device that misbehaves (spec/MILESTONES.md
 # M3, fault injection). One boot per fault and block driver, the driver
 # committing the fault at its 50th request (inject=<driver>:<fault>@50,
@@ -357,7 +379,7 @@ run_shutdown() {
 # the machine must turn itself off. The console draws before it echoes, so
 # a line on the serial line is on the screen.
 run_console() {
-  local arch=$1 suite=$2 log img serial rc shot text bad
+  local arch=$1 suite=$2 log img serial rc shot text bad lines
   log=$(logfile "$suite" build.console)
   img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" console "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" console)
@@ -382,9 +404,11 @@ run_console() {
   done
   [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
   # The picture: rows of 16 pixels; a row holds text if any pixel differs
-  # from the top-right corner's (the background). The banner, five commands
-  # and eleven lines of answers, maybe the next prompt.
-  [ -n "$bad" ] || bad=$(python3 -I - "$shot" 17 <<'PY'
+  # from the top-right corner's (the background). The screen holds the
+  # shell's lines from the banner to "back" (the serial line has the other
+  # programs' lines among them), maybe the next prompt.
+  lines=$(sed -n '/^Silica\. Type help/,/^back$/p' <<<"$text" | grep -cvE '^(devmgr|virtio-input|fbdisplay|console|kernel|init): ')
+  [ -n "$bad" ] || bad=$(python3 -I - "$shot" "$lines" <<'PY'
 import sys
 try:
     d = open(sys.argv[1], 'rb').read()
