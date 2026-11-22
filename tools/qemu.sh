@@ -5,13 +5,19 @@
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
 #           [--net user|tap:<interface>] [--hotplug <disk image>]
+#           [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
-# --nvme adds an NVMe controller (QEMU's model) whose one namespace is a
-# snapshot of the given disk image. --net adds a virtio network device on
-# QEMU's user-mode network (the guest is 10.0.2.15, the gateway 10.0.2.2,
+# --nvme adds an NVMe controller (QEMU's model, id nvme0) whose namespace 1
+# is a snapshot of the given disk image; --nvme-props gives it properties
+# (msix_qsize=1: one interrupt vector; logical_block_size=4096,
+# physical_block_size=4096: 4 KiB blocks); --nvme-ns gives it another
+# namespace (`nvme-ns` properties: drive=, nsid=, ms= ...), and with no
+# --nvme its namespaces are only those. --drive <id>=<image> is a snapshot
+# of the image for a device to use (--nvme-ns, --device, --on device_add).
+# --net adds a virtio network device on QEMU's user-mode network (the guest is 10.0.2.15, the gateway 10.0.2.2,
 # which answers ARP and ping), or on the host's tap interface (vhost-net).
 # --hotplug gives the machine an empty PCI Express root port with native
 # hot-plug (id hp0; QEMU's ACPI hot-plug off) and a disk image ready to be
@@ -40,6 +46,7 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
+nvme_props="" nvme_ns=() drives=()
 hotplug="" net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -66,6 +73,9 @@ while [ $# -gt 0 ]; do
     --net) net=$2; shift 2 ;;
     --hotplug) hotplug=$2; shift 2 ;;
     --disk) disk2=$2; shift 2 ;;
+    --nvme-props) [ $# -ge 2 ] || die "$1 needs a value"; nvme_props=$2; shift 2 ;;
+    --nvme-ns) [ $# -ge 2 ] || die "$1 needs a value"; nvme_ns+=("$2"); shift 2 ;;
+    --drive) [ $# -ge 2 ] && [[ $2 == ?*=?* ]] || die "--drive needs <id>=<disk image>"; drives+=("$2"); shift 2 ;;
     --on) on+=("$2"); shift 2 ;;
     --type) typing+=("$2"); shift 2 ;;
     *) die "unknown argument $1" ;;
@@ -89,6 +99,10 @@ mon=monitor.sock
 for v in image serial shot stamp nvme disk2 hotplug; do # the guest runs in $RUN, so every other path must be absolute
   case "${!v}" in ''|/*) ;; *) printf -v "$v" '%s' "$PWD/${!v}" ;; esac
 done
+for k in "${!drives[@]}"; do
+  d=${drives[$k]#*=}; [ -f "$d" ] || die "--drive: image $d not found"
+  case "$d" in /*) ;; *) drives[$k]="${drives[$k]%%=*}=$PWD/$d" ;; esac
+done
 case "$arch" in
   x86_64)
     bin=qemu-system-x86_64
@@ -99,7 +113,9 @@ case "$arch" in
     # its DMA through it (without that, QEMU's virtio devices bypass it).
     disk=(-device "virtio-blk-pci,drive=boot,disable-legacy=on${iommu:+,iommu_platform=on}")
     [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48)
-    [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=on" -device nvme,serial=silica-nvme,drive=nvm)
+    [ -z "$nvme" ] || extra+=(-drive "format=raw,file=$nvme,if=none,id=nvm,snapshot=on")
+    [ -z "$nvme" ] && [ ${#nvme_ns[@]} = 0 ] || extra+=(-device "nvme,id=nvme0,serial=silica-nvme${nvme:+,drive=nvm}${nvme_props:+,$nvme_props}")
+    for ns in "${nvme_ns[@]+"${nvme_ns[@]}"}"; do extra+=(-device "nvme-ns,bus=nvme0,$ns"); done
     [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}")
     [ -z "$hotplug" ] || extra+=(-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off -device pcie-root-port,id=hp0,chassis=1,slot=1,mem-reserve=8M,pref64-reserve=64M
       -drive "format=raw,file=$hotplug,if=none,id=hot")
@@ -123,6 +139,7 @@ case "$arch" in
   *) die "unsupported architecture $arch" ;;
 esac
 command -v "$bin" >/dev/null || die "$bin is not installed (run tools/init.sh)"
+for d in "${drives[@]+"${drives[@]}"}"; do extra+=(-drive "format=raw,file=${d#*=},if=none,id=${d%%=*},snapshot=on"); done
 
 vga=(-vga none); [ -n "$shot" ] && vga=(-vga std)
 : >"$serial"

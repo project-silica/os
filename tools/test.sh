@@ -60,7 +60,8 @@ evidence_init
 
 # The system image's guest tests (run_<name> in lib/tests.sh), and those of
 # them that judge a time.
-SYSTEM_TESTS=(system rogue power recovery shutdown console nvme net net_recovery hotplug)
+SYSTEM_TESTS=(system rogue power recovery shutdown console nvme net net_recovery hotplug
+  nvme_one_vector nvme_4k nvme_namespaces nvme_unservable hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces)
 QUIET_SYSTEM=" recovery net_recovery "
 # unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has
 # two phases: the units that judge a time, one after another with nothing
@@ -518,7 +519,7 @@ system_test() {
     *) unit "$q" "system.x86_64/$t" "${GIN[@]}" -- "run_$t" x86_64 system.x86_64 ;;
   esac
 }
-FAULT_DRIVERS=(virtio-blk nvme)
+FAULT_DRIVERS=(virtio-blk nvme nvme_one_vector nvme_4k nvme_namespaces)
 # One repository's lint and host tests, one after another (they share a
 # build directory); the repositories' run at once.
 repo_units() {

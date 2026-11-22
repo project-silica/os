@@ -248,26 +248,98 @@ run_system() {
   return 1
 }
 
-# run_nvme <arch> <suite>: the second block driver, written from the class
-# protocol's documentation alone (spec/MILESTONES.md M3). The system image
-# boots with an NVMe controller beside the virtio disk (its namespace a
-# snapshot of the image itself), and blkcheck runs the same checks on each:
-# every one of NVMe's must pass, and the system must come up.
+# nvme_machine <config> <image>: an NVMe controller the NVMe driver is
+# tested on (spec/ARCHITECTURE.md section 7), its namespaces snapshots of
+# <image> (a system image: a GPT disk). Sets NVME_MACHINE (qemu.sh
+# arguments), NVME_SAYS (extended expressions the serial log must match:
+# what the driver found, so a configuration QEMU ignored fails the test),
+# and for the same controller hot-added at port hp0, NVME_HOT (monitor
+# commands; its namespace 1 the drive `hot`), NVME_HOT_MACHINE (qemu.sh
+# arguments it needs beside --hotplug) and NVME_HOT_SAYS.
+#   ""          one namespace of 512-byte blocks, a vector per queue
+#   one_vector  one MSI-X vector, both queues interrupting on it
+#   4k          a namespace of 4 KiB blocks
+#   namespaces  namespace 1's format carries metadata (not served), 2 is
+#               served, 3 has 4 KiB blocks (not served: one disk per
+#               controller). Hot-added: namespace 1 is served and a second
+#               is added while the driver starts (seen when next started).
+nvme_machine() {
+  local config=$1 img=$2 dev="nvme,id=hotdisk,bus=hp0,drive=hot,serial=silica-hot" k4=logical_block_size=4096,physical_block_size=4096
+  local served='^nvme: [^:]*: namespace 1, [0-9]+ blocks of 512 bytes, [0-9]+ I/O entries, MSI-X 0 and 1,'
+  NVME_MACHINE=(--nvme "$img") NVME_SAYS=("$served") NVME_HOT=("device_add $dev") NVME_HOT_MACHINE=() NVME_HOT_SAYS=("$served")
+  case "$config" in
+    "") ;;
+    one_vector)
+      NVME_MACHINE+=(--nvme-props msix_qsize=1) NVME_HOT=("device_add $dev,msix_qsize=1")
+      NVME_SAYS=('^nvme: [^:]*: namespace 1, [0-9]+ blocks of 512 bytes, [0-9]+ I/O entries, MSI-X 0 only,') NVME_HOT_SAYS=("${NVME_SAYS[@]}") ;;
+    4k)
+      NVME_MACHINE+=(--nvme-props "$k4") NVME_HOT=("device_add $dev,$k4")
+      NVME_SAYS=('^nvme: [^:]*: namespace 1, [0-9]+ blocks of 4096 bytes, [0-9]+ I/O entries, MSI-X 0 and 1,') NVME_HOT_SAYS=("${NVME_SAYS[@]}") ;;
+    namespaces)
+      NVME_MACHINE=(--drive "ns1=$img" --nvme-ns drive=ns1,nsid=1,ms=8 --drive "ns2=$img" --nvme-ns drive=ns2,nsid=2
+        --drive "ns3=$img" --nvme-ns "drive=ns3,nsid=3,$k4")
+      NVME_SAYS=('^nvme: namespace 1: not served: its format carries metadata$'
+        '^nvme: namespace 3: [0-9]+ blocks of 4096 bytes, not served: one disk per controller$'
+        '^nvme: [^:]*: namespace 2, [0-9]+ blocks of 512 bytes, ')
+      NVME_HOT+=("device_add nvme-ns,bus=hotdisk,drive=hot2,nsid=2,$k4") NVME_HOT_MACHINE=(--drive "hot2=$img") ;;
+    *) die "nvme_machine: no configuration $config" ;;
+  esac
+}
+
+# run_nvme <arch> <suite> [config]: the second block driver, written from
+# the class protocol's documentation alone (spec/MILESTONES.md M3). The
+# system image boots with an NVMe controller beside the virtio disk (one of
+# nvme_machine's configurations), and blkcheck runs the same checks on each
+# disk: every one of NVMe's must pass, the driver must say it found the
+# controller as configured, and the system must come up.
 run_nvme() {
-  local arch=$1 suite=$2 log img serial rc text name
-  log=$(logfile "$suite" build.nvme)
-  img=$(build_system_image "$arch" "$log") || { record fail "$suite" nvme "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" nvme)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --nvme "$img" >"$serial.qemu" 2>&1
+  local arch=$1 suite=$2 config=${3:-} test=nvme${3:+_$3} log img serial rc text check say bad=""
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  nvme_machine "$config" "$img"
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" "${NVME_MACHINE[@]}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in nvme.block_read nvme.block_write_read_back nvme.block_refusals nvme.block_in_flight nvme.block_many_pages; do
-    if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name"
-    else record fail "$suite" "$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
+  for check in block_read block_write_read_back block_refusals block_in_flight block_many_pages; do
+    if grep -qx "TEST nvme.$check PASS" <<<"$text"; then record pass "$suite" "$test.$check"
+    else record fail "$suite" "$test.$check" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
-  if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" nvme
-  else record fail "$suite" nvme "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+  for say in "${NVME_SAYS[@]}"; do [ -n "$bad" ] || grep -qE "$say" <<<"$text" || bad="the driver never said: $say"; done
+  [ -n "$bad" ] || { [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text"; } || bad="the system did not come up (exit status $rc)"
+  [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
+  if [ -z "$bad" ]; then record pass "$suite" "$test"
+  else record fail "$suite" "$test" "$bad (serial: $serial)"; fi
 }
+# run_nvme_unservable <arch> <suite>: an NVMe controller with no namespace
+# the driver can serve (its only one's format carries metadata). The driver
+# must say why and end well (status 0), the device manager must leave the
+# controller alone rather than start the driver again, and the system must
+# stay up: once the driver has ended the host presses the power button, and
+# the system shuts down with nothing saying ERROR.
+run_nvme_unservable() {
+  local arch=$1 suite=$2 test=nvme_unservable log img serial rc text bad="" want
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --drive "ns1=$img" --nvme-ns drive=ns1,nsid=1,ms=8 \
+    --on '^devmgr: nvme for 00:02\.0 ended with status 0$=system_powerdown' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  [ $rc = 0 ] || bad="the machine was not turned off (exit status $rc)"
+  for want in '^nvme: namespace 1: not served: its format carries metadata$' '^nvme: no namespace this driver can serve; leaving the controller alone$' \
+              '^devmgr: nvme for 00:02\.0 ended with status 0$' '^init: shutting down'; do
+    [ -n "$bad" ] || grep -qE "$want" <<<"$text" || bad="the serial log has no line matching: $want"
+  done
+  [ -n "$bad" ] || ! grep -q '^devmgr: nvme for .* started again' <<<"$text" || bad="the driver was started again"
+  [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
+  if [ -z "$bad" ]; then record pass "$suite" "$test"
+  else record fail "$suite" "$test" "$bad (serial: $serial)"; fi
+}
+run_nvme_one_vector() { run_nvme "$1" "$2" one_vector; }
+run_nvme_4k() { run_nvme "$1" "$2" 4k; }
+run_nvme_namespaces() { run_nvme "$1" "$2" namespaces; }
 
 # run_net <arch> <suite>: the network interface's driver and data path
 # (spec/MILESTONES.md M3). The system image boots with a virtio network
@@ -308,38 +380,55 @@ run_net_recovery() {
   else record fail "$suite" net_recovery "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
-# run_hotplug <arch> <suite>: a disk put in while the system runs, used,
-# and taken out (spec/MILESTONES.md M3). The machine has an empty PCI
-# Express root port with native hot-plug (qemu.sh --hotplug) and a keyboard;
-# once the device manager has armed the port the host adds a virtio disk
-# there (a copy of the system image, so it has a partition table), types
-# `start blkcheck` when the device manager says it arrived (blkcheck checks
-# every disk: both must pass all five checks), and takes the disk out again
-# once blkcheck has ended. The device manager must give it addresses and a
-# driver, and end the driver when the disk is asked out; nothing may say
-# ERROR.
+# run_hotplug <arch> <suite> [nvme[_config]]: a disk put in while the
+# system runs, used, and taken out (spec/MILESTONES.md M3). The machine has
+# an empty PCI Express root port with native hot-plug (qemu.sh --hotplug)
+# and a keyboard; once the device manager has armed the port the host adds
+# a disk there (a virtio disk, or one of nvme_machine's NVMe controllers;
+# a copy of the system image, so it has a partition table), types `start
+# blkcheck` when the device manager says it arrived (blkcheck checks every
+# disk: both must pass all five checks), and takes the disk out again once
+# blkcheck has ended. The device manager must give it addresses and a
+# driver, and end the driver when the disk is asked out; an NVMe driver must
+# say it found the controller as configured; nothing may say ERROR.
 run_hotplug() {
-  local arch=$1 suite=$2 log img serial rc text hot bad=""
-  log=$(logfile "$suite" build.hotplug)
-  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" hotplug "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" hotplug)
-  hot=$(dirname "$serial")/hot.img
-  cp "$img" "$hot" || { record fail "$suite" hotplug "cannot copy the image to $hot"; return 1; }
+  local arch=$1 suite=$2 kind=${3:-virtio-blk} test=hotplug${3:+_$3} log img serial rc text hot bad="" driver id say cmd config want
+  local -a add=() machine=() says=()
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  hot=$(dirname "$serial")/$test.img
+  cp "$img" "$hot" || { record fail "$suite" "$test" "cannot copy the image to $hot"; return 1; }
+  case "$kind" in
+    virtio-blk) driver=virtio-blk id='1af4:1042 class 01\.00\.00'
+      add=('device_add virtio-blk-pci,id=hotdisk,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on') ;;
+    nvme|nvme_*) driver=nvme id='1b36:0010 class 01\.08\.02'
+      config=${kind#nvme}; nvme_machine "${config#_}" "$img"
+      add=("${NVME_HOT[@]}") machine=("${NVME_HOT_MACHINE[@]+"${NVME_HOT_MACHINE[@]}"}") says=("${NVME_HOT_SAYS[@]}") ;;
+    *) die "run_hotplug: no disk $kind" ;;
+  esac
+  for cmd in "${add[@]}"; do machine+=(--on "^devmgr: 00:02\.0 takes devices while the system runs\$=$cmd"); done
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
-    --hotplug "$hot" --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
-    --on '^devmgr: 00:02\.0 takes devices while the system runs$=device_add virtio-blk-pci,id=hotdisk,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on' \
-    --type '^devmgr: 01:00\.0 1af4:1042 class 01\.00\.00 arrived: virtio-blk$=start blkcheck\n' \
+    --hotplug "$hot" --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on "${machine[@]}" \
+    --type "^devmgr: 01:00\\.0 $id arrived: $driver\$=start blkcheck\\n" \
     --on '^init: blkcheck ended$=device_del hotdisk' \
-    --until '^devmgr: 01:00\.0 was taken out; virtio-blk ended$' >"$serial.qemu" 2>&1
+    --until "^devmgr: 01:00\\.0 was taken out; $driver ended\$" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
   [ $rc = 0 ] || bad="the disk was not taken out (exit status $rc)"
-  [ -n "$bad" ] || [ "$(grep -c '^TEST virtio-blk\.[a-z_]* PASS$' <<<"$text")" = 10 ] || bad="blkcheck did not pass every check on both disks"
-  [ -n "$bad" ] || grep -q '^blkcheck: disk 0x100, driven by virtio-blk$' <<<"$text" || bad="blkcheck did not check the disk put in"
+  # Five checks on the boot disk (virtio) and five on the disk put in.
+  want=5; [ $driver = virtio-blk ] && want=10
+  [ -n "$bad" ] || { [ "$(grep -c '^TEST virtio-blk\.[a-z_]* PASS$' <<<"$text")" = $want ] && [ "$(grep -c "^TEST $driver\.[a-z_]* PASS\$" <<<"$text")" = $want ]; } \
+    || bad="blkcheck did not pass every check on both disks"
+  [ -n "$bad" ] || grep -q "^blkcheck: disk 0x100, driven by $driver\$" <<<"$text" || bad="blkcheck did not check the disk put in"
+  for say in "${says[@]+"${says[@]}"}"; do [ -n "$bad" ] || grep -qE "$say" <<<"$text" || bad="the driver never said: $say"; done
   [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
-  if [ -z "$bad" ]; then record pass "$suite" hotplug
-  else record fail "$suite" hotplug "$bad (serial: $serial)"; fi
+  if [ -z "$bad" ]; then record pass "$suite" "$test"
+  else record fail "$suite" "$test" "$bad (serial: $serial)"; fi
 }
+run_hotplug_nvme_one_vector() { run_hotplug "$1" "$2" nvme_one_vector; }
+run_hotplug_nvme_4k() { run_hotplug "$1" "$2" nvme_4k; }
+run_hotplug_nvme_namespaces() { run_hotplug "$1" "$2" nvme_namespaces; }
 
 # run_faults <arch> <suite>: a device that misbehaves (spec/MILESTONES.md
 # M3, fault injection). One boot per fault and block driver, the driver
@@ -351,14 +440,21 @@ run_hotplug() {
 # ERROR. A completion of a request never offered, a request the device
 # never sees and a device that resets itself end the driver (the device
 # manager starts another); an interrupt with nothing done and a completion
-# without an interrupt do not.
+# without an interrupt do not. NVMe runs on each of nvme_machine's
+# configurations (nvme_<config>, the driver's name "nvme"), and must say it
+# found the controller as configured.
 run_faults() {
-  local arch=$1 suite=$2 log img serial rc text driver fault restarts other want name
-  local -a machine
-  for driver in ${3:-virtio-blk nvme}; do   # one driver's five boots when named: the drivers' run at once
-    machine=(); [ $driver = nvme ] && machine=(--nvme "$(build_system_image "$arch" "$(logfile "$suite" build.faults_disk)")")
+  local arch=$1 suite=$2 log img serial rc text token driver config fault restarts other want name say missing
+  local -a machine says
+  for token in ${3:-virtio-blk nvme}; do   # one driver's five boots when named: the drivers' run at once
+    driver=${token%%_*} config=${token#*_}; [ "$config" != "$token" ] || config=""
+    machine=() says=()
+    if [ $driver = nvme ]; then
+      nvme_machine "$config" "$(build_system_image "$arch" "$(logfile "$suite" build.faults_disk)")"
+      machine=("${NVME_MACHINE[@]}") says=("${NVME_SAYS[@]}")
+    fi
     for fault in garbage stuck spurious missed reset; do
-      name=fault_${driver//-/_}_$fault
+      name=fault_${token//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
       img=$(build_system_image "$arch" "$log" "checks=block inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
       serial=$(logfile "$suite" "$name")
@@ -368,9 +464,11 @@ run_faults() {
       restarts=$(grep -c "^devmgr: $driver for .* started again" <<<"$text")
       other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: $driver: " | head -1 | cut -c1-140)
       case $fault in garbage|stuck|reset) want=1 ;; *) want=0 ;; esac
+      missing=""; for say in "${says[@]+"${says[@]}"}"; do [ -n "$missing" ] || grep -qE "$say" <<<"$text" || missing=$say; done
       if [ $rc != 0 ] || ! grep -qx 'BOOT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
-      elif ! grep -q "^inject: [A-Za-z]* now" <<<"$text"; then record fail "$suite" "$name" "the fault was never committed (serial: $serial)"
+      elif ! grep -q "^inject: [A-Za-z]* committed\$" <<<"$text"; then record fail "$suite" "$name" "the fault was never committed (serial: $serial)"
       elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
+      elif [ -n "$missing" ]; then record fail "$suite" "$name" "the driver never said: $missing (serial: $serial)"
       elif [ "$(grep -c "^TEST $driver\.[a-z_]* PASS" <<<"$text")" != 5 ]; then record fail "$suite" "$name" "blkcheck did not pass every check on the disk (serial: $serial)"
       elif [ "$restarts" != $want ]; then record fail "$suite" "$name" "the driver was started again $restarts times, not $want (serial: $serial)"
       else record pass "$suite" "$name"; fi
