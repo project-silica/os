@@ -1,11 +1,35 @@
 #!/usr/bin/env bash
 # Host tests, target builds, QEMU guest tests and size checks.
-# Use --fast, --full or --deep; --repo limits the scope. --guest NAME
-# runs just the named x86_64 guest test (repeatable): a kernel test, or one
-# of the system image's (system, rogue, power, recovery, shutdown, console,
-# nvme, faults, net, net_recovery, hotplug).
+#   test.sh [--fast | --full | --deep] [--repo <repo>] [--fresh] [--plan]
+#   test.sh --guest NAME [--guest NAME]...
+# A tier says what must hold; what runs is the part of it whose inputs
+# changed since it last passed (lib/evidence.sh, spec/TESTING.md section 2).
+# Each check names what it is a function of (the sources it builds, the
+# harness that runs it, the emulator), and one that passed on exactly these
+# inputs is read back instead of run: a second run of an unchanged tree
+# takes seconds whatever the tier, and a change to the shell does not run
+# the kernel's Miri again. What does run, runs at once where it can.
+#   --fast   lint, host tests, builds, a boot and the system's guest tests
+#   --full   every guest test on both architectures, the boot matrix, Miri,
+#            loom and the tools' own tests
+#   --deep   fuzzing, the benchmarks (tools/bench.sh) and the Kani proofs
+#   --repo   limits the scope to one repository
+#   --fresh  holds nothing: every check of the tier runs (a milestone's
+#            exit; a doubt about the store)
+#   --plan   runs nothing: what would run, how long it took the last time
+#            and which of its inputs changed
+#   --guest  runs just the named x86_64 guest test (repeatable), always: a
+#            kernel test, or one of the system image's (SYSTEM_TESTS below,
+#            and faults)
+# A check that judges a time (a scheduling latency, a recovery deadline) is
+# contaminated by anything running beside it, so those run first, one at a
+# time, before the rest run at once ("quiet": a test's line in the kernel's
+# manifest says so, QUIET_SYSTEM below for the system image's).
+# Output: one line per suite, one ERROR: line per failure, what ran and what
+# was held, last line RESULT: pass=<n> fail=<n> skipped=<n> time=<s>.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
+. "$TOOLS/lib/evidence.sh"
 . "$TOOLS/lib/tests.sh"
 
 tier=fast repo="" guests=()
@@ -15,6 +39,8 @@ while [ $# -gt 0 ]; do
     --full) tier=full; shift ;;
     --deep) tier=deep; shift ;;
     --repo) repo=$2; shift 2 ;;
+    --fresh) FRESH=1; shift ;;
+    --plan) PLAN=1; shift ;;
     --guest) [ $# -ge 2 ] || die "--guest needs a test name"; guests+=("$2"); shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
@@ -23,6 +49,39 @@ start=$(date +%s)
 new_run
 RES=$RUN/results.tsv; : >"$RES"
 ms=$(milestone)
+# One set of sources for the whole run: an image's pieces are built once.
+PIECES_ONCE=1
+evidence_init
+# A test asked for by name is run: someone wants to see it.
+[ "${#guests[@]}" -gt 0 ] && FRESH=1
+# The Cargo [patch] file every checkout's builds read, written before
+# anything runs at once.
+[ "$PLAN" = 1 ] || { patch_config "${TMPDIR:-/tmp}/silica-patch.$$.toml"; PATCH_DONE=1; }
+
+# The system image's guest tests (run_<name> in lib/tests.sh), and those of
+# them that judge a time.
+SYSTEM_TESTS=(system rogue power recovery shutdown console nvme net net_recovery hotplug)
+QUIET_SYSTEM=" recovery net_recovery "
+# unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has
+# two phases: the units that judge a time, one after another with nothing
+# beside them; then all the others at once.
+PHASE=rest
+unit() {
+  local q=$1; shift
+  if [ "$q" = quiet ]; then [ "$PHASE" != quiet ] || held "$@"
+  else [ "$PHASE" != rest ] || held_bg "$@"; fi
+  return 0
+}
+
+# What every unit that builds or boots is a function of, beside its sources.
+LIB=(path:os:tools/lib/common.sh path:os:tools/lib/build.sh)
+# gin <arch> [system]: sets GIN, the inputs of a guest test on that
+# architecture: the kernel (and the system's programs), the image tool, the
+# emulator with its firmware, and the tools that boot it and read its log.
+gin() {
+  GIN=(repo+:kernel crate:os:silica-image "${LIB[@]}" path:os:tools/qemu.sh path:os:tools/symbolize.sh "host:qemu-$1" env:SILICA_QEMU_TIMEOUT env:SILICA_FW_TIMEOUT env:SILICA_NO_KVM)
+  [ -z "${2:-}" ] || GIN+=(repo+:system env:SILICA_SYSTEST_TIMEOUT)
+}
 
 if [ -n "$repo" ]; then
   all_repos | grep -xF "$repo" >/dev/null || die "unknown repo $repo"
@@ -109,47 +168,60 @@ suite_builds() { # the kernel for all three targets and the UEFI loader
 }
 
 # inos_machine <arch> <test> <options> <manifest>: set INOS_QEMU to the
-# machine a test's line in the manifest names (smp=<processors> mem=<MiB>).
+# machine a test's line in the manifest names (smp=<processors> mem=<MiB>),
+# INOS_QUIET to "quiet" when the line says the test judges a time (else
+# "any"), and INOS_NAMED to whether it named a machine.
 inos_machine() {
   local o
-  INOS_QEMU=()
+  INOS_QEMU=() INOS_QUIET=any INOS_NAMED=""
   for o in $3; do
     case "$o" in
-      smp=*) INOS_QEMU+=(--smp "${o#smp=}") ;;
-      mem=*) INOS_QEMU+=(--mem "${o#mem=}") ;;
+      smp=*) INOS_QEMU+=(--smp "${o#smp=}"); INOS_NAMED=1 ;;
+      mem=*) INOS_QEMU+=(--mem "${o#mem=}"); INOS_NAMED=1 ;;
+      quiet) INOS_QUIET=quiet ;;
       *) record fail "inos.$1" "$2" "unknown option $o in $4"; return 1 ;;
     esac
   done
 }
-
-suite_inos() { # in-OS tests on one architecture; --fast boots boot_ok only
-  local a=$1 t opts o manifest
+# inos_on <arch> <suite> <test> <label> [qemu.sh arguments]: run_inos on a
+# named machine, recorded as <label>.
+inos_on() {
+  local a=$1 s=$2 t=$3 rc
+  INOS_LABEL=$4; shift 4; INOS_QEMU=("$@")
+  [ "$INOS_LABEL" != "$t" ] || INOS_LABEL=""
+  run_inos "$a" "$s" "$t"; rc=$?
+  INOS_QEMU=() INOS_LABEL=""
+  return $rc
+}
+# Every test the root task has is in the manifest: one left out would never
+# run, and nothing would say so.
+inos_manifest() {
+  local a=$1 manifest name missing=""
   manifest="$(checkout_of kernel)/tests/inos-$a.txt"
-  run_inos "$a" "inos.$a" boot_ok
-  # Every test the root task has is in the manifest: one left out would
-  # never run, and nothing would say so.
-  if [ -f "$manifest" ]; then
-    local name missing=""
-    for name in $(awk '/^const TESTS/ { on = 1 } on && /^\];/ { exit } on' "$(checkout_of kernel)/roottest/src/main.rs" | grep -o '("[a-z0-9_]*",' | tr -d '(",'); do
-      awk -v t="$name" '$1 == t { found = 1 } END { exit !found }' "$manifest" || missing="$missing $name"
-    done
-    if [ -n "$missing" ]; then record fail "inos.$a" manifest "roottest has tests tests/inos-$a.txt does not list, so they never run:$missing"
-    else record pass "inos.$a" manifest; fi
-  fi
+  for name in $(awk '/^const TESTS/ { on = 1 } on && /^\];/ { exit } on' "$(checkout_of kernel)/roottest/src/main.rs" | grep -o '("[a-z0-9_]*",' | tr -d '(",'); do
+    awk -v t="$name" '$1 == t { found = 1 } END { exit !found }' "$manifest" || missing="$missing $name"
+  done
+  if [ -n "$missing" ]; then record fail "inos.$a" manifest "roottest has tests tests/inos-$a.txt does not list, so they never run:$missing"
+  else record pass "inos.$a" manifest; fi
+}
+
+suite_inos() { # in-OS tests on one architecture, each a unit; --fast boots boot_ok only
+  local a=$1 t opts manifest
+  manifest="$(checkout_of kernel)/tests/inos-$a.txt"
+  gin "$a"
+  unit any "inos.$a/boot_ok" "${GIN[@]}" -- run_inos "$a" "inos.$a" boot_ok
+  [ ! -f "$manifest" ] || [ "$PHASE" != rest ] || held "inos.$a/manifest" path:kernel:roottest/src/main.rs "path:kernel:tests/inos-$a.txt" -- inos_manifest "$a"
   if [ "$tier" != fast ] && [ -f "$manifest" ]; then
     # One test per line: its name, then optionally the machine it needs
-    # (smp=<processors> mem=<MiB>).
+    # (smp=<processors> mem=<MiB>) and "quiet" if it judges a time.
     while read -r t opts; do
       case "$t" in ""|"#"*|boot_ok) continue ;; esac
+      [ "$PHASE" = rest ] || case " $opts " in *" quiet "*) ;; *) continue ;; esac
       inos_machine "$a" "$t" "$opts" "$manifest" || continue
-      run_inos "$a" "inos.$a" "$t"
+      unit "$INOS_QUIET" "inos.$a/$t" "${GIN[@]}" -- inos_on "$a" "inos.$a" "$t" "$t" "${INOS_QEMU[@]+"${INOS_QEMU[@]}"}"
       # A test that names no machine runs on one processor above and on
       # four here: the same paths with other processors present.
-      if [ -z "$opts" ]; then
-        INOS_QEMU=(--smp 4); INOS_LABEL="$t.smp4"
-        run_inos "$a" "inos.$a" "$t"
-        INOS_LABEL=""
-      fi
+      [ -n "$INOS_NAMED" ] || unit "$INOS_QUIET" "inos.$a/$t.smp4" "${GIN[@]}" -- inos_on "$a" "inos.$a" "$t" "$t.smp4" --smp 4
     done <"$manifest"
     INOS_QEMU=()
   fi
@@ -157,23 +229,23 @@ suite_inos() { # in-OS tests on one architecture; --fast boots boot_ok only
 
 suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
   local c m
+  gin x86_64
   for c in 1 2 8 64; do
     for m in 256 16384; do
-      INOS_QEMU=(--smp "$c" --mem "$m"); INOS_LABEL="boot_ok.smp$c.mem$m"
-      run_inos x86_64 inos.x86_64 boot_ok
+      unit any "inos.x86_64/boot_ok.smp$c.mem$m" "${GIN[@]}" -- inos_on x86_64 inos.x86_64 boot_ok "boot_ok.smp$c.mem$m" --smp "$c" --mem "$m"
     done
   done
-  INOS_QEMU=(); INOS_LABEL=""
-  run_panic x86_64 inos.x86_64
-  run_panic x86_64 inos.x86_64 null
+  unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
+  unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
   # Boots that cannot succeed say why.
   local e=inos.x86_64 boot='EFI/BOOT/BOOTX64.EFI=$L'
-  run_boot_error x86_64 $e error.no_kernel 'ERROR: loader: SILICA\KERNEL.ELF not found' "$boot"
-  run_boot_error x86_64 $e error.kernel_not_elf 'ERROR: loader: SILICA\KERNEL.ELF is not an x86_64 ELF image' "$boot" 'SILICA/KERNEL.ELF=$L'
-  run_boot_error x86_64 $e error.kernel_not_ours 'ERROR: loader: kernel image is not position-independent at the kernel base' "$boot" 'SILICA/KERNEL.ELF=$R'
-  run_boot_error x86_64 $e error.no_ramdisk 'ERROR: kernel: no root task' "$boot" 'SILICA/KERNEL.ELF=$K'
-  run_boot_error x86_64 $e error.no_root_entry 'ERROR: kernel: no root task' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'other=$R'
-  run_boot_error x86_64 $e error.root_not_elf 'ERROR: kernel: cannot start the root task: Image(NotElf)' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'root=$L'
+  boot_error() { local label=$1; shift; unit any "$e/$label" "${GIN[@]}" -- run_boot_error x86_64 $e "$label" "$@"; }
+  boot_error error.no_kernel 'ERROR: loader: SILICA\KERNEL.ELF not found' "$boot"
+  boot_error error.kernel_not_elf 'ERROR: loader: SILICA\KERNEL.ELF is not an x86_64 ELF image' "$boot" 'SILICA/KERNEL.ELF=$L'
+  boot_error error.kernel_not_ours 'ERROR: loader: kernel image is not position-independent at the kernel base' "$boot" 'SILICA/KERNEL.ELF=$R'
+  boot_error error.no_ramdisk 'ERROR: kernel: no root task' "$boot" 'SILICA/KERNEL.ELF=$K'
+  boot_error error.no_root_entry 'ERROR: kernel: no root task' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'other=$R'
+  boot_error error.root_not_elf 'ERROR: kernel: cannot start the root task: Image(NotElf)' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'root=$L'
 }
 
 # suite_arch_entry <arch>: the loader and kernel entry on their own: the
@@ -247,15 +319,30 @@ suite_size() {
   [ $rc = 0 ] && record pass "$s" size
 }
 
-suite_tools() { # tool self-tests (os/tools/tests/*.sh): they take minutes, so --full and --deep only
-  local s=os.tools t
+suite_tools() { # tool self-tests (os/tools/tests/*.sh), each a unit: they take minutes, so --full and --deep only
+  local s=os.tools t alone=$1
+  local -a in
   for t in "$(checkout_of os)"/tools/tests/*.sh; do
     [ -f "$t" ] || continue
-    # Each self-test builds a fake workshop with its own MILESTONE file; the
-    # override for this run (SILICA_MILESTONE) must not leak into it.
-    (unset SILICA_MILESTONE; run_named os "tools/tests/$(basename "$t")" "$s" >/dev/null)
+    # A self-test is a function of the tools. One that builds the real
+    # kernel says so in a line "# inputs: kernel"; one that builds or boots
+    # the real system, "# inputs: system", and is a function of the kernel,
+    # the system and the emulators as well. One that judges a
+    # time says "# alone" and runs when nothing else does.
+    in=(path:os:tools path:os:bench crate:os:silica-image)
+    grep -q '^# inputs: kernel$' "$t" && in+=(repo:os repo+:kernel)
+    grep -q '^# inputs: system$' "$t" && in+=(repo:os repo+:system repo+:kernel host:qemu-x86_64 host:qemu-aarch64)
+    if grep -q '^# alone$' "$t"; then
+      [ "$alone" = alone ] && held "$s/$(basename "$t")" "${in[@]}" -- tool_test "$(basename "$t")"
+    elif [ "$alone" != alone ]; then
+      held_bg "$s/$(basename "$t")" "${in[@]}" -- tool_test "$(basename "$t")"
+    fi
   done
 }
+# Each self-test builds a fake workshop with its own MILESTONE file; the
+# override for this run (SILICA_MILESTONE) must not leak into it, nor this
+# run's evidence (a self-test's fake checkouts are not the real ones).
+tool_test() { (unset SILICA_MILESTONE SILICA_EVIDENCE SILICA_FRESH; run_named os "tools/tests/$1" os.tools >/dev/null); }
 
 miri_error() { # the line that says why Miri failed, else the first error
   local l; l=$(grep -m1 -E "Undefined Behavior|memory leaked|unsupported operation|panicked" "$1" | cut -c1-160)
@@ -290,15 +377,23 @@ suite_miri() {
   runner=${SILICA_MIRI_RUNNER:-$(env ${tc:+RUSTUP_TOOLCHAIN="$tc"} rustup which cargo-miri 2>/dev/null)}
   mkdir -p "$dir"; : >"$log"
   if [ $rc = 0 ] && [ -x "$runner" ]; then
-    jobs=$(( $(nproc) > 4 ? $(nproc) - 2 : 2 ))
+    # Half the processors: the guest tests run beside it.
+    jobs=${SILICA_MIRI_JOBS:-$(( $(nproc) > 4 ? $(nproc) / 2 : 2 ))}
     sed -n 's/^ *Executable \(.*\) (\(.*\))$/\1\t\2/p' "$log.build" | while IFS=$'\t' read -r kind exe; do
       env CARGO_HOME="$c/cargo-home" XDG_CACHE_HOME="$c/xdg" MIRI_SYSROOT="$sys" ${tc:+RUSTUP_TOOLCHAIN="$tc"} \
         "$runner" runner "$exe" --list 2>/dev/null | sed -n 's/: test$//p' | while read -r name; do printf '%s\t%s\t%s\n' "$kind" "$exe" "$name"; done
     done >"$dir/tests"
-    # One output file per test, in the order listed.
-    awk -F'\t' '{ printf "%s\t%s\t%s\t%d\n", $1, $2, $3, NR }' "$dir/tests" | tr '\n' '\0' |
+    # One output file per test, numbered in the order listed. The tests are
+    # started longest first, by how long each took the last time (kept in
+    # the evidence store; a test never timed goes first): a run is as long
+    # as its longest test or its total over the processors, whichever is
+    # more, and a nine-minute test started fourth made it thirteen.
+    local times; times=$(ev_dir kernel.miri.times)/seconds; mkdir -p "$(dirname "$times")"; [ -f "$times" ] || : >"$times"
+    awk -F'\t' 'FILENAME == ARGV[1] { took[$1] = $2; next }
+        { printf "%d\t%s\t%s\t%s\t%d\n", (($3 in took) ? took[$3] : 1000000), $1, $2, $3, FNR }' "$times" "$dir/tests" | sort -t$'\t' -k1,1nr -k5,5n | cut -f2- | tr '\n' '\0' |
       xargs -0 -P "$jobs" -I{} env CARGO_HOME="$c/cargo-home" XDG_CACHE_HOME="$c/xdg" MIRI_SYSROOT="$sys" ${tc:+RUSTUP_TOOLCHAIN="$tc"} \
-        bash -c 'IFS=$(printf "\t") read -r kind exe name n <<<"$1"; "$2" runner "$exe" --exact "$name" >"$3/$n.out" 2>&1' _ {} "$runner" "$dir"
+        bash -c 'IFS=$(printf "\t") read -r kind exe name n <<<"$1"; "$2" runner "$exe" --exact "$name" >"$3/$n.out" 2>&1; printf "%s\t%s\n" "$name" "$SECONDS" >"$3/$n.time"' _ {} "$runner" "$dir"
+    cat "$dir"/*.time >"$times.new" 2>/dev/null && mv "$times.new" "$times"
     # As cargo would have printed it, binary by binary.
     awk -F'\t' -v d="$dir" '{ if ($1 != last) { printf "     Running %s (%s)\n", $1, $2; last = $1 }
         f = d "/" NR ".out"; seen = 0
@@ -366,12 +461,12 @@ suite_loom() {
 # Fuzzing (--deep): every fuzz target is one result of suite fuzz, from
 # tools/fuzz.sh's own lines (it stores reproducers and coverage under
 # target/fuzz/). No targets at all adds nothing.
-suite_fuzz() {
+suite_fuzz() { # suite_fuzz <repo>
   [ -x "$TOOLS/fuzz.sh" ] || return 0
   local s=fuzz log l id why rest rc n=0
-  log=$(logfile "$s" run)
+  log=$(logfile "$s" "run.$1")
   # Ten minutes per target: every trust boundary runs 10 min clean (spec/MILESTONES.md).
-  "$TOOLS/fuzz.sh" ${repo:+--repo "$repo"} --time "${SILICA_FUZZ_TIME:-600}" >"$log" 2>&1; rc=$?
+  "$TOOLS/fuzz.sh" --repo "$1" --time "${SILICA_FUZZ_TIME:-600}" >"$log" 2>&1; rc=$?
   while IFS= read -r l; do
     case "$l" in
       "fuzz: "*": ok "*) id=${l#fuzz: }; record pass "$s" "${id%%: ok *}"; n=$((n + 1)) ;;
@@ -385,99 +480,177 @@ suite_fuzz() {
 }
 
 # Benchmarks against Linux (--deep): every metric bench.sh prints is one result
-# of suite bench. A gate missed before its milestone is a skip that says so.
+# of suite bench. A metric not yet reported before its milestone is a skip
+# that says so, and so is an open gap. bench.sh keeps what it measured under
+# its own inputs, so this is not a unit: an unchanged tree boots nothing.
 suite_bench() {
   in_scope kernel || return 0   # the benchmarks boot the kernel
   local s=bench log l rest id rc n=0
+  local -a args=()
+  # Holding nothing (a milestone's exit): Silica measured again. Linux is
+  # locked (bench/reference.tsv) and is not booted by any tier.
+  [ "$FRESH" != 1 ] || args=(--fresh)
   log=$(logfile "$s" run)
-  "$TOOLS/bench.sh" >"$log" 2>&1; rc=$?
+  "$TOOLS/bench.sh" "${args[@]+"${args[@]}"}" >"$log" 2>&1; rc=$?
   while IFS= read -r l; do
     case "$l" in
-      "bench: behind Linux:"*|"bench: results in"*|"bench: ratchet"*) ;;
-      "bench: "*": "*) rest=${l#bench: }; record pass "$s" "${rest%%: *}"; n=$((n + 1)) ;;
+      "bench: "*": silica "*) rest=${l#bench: }; record pass "$s" "${rest%%: *}"; n=$((n + 1)) ;;
       "SKIP: bench: "*) rest=${l#SKIP: bench: }; record skip "$s" "${rest%%: *}" "${rest#*: }"; n=$((n + 1)) ;;
+      "OPEN: bench: "*) rest=${l#OPEN: bench: }; record skip "$s" "${rest%%: *}" "open gap: ${rest#*: }"; n=$((n + 1)) ;;
       "ERROR: bench::"*) rest=${l#ERROR: bench::}; record fail "$s" "${rest%%: *}" "${rest#*: }"; n=$((n + 1)) ;;
     esac
   done <"$log"
   if [ $rc != 0 ] && ! grep -q "^fail"$'\t'"$s"$'\t' "$RES"; then record fail "$s" run "bench.sh exited $rc (log: $log)"; fi
 }
 
-if [ "${#guests[@]}" -gt 0 ]; then
-  # Each on the machine its line in the manifest names.
-  manifest="$(checkout_of kernel)/tests/inos-x86_64.txt"
-  for guest in "${guests[@]}"; do
-    # The system image's own tests, by name.
-    case "$guest" in system|rogue|power|recovery|shutdown|console|nvme|faults|net|net_recovery|hotplug) "run_$guest" x86_64 system.x86_64; continue ;; esac
-    opts=$(awk -v t="$guest" '$1 == t { $1 = ""; print; exit }' "$manifest" 2>/dev/null)
-    inos_machine x86_64 "$guest" "$opts" "$manifest" || continue
-    run_inos x86_64 inos.x86_64 "$guest"
-  done
-  INOS_QEMU=()
-else
-  for r in $(all_repos); do
-    in_scope "$r" || continue
-    [ -f "$(checkout_of "$r")/Cargo.toml" ] || continue
-    suite_fmt "$r"; suite_clippy "$r"; suite_host "$r"
-  done
-  [ -z "$repo" ] && suite_unsafe
-  if { in_scope kernel || in_scope os; } && [ -f "$(checkout_of kernel)/targets/x86_64-silica.json" ]; then
-    suite_builds
-    in_scope kernel && suite_kani_build
+# system_test <name>: one of the system image's guest tests (or the faults
+# of one driver, "faults.<driver>"), a unit: each boots its own machine.
+system_test() {
+  local t=$1 q=any
+  gin x86_64 system
+  case "$QUIET_SYSTEM" in *" $t "*) q=quiet ;; esac
+  case "$t" in
+    faults.*) unit any "system.x86_64/$t" "${GIN[@]}" -- run_faults x86_64 system.x86_64 "${t#faults.}" ;;
+    *) unit "$q" "system.x86_64/$t" "${GIN[@]}" -- "run_$t" x86_64 system.x86_64 ;;
+  esac
+}
+FAULT_DRIVERS=(virtio-blk nvme)
+# One repository's lint and host tests, one after another (they share a
+# build directory); the repositories' run at once.
+repo_units() {
+  local r=$1
+  held "$r.fmt" "repo:$r" "${LIB[@]}" -- suite_fmt "$r"
+  held "$r.clippy" "repo+:$r" "${LIB[@]}" -- suite_clippy "$r"
+  held "$r.host" "repo+:$r" "${LIB[@]}" -- suite_host "$r"
+}
+have_kernel=""; [ -f "$(checkout_of kernel)/targets/x86_64-silica.json" ] && have_kernel=1
+have_system=""; [ -f "$(checkout_of system)/Cargo.toml" ] && have_system=1
+have_aarch64=""; [ -f "$(checkout_of kernel)/targets/aarch64-silica.json" ] && have_aarch64=1
+# guests: every guest test of the tier, for the phase that is on.
+guests() {
+  local t
+  if { in_scope kernel || in_scope os; } && [ -n "$have_kernel" ]; then
     suite_inos x86_64
     [ "$tier" != fast ] && suite_matrix
   fi
   # The system image: the kernel with the system repository's init as root task.
-  if { in_scope kernel || in_scope os || in_scope system; } && [ -f "$(checkout_of system)/Cargo.toml" ]; then
-    # The system image's guest tests, all at once: each boots its own
-    # machine (images are built one at a time), and the host has the
-    # processors; one after another they no longer fit the fast tier's minute.
-    system_tests=(system rogue power recovery shutdown console nvme net net_recovery hotplug) pids=()
-    # One boot per fault and driver: ten, so not in the fast tier.
-    [ "$tier" != fast ] && system_tests+=(faults)
-    for t in "${system_tests[@]}"; do "run_$t" x86_64 system.x86_64 & pids+=($!); done
-    wait "${pids[@]}"
-    [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
-    # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
-    # "aarch64 boots to the same test"), emulated, so not in the fast tier.
-    if [ "$tier" != fast ] && [ -f "$(checkout_of kernel)/targets/aarch64-silica-user.json" ]; then
-      run_system aarch64 system.aarch64
-      run_systest aarch64 systest.aarch64
+  if { in_scope kernel || in_scope os || in_scope system; } && [ -n "$have_system" ]; then
+    for t in "${SYSTEM_TESTS[@]}"; do system_test "$t"; done
+    if [ "$tier" != fast ]; then
+      # One boot per fault and driver, so not in the fast tier.
+      for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
+      unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64
+      # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
+      # "aarch64 boots to the same test"), emulated, so not in the fast tier.
+      if [ -f "$(checkout_of kernel)/targets/aarch64-silica-user.json" ]; then
+        gin aarch64 system
+        unit any system.aarch64/system "${GIN[@]}" -- run_system aarch64 system.aarch64
+        unit any systest.aarch64/systest "${GIN[@]}" -- run_systest aarch64 systest.aarch64
+      fi
     fi
   fi
-  [ "$tier" != fast ] && in_scope os && suite_tools
-  # The hosted CI definitions test themselves (every workflow parses).
-  if in_scope .github && [ -d "$(checkout_of .github)/tests" ]; then
-    for t in "$(checkout_of .github)"/tests/*.sh; do run_named .github "tests/${t##*/}" .github.tests; done
-  fi
-  # The budgets measure the kernel and the images: nothing to measure when
-  # neither is in scope (--repo idl, --repo .github).
-  if in_scope kernel || in_scope os || in_scope system; then suite_size; fi
   if [ "$tier" != fast ]; then
     # aarch64's in-OS tests run whenever the kernel has the architecture,
     # before the milestone that requires it, so what works stays working.
-    if { in_scope kernel || in_scope os; } && [ -f "$(checkout_of kernel)/targets/aarch64-silica.json" ]; then
-      suite_arch_entry aarch64
-      run_panic aarch64 inos.aarch64
-      run_panic aarch64 inos.aarch64 secondary
-      run_panic aarch64 inos.aarch64 null
+    if { in_scope kernel || in_scope os; } && [ -n "$have_aarch64" ]; then
+      gin aarch64
+      unit any entry.aarch64/entry "${GIN[@]}" -- suite_arch_entry aarch64
+      unit any inos.aarch64/panic_backtrace "${GIN[@]}" -- run_panic aarch64 inos.aarch64
+      unit any inos.aarch64/panic_backtrace_secondary "${GIN[@]}" -- run_panic aarch64 inos.aarch64 secondary
+      unit any inos.aarch64/null_object_faults "${GIN[@]}" -- run_panic aarch64 inos.aarch64 null
       suite_inos aarch64
     fi
     suite_required_arch aarch64
     suite_required_arch riscv64
-    if in_scope kernel; then suite_miri; suite_loom; fi
+  fi
+}
+
+fn_hashes   # before anything forks: every unit's command is one of its inputs
+if [ "${#guests[@]}" -gt 0 ]; then
+  # Each on the machine its line in the manifest names; those that judge a
+  # time first, one at a time.
+  manifest="$(checkout_of kernel)/tests/inos-x86_64.txt"
+  for PHASE in quiet rest; do
+    for guest in "${guests[@]}"; do
+      # The system image's own tests, by name.
+      case " ${SYSTEM_TESTS[*]} faults " in
+        *" $guest "*)
+          if [ "$guest" = faults ]; then for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
+          else system_test "$guest"; fi
+          continue ;;
+      esac
+      opts=$(awk -v t="$guest" '$1 == t { $1 = ""; print; exit }' "$manifest" 2>/dev/null)
+      inos_machine x86_64 "$guest" "$opts" "$manifest" || continue
+      gin x86_64
+      unit "$INOS_QUIET" "inos.x86_64/$guest" "${GIN[@]}" -- inos_on x86_64 inos.x86_64 "$guest" "$guest" "${INOS_QEMU[@]+"${INOS_QEMU[@]}"}"
+    done
+  done
+  INOS_QEMU=()
+  wait
+else
+  for r in $(all_repos); do
+    in_scope "$r" || continue
+    [ -f "$(checkout_of "$r")/Cargo.toml" ] || continue
+    repo_units "$r" &
+  done
+  wait
+  if [ -z "$repo" ]; then
+    in=(); for r in $(all_repos); do in+=("repo:$r"); done
+    held unsafe "${in[@]}" ws:spec/UNSAFE_MODULES.md -- suite_unsafe
+  fi
+  if { in_scope kernel || in_scope os; } && [ -n "$have_kernel" ]; then
+    held kernel.build repo+:kernel "${LIB[@]}" -- suite_builds
+    in_scope kernel && held kernel.kani/build crate:kernel:kernel-core host:kani "ms:$ms" -- suite_kani_build
+  fi
+  # The guest tests that judge a time, with the host to themselves.
+  PHASE=quiet; guests
+  PHASE=rest
+  # Then everything else at once, the long ones first: Miri (its longest
+  # test decides how long it takes), loom and the tools' own tests.
+  if [ "$tier" != fast ]; then
+    if in_scope kernel; then
+      held_bg kernel.miri crate:kernel:kernel-core "${LIB[@]}" env:SILICA_MIRI_RUNNER env:SILICA_MIRI_JOBS -- suite_miri
+      held_bg kernel.loom repo+:kernel "${LIB[@]}" "ms:$ms" env:LOOM_MAX_PREEMPTIONS env:LOOM_MAX_BRANCHES -- suite_loom
+    fi
+    in_scope os && suite_tools together
+  fi
+  guests
+  # The hosted CI definitions test themselves (every workflow parses).
+  if in_scope .github && [ -d "$(checkout_of .github)/tests" ]; then
+    for t in "$(checkout_of .github)"/tests/*.sh; do held ".github.tests/${t##*/}" repo:.github -- run_named .github "tests/${t##*/}" .github.tests; done
+  fi
+  wait
+  [ "$tier" != fast ] && in_scope os && suite_tools alone
+  # The budgets measure the kernel and the images this run built: nothing to
+  # measure when neither is in scope (--repo idl, --repo .github).
+  if in_scope kernel || in_scope os || in_scope system; then
+    held size repo+:kernel repo+:system crate:os:silica-image "${LIB[@]}" path:os:tools/size.sh ws:spec/ARCHITECTURE.md "ms:$ms" -- suite_size
   fi
   if [ "$tier" = deep ]; then
-    suite_fuzz
+    # Fuzzing, a repository at a time: a target is fuzzed again when the
+    # code it reaches may have changed.
+    for r in $(all_repos); do
+      in_scope "$r" || continue
+      [ -d "$(checkout_of "$r")" ] || continue
+      held "fuzz.$r" "repo+:$r" "${LIB[@]}" path:os:tools/fuzz.sh "time:${SILICA_FUZZ_TIME:-600}" env:SILICA_FUZZ_UNIT_TIMEOUT -- suite_fuzz "$r"
+    done
+    in_scope kernel && held_bg kernel.kani/proofs crate:kernel:kernel-core host:kani "ms:$ms" -- suite_kani
+    # The benchmarks hold the host still: nothing else runs beside them.
+    wait
     suite_bench
-    in_scope kernel && suite_kani
   fi
 fi
 
+if [ "$PLAN" = 1 ]; then
+  plan_summary
+  exit 0
+fi
 awk -F'\t' '
   { s = $2; seen[s] = 1; if (!(s in order)) { order[s] = ++n; name[n] = s }
     if ($1 == "pass") p[s]++; else if ($1 == "fail") f[s]++; else k[s]++ }
-  END { for (i = 1; i <= n; i++) { s = name[i]; printf "%s: pass=%d fail=%d skipped=%d\n", s, p[s], f[s], k[s] } }' "$RES" | head -24
+  END { for (i = 1; i <= n; i++) { s = name[i]; printf "%s: pass=%d fail=%d skipped=%d\n", s, p[s], f[s], k[s] } }' "$RES" | sort | head -40
 awk -F'\t' '$1 == "fail" { r = $4; if (r == "") r = "failed"; printf "ERROR: %s::%s: %s\n", $2, $3, r }' "$RES"
 read -r P F K < <(awk -F'\t' '{ if ($1 == "pass") p++; else if ($1 == "fail") f++; else k++ } END { print p+0, f+0, k+0 }' "$RES")
+units_summary
 echo "RESULT: pass=$P fail=$F skipped=$K time=$(($(date +%s) - start))"
 [ "$F" = 0 ]

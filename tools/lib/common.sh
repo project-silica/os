@@ -149,6 +149,19 @@ cargo_run() {
     "${CARGO_ENV[@]+"${CARGO_ENV[@]}"}" cargo --config "$cache/cargo-patch.toml" "$@") >"$log" 2>&1
 }
 
+firmware_of() { # firmware_of <arch> <code|vars>: the UEFI firmware qemu.sh boots
+  local f FW=${SILICA_FW_ROOT:-}
+  case "$1:$2" in
+    x86_64:code) set -- /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2-ovmf/x64/OVMF_CODE.fd ;;
+    x86_64:vars) set -- /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2-ovmf/x64/OVMF_VARS.fd ;;
+    aarch64:code) set -- /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw /usr/share/qemu-efi-aarch64/QEMU_EFI.fd ;;
+    aarch64:vars) set -- /usr/share/AAVMF/AAVMF_VARS.fd /usr/share/edk2/aarch64/vars-template-pflash.raw ;;
+    *) return 1 ;;
+  esac
+  for f in "$@"; do [ -f "$FW$f" ] && { echo "$FW$f"; return 0; }; done
+  return 1
+}
+
 # fastest_cpus <n>: a comma-separated list of host processors for a guest
 # with <n> processors: one hardware thread of each of the <n> fastest cores
 # (by maximum frequency; on a hybrid processor, the performance cores).

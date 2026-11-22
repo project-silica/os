@@ -79,8 +79,9 @@ run_named() {
     *.sh)
       dir=$(checkout_of "$repo")
       [ -f "$dir/$id" ] || { record fail "$suite" "$id" "missing"; return 3; }
-      mkdir -p "$RUN/named"
-      (cd "$dir" && env SILICA_WS="$WS" SILICA_RUN="$RUN/named" bash "$dir/$id") >"$log" 2>&1
+      # A scratch directory of its own: scripts run at once.
+      name=$RUN/named/$(basename "$id" .sh); mkdir -p "$name"
+      (cd "$dir" && env SILICA_WS="$WS" SILICA_RUN="$name" bash "$dir/$id") >"$log" 2>&1
       if [ $? = 0 ]; then record pass "$suite" "$id"; return 0; fi
       record fail "$suite" "$id" "$(first_error "$log")"; return 1 ;;
   esac
@@ -208,15 +209,19 @@ run_boot_error() {
   local arch=$1 suite=$2 label=$3 want=$4 log dir serial rc a; shift 4
   log=$(logfile "$suite" "build.$label")
   build_image "$arch" "$log" >/dev/null || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
-  dir=$(art_dir "$arch")
+  # The pieces build_image just assembled: this run's copy, or the artifacts.
+  local k l r tool out
+  dir=$(art_dir "$arch"); k=$dir/kernel.stripped l=$dir/BOOTX64.EFI r=$dir/root.elf tool=$dir/silica-image
+  if [ -n "${PIECES_ONCE:-}" ]; then dir=${PIECES_DIR:-$RUN}/pieces-kernel-$arch; k=$dir/kernel.stripped l=$dir/loader.efi r=$dir/root.elf tool=$dir/silica-image; fi
+  out=${UNIT_DIR:-$dir}/error.img
   local -a args=()
   for a in "$@"; do
-    a=${a//\$K/$dir/kernel.stripped}; a=${a//\$L/$dir/BOOTX64.EFI}; a=${a//\$R/$dir/root.elf}
+    a=${a//\$K/$k}; a=${a//\$L/$l}; a=${a//\$R/$r}
     args+=("$a")
   done
-  "$dir/silica-image" --out "$dir/error.img" "${args[@]}" >"$log" 2>&1 || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  "$tool" --out "$out" "${args[@]}" >"$log" 2>&1 || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$label")
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$dir/error.img" --serial "$serial" --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$out" --serial "$serial" --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
   if [ $rc != 1 ] || ! grep -q 'guest exit code 17' "$serial.qemu"; then
     record fail "$suite" "$label" "a boot that cannot succeed did not leave with the failure code (exit status $rc; serial: $serial)"; return 1
@@ -350,7 +355,7 @@ run_hotplug() {
 run_faults() {
   local arch=$1 suite=$2 log img serial rc text driver fault restarts other want name
   local -a machine
-  for driver in virtio-blk nvme; do
+  for driver in ${3:-virtio-blk nvme}; do   # one driver's five boots when named: the drivers' run at once
     machine=(); [ $driver = nvme ] && machine=(--nvme "$(build_system_image "$arch" "$(logfile "$suite" build.faults_disk)")")
     for fault in garbage stuck spurious missed reset; do
       name=fault_${driver//-/_}_$fault

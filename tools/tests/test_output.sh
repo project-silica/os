@@ -47,6 +47,7 @@ shape() { # shape <case>
     case "$l" in
       RESULT:*) ;;
       ERROR:*) ;;
+      "test: ran "*" checks ("*" s of work), held "*) ;;   # what ran and what was held
       *)
         printf '%s\n' "$l" | grep -qE '^[A-Za-z0-9_.-]+: pass=[0-9]+ fail=[0-9]+ skipped=[0-9]+$' ||
           { bad "$1: line is neither a suite summary, ERROR nor RESULT: $l"; continue; }

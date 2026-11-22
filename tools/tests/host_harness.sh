@@ -106,7 +106,7 @@ run() {
   : >"$CALLS"
   OUT=$(cd "$FX" && env -i PATH="$FX/bin:${PATH:-/usr/bin:/bin}" HOME="$FX" TMPDIR="$FX" RUSTUP_HOME="$RUSTUP_HOME" \
     SILICA_WS="$WS" FAKE_CALLS="$CALLS" FAKE_FX="$FX" REAL_CARGO="$REAL_CARGO" SILICA_MIRI_RUNNER="$SILICA_MIRI_RUNNER" \
-    bash "$OS/tools/test.sh" "$@" 2>&1)
+    SILICA_FRESH=1 bash "$OS/tools/test.sh" "$@" 2>&1)   # the fakes change between runs, and a fake is no input: nothing held
   RC=$?
 }
 nlines() { printf '%s\n' "$OUT" | wc -l; }
@@ -119,6 +119,7 @@ shape() { # shape <case>: summary lines, ERROR lines and RESULT last; one summar
   while IFS= read -r l; do
     case "$l" in
       RESULT:* | ERROR:*) ;;
+      "test: ran "*" checks ("*" s of work), held "*) ;;   # what ran and what was held
       *)
         printf '%s\n' "$l" | grep -qE '^[A-Za-z0-9_.-]+: pass=[0-9]+ fail=[0-9]+ skipped=[0-9]+$' ||
           { bad "$1: line is neither a suite summary, ERROR nor RESULT: $l"; continue; }

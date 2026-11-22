@@ -1,0 +1,33 @@
+# Linux, locked. One line per metric: the value bench.sh compares Silica with, its unit, and the host
+# it holds for. Each is Linux at its best (its best session median) over the clean sessions of
+# 2026-11-22 on that host: Linux 7.3.5, the config and benchmark program of bench/linux at that date,
+# 5 boots a session, 8 sessions for the kernel paths and 2 for boot and the devices.
+# bench.sh does not boot Linux: these numbers are the comparison, and Silica's target is 15% better
+# than each (spec/TESTING.md 4.1, "Linux is locked"). They change only by a commit that says why
+# (new hardware, a comparison shown to be unfair to Linux); `bench.sh --linux` measures Linux beside
+# them for that purpose and changes nothing.
+ipc_roundtrip	1881	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ctx_switch	504	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+boot_userspace	356.204	ms	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+timer_overshoot_p99	32055	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_pairs1	541866	ops/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_pairs8	4.28032e+06	ops/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_cross_pairs1	435200	ops/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_cross_pairs4	1.67851e+06	ops/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+page_fault	801	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+null_syscall	97	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_roundtrip_p99	1948	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ctx_switch_p99	535	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+timer_overshoot	20286	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd1	15304	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd1_p99	17419	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd32	291523	ops/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd1_confined	19886	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd1_p99_confined	47076	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd32_confined	140286	ops/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+net_rtt	10253	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+net_rtt_p99	13878	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+net_tx	2.18835e+06	frames/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+net_rtt_confined	21913	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+net_rtt_p99_confined	31915	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+net_tx_confined	131937	frames/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned

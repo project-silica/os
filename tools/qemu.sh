@@ -80,20 +80,8 @@ done
 new_run
 [ -n "$serial" ] || serial=$RUN/serial.log
 
-FW=${SILICA_FW_ROOT:-}   # prefix for firmware paths; the test points it at a fake tree
-firmware() { # firmware() <code|vars> for the architecture
-  local f
-  case "$arch:$1" in
-    x86_64:code) for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2-ovmf/x64/OVMF_CODE.fd; do [ -f "$FW$f" ] && { echo "$FW$f"; return; }; done ;;
-    x86_64:vars) for f in /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2-ovmf/x64/OVMF_VARS.fd; do [ -f "$FW$f" ] && { echo "$FW$f"; return; }; done ;;
-    aarch64:code) for f in /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw /usr/share/qemu-efi-aarch64/QEMU_EFI.fd; do [ -f "$FW$f" ] && { echo "$FW$f"; return; }; done ;;
-    aarch64:vars) for f in /usr/share/AAVMF/AAVMF_VARS.fd /usr/share/edk2/aarch64/vars-template-pflash.raw; do [ -f "$FW$f" ] && { echo "$FW$f"; return; }; done ;;
-  esac
-  return 1
-}
-
-code=$(firmware code) || die "no UEFI firmware for $arch (run tools/init.sh)"
-vars=$(firmware vars) || die "no UEFI variable store for $arch"
+code=$(firmware_of "$arch" code) || die "no UEFI firmware for $arch (run tools/init.sh)"
+vars=$(firmware_of "$arch" vars) || die "no UEFI variable store for $arch"
 cp "$vars" "$RUN/vars.fd"
 # The monitor socket is addressed relative to $RUN (QEMU and socat run there):
 # a unix socket path is limited to about 100 bytes and deep run directories exceed it.
