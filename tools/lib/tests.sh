@@ -287,6 +287,69 @@ run_shutdown() {
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_console <arch> <suite>: someone at the machine. It boots with a
+# display and a keyboard (virtio, behind the IOMMU) and no checks; the host
+# types on the keyboard: `services`, `devices`, then restarts the keyboard's
+# driver and the display's from the shell (each time waiting for the
+# console to say it found the new one), types `echo back`, takes a picture
+# of the screen and types `shutdown`. The shell's answers must name the
+# console and both drivers, the screen must hold the same lines (one row
+# of text per line, the first as wide as the banner, nothing below:
+# everything from before the display's driver was replaced is back), and
+# the machine must turn itself off. The console draws before it echoes, so
+# a line on the serial line is on the screen.
+run_console() {
+  local arch=$1 suite=$2 log img serial rc shot text bad
+  log=$(logfile "$suite" build.console)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" console "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" console)
+  shot=$(cd "$(dirname "$serial")" && pwd)/console.ppm
+  rm -f "$shot"
+  # The machine: 00:01.0 the disk, 00:02.0 the display, 00:03.0 the keyboard.
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device \
+    --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --type '^silica> $=services\n' --type '^  shell +running=devices\n' \
+    --type '^  00:03\.0 input +virtio-input$=restart-driver 00:03.0\n' \
+    --type "^console: the keyboard's driver ended; reading its successor\$=restart-driver 00:02.0\n" \
+    --type "^console: the display's driver ended; showing on its successor\$=echo back\n" \
+    --on "^back\$=screendump $shot" --type '^back$=shutdown\n' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  bad=""
+  [ $rc = 0 ] || bad="the machine was not turned off (exit status $rc)"
+  for want in '^console: on the display and the serial line, reading the keyboard$' '^silica> services$' '^  console +running +failures 0  silica\.console\.Terminal$' \
+              '^silica> devices$' '^  00:02\.0 display +fbdisplay$' '^  00:03\.0 input +virtio-input$' \
+              '^restart-driver: 00:03\.0: done$' '^restart-driver: 00:02\.0: done$' '^back$' '^silica> shutdown$' '^init: shutting down'; do
+    [ -n "$bad" ] || grep -qE "$want" <<<"$text" || bad="the serial log has no line matching: $want"
+  done
+  [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
+  # The picture: rows of 16 pixels; a row holds text if any pixel differs
+  # from the top-right corner's (the background). The banner, five commands
+  # and eleven lines of answers, maybe the next prompt.
+  [ -n "$bad" ] || bad=$(python3 -I - "$shot" 17 <<'PY'
+import sys
+try:
+    d = open(sys.argv[1], 'rb').read()
+except OSError:
+    print("no picture of the screen was taken"); sys.exit()
+lines = int(sys.argv[2])
+head = d.split(b'\n', 3); w, h = map(int, head[1].split()); px = head[3]
+bg = px[(w - 1) * 3:w * 3]
+rows = []
+for r in range(h // 16):
+    xs = [x for y in range(r * 16, r * 16 + 16) for x in range(w) if px[(y * w + x) * 3:(y * w + x) * 3 + 3] != bg]
+    rows.append(max(xs) + 1 if xs else 0)
+text = [i for i, n in enumerate(rows) if n]
+if text[:lines] != list(range(lines)) or len(text) > lines + 1 or text[-1] != len(text) - 1:
+    print(f"the screen's rows of text are {text}, not the first {lines} or {lines + 1}"); sys.exit()
+if not 34 * 8 < rows[0] <= 35 * 8:
+    print(f"the first row of text ends at pixel {rows[0]}, not in the banner's 35th cell")
+PY
+)
+  if [ -z "$bad" ]; then record pass "$suite" console
+  else record fail "$suite" console "$bad (serial: $serial)"; fi
+}
+
 # run_power <arch> <suite>: the machine is turned off, and reset, by the
 # system itself. The system image boots without the harness's exit device,
 # so nothing ends the emulator but the guest turning the machine off (ACPI

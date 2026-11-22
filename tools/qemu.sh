@@ -4,7 +4,7 @@
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
-#           [--on '<extended regex>=<monitor command>']...
+#           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
@@ -15,7 +15,9 @@
 # must turn the machine off itself (ACPI), and exit status 0 then means the
 # emulator stopped because the guest turned it off or reset it.
 # --on sends a command to QEMU's monitor (system_powerdown: the power
-# button) the first time a serial line matches the expression.
+# button) the first time a serial line matches the expression. --type types
+# the text on the keyboard the same way, a key at a time ('\n' is Enter;
+# letters, digits, space and - . / : _ are understood).
 # --until ends the run, as a success, when a serial line matches: for a
 # system that stays up (it does not turn the machine off when it is ready).
 # --pin runs the emulator on the given host processors (taskset), for
@@ -31,10 +33,10 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
-arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=()
+arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -56,6 +58,7 @@ while [ $# -gt 0 ]; do
     --nvme) nvme=$2; shift 2 ;;
     --disk) disk2=$2; shift 2 ;;
     --on) on+=("$2"); shift 2 ;;
+    --type) typing+=("$2"); shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
 done
@@ -212,6 +215,24 @@ while kill -0 "$pid" 2>/dev/null; do
     if tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "${rule%%=*}"; then
       (cd "$RUN" && printf '%s\n' "${rule#*=}" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon") >/dev/null 2>&1
       unset "on[$k]"
+    fi
+  done
+  for k in "${!typing[@]}"; do
+    rule=${typing[$k]}
+    if tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "${rule%%=*}"; then
+      unset "typing[$k]"
+      text=${rule#*=} enter=""
+      [ "${text: -2}" = '\n' ] && { text=${text%\\n}; enter=1; }
+      ( cd "$RUN"
+        for ((c = 0; c < ${#text}; c++)); do
+          ch=${text:c:1}
+          case "$ch" in
+            [a-z0-9]) key=$ch ;; [A-Z]) key=shift-${ch,,} ;; ' ') key=spc ;; '-') key=minus ;; '.') key=dot ;;
+            '/') key=slash ;; ':') key=shift-semicolon ;; '_') key=shift-minus ;; *) continue ;;
+          esac
+          printf 'sendkey %s 30\n' "$key" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon" >/dev/null 2>&1; sleep 0.06
+        done
+        [ -z "$enter" ] || printf 'sendkey ret 30\n' | timeout 5 socat -t1 - "UNIX-CONNECT:$mon" >/dev/null 2>&1 ) &
     fi
   done
   if [ -n "$until" ] && tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "$until"; then
