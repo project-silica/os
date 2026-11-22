@@ -491,9 +491,12 @@ run_console() {
   # the prompt is shown again below it, so the command still reads whole.)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device \
     --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
-    --type '^silica> $=services\n' --type '^  shell +running=caps console\n' --type '^  thread .* on processor=log devmgr\n' --type '^  devmgr: 00:01\.0 =trace\n' --type '^           seen by this client +[0-9]+ ns$=devices\n' \
-    --type '^  00:03\.0 input +virtio-input$=restart-driver 00:03.0\n' \
-    --type "^console: the keyboard's driver ended; reading its successor\$=restart-driver 00:02.0\n" \
+    --type '^silica> $=log console\n' --type '^  silica> log console$=services\n' \
+    --type '^  shell +running=caps console\n' --type '^  thread .* on processor=log devmgr\n' --type '^  devmgr: 00:01\.0 =trace\n' \
+    --type '^           seen by this client +[0-9]+ ns$=devices\n' \
+    --type '^  00:03\.0 input +virtio-input$=restart-driver 0001:00:03.0\n' \
+    --type '^restart-driver: 0001:00:03\.0: Error\(NoSuchDevice\)$=restart-driver 00:03.0\n' \
+    --type "^console: the keyboard's driver ended; reading its successor\$=restart-driver 0000:00:02.0\n" \
     --type "^console: the display's driver ended; showing on its successor\$=echo back\n" \
     --on "^back\$=screendump $shot" --type '^back$=log devmgr/fbdisplay@00:02.0\n' \
     --type '^  fbdisplay: [0-9]+x[0-9]+, =shutdown\n' >"$serial.qemu" 2>&1
@@ -502,11 +505,12 @@ run_console() {
   bad=""
   [ $rc = 0 ] || bad="the machine was not turned off (exit status $rc)"
   for want in '^console: on the display and the serial line, reading the keyboard$' '^silica> services$' '^  console +running +failures 0  silica\.console\.Terminal$' \
-              '^silica> caps console$' '^process console: [0-9]+ capabilities, 1 threads$' '^  slot [0-9]+: Endpoint rights ' \
+              '^silica> log console$' '^  silica> log console$' '^silica> caps console$' '^process console: [0-9]+ capabilities, 1 threads$' '^  slot [0-9]+: Endpoint rights ' \
               '^silica> log devmgr$' '^  devmgr: 00:01\.0 1af4:1042 class 01\.00\.00' \
               '^silica> trace$' '^  partition 0x800 \(EFI System\) opened through the block server' '^           taken by the driver +[0-9]+ ns$' \
               '^silica> devices$' '^  00:02\.0 display +fbdisplay$' '^  00:03\.0 input +virtio-input$' \
-              '^restart-driver: 00:03\.0: done$' '^restart-driver: 00:02\.0: done$' '^back$' '^silica> log devmgr/fbdisplay@00:02\.0$' \
+              '^restart-driver: 0001:00:03\.0: Error\(NoSuchDevice\)$' '^restart-driver: 00:03\.0: done$' \
+              '^restart-driver: 0000:00:02\.0: done$' '^back$' '^silica> log devmgr/fbdisplay@00:02\.0$' \
               '^silica> shutdown$' '^init: shutting down'; do
     [ -n "$bad" ] || grep -qE "$want" <<<"$text" || bad="the serial log has no line matching: $want"
   done
