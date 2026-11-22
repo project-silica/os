@@ -11,6 +11,8 @@
 // timestamp counter, over SAMPLES operations after WARMUP; reported as
 // minimum, median and 99th percentile.
 
+#include <linux/io_uring.h>
+
 #define SAMPLES 20000
 #define WARMUP 2000
 
@@ -213,6 +215,111 @@ static unsigned long throughput(int pairs, int cross)
 	return total * 10 / 3;
 }
 
+// Block reads, as a program that cares would issue them: 4 KiB, the page
+// cache bypassed (O_DIRECT), at offsets spread over the first RANGE bytes
+// of the disk by the same sequence Silica's blkcheck uses. Queue depth 1 is
+// pread; queue depth 32 is io_uring, Linux's fastest interface, without
+// a polling thread (Silica's client makes a system call only when the
+// driver sleeps, which is what io_uring_enter does here per batch).
+#define RANGE (4UL << 20)
+#define BLOCK_READS 2000
+#define BLOCK_WARMUP 200
+#define DEPTH 32
+#define DEEP_READS 20000
+static char block_buf[DEPTH * 4096] __attribute__((aligned(4096)));
+
+static unsigned long block_at(unsigned long i)
+{
+	return (i * 2654435761UL) % (RANGE / 512 - 8) * 512;
+}
+
+static void block_reads(void)
+{
+	if (syscall(__NR_mount, "devtmpfs", "/dev", "devtmpfs", 0UL, 0UL) != 0 && errno != EBUSY) {
+		printf("ERROR: bench: cannot mount devtmpfs\n");
+		return;
+	}
+	int fd = open("/dev/vda", O_RDONLY | O_DIRECT, 0);
+	if (fd < 0) {
+		printf("ERROR: bench: cannot open /dev/vda for direct reads\n");
+		return;
+	}
+	int n = 0;
+	for (int i = 0; i < BLOCK_READS; i++) {
+		unsigned long t = now_ns();
+		if (pread(fd, block_buf, 4096, block_at(i)) != 4096) {
+			printf("ERROR: bench: a direct read failed\n");
+			return;
+		}
+		t = now_ns() - t;
+		if (i >= BLOCK_WARMUP)
+			samples[n++] = t;
+	}
+	sort(samples, n);
+	printf("BENCH blk_read4k_qd1 %lu ns\n", samples[n / 2]);
+	printf("BENCH blk_read4k_qd1_p99 %lu ns\n", samples[n * 99 / 100]);
+
+	struct io_uring_params p;
+	memset(&p, 0, sizeof(p));
+	int ring = syscall(__NR_io_uring_setup, 64, &p);
+	if (ring < 0) {
+		printf("ERROR: bench: io_uring_setup failed\n");
+		return;
+	}
+	unsigned long sq_size = p.sq_off.array + p.sq_entries * sizeof(unsigned);
+	unsigned long cq_size = p.cq_off.cqes + p.cq_entries * sizeof(struct io_uring_cqe);
+	if (p.features & IORING_FEAT_SINGLE_MMAP)
+		sq_size = cq_size = sq_size > cq_size ? sq_size : cq_size;
+	char *sq = mmap(0, sq_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring, IORING_OFF_SQ_RING);
+	char *cq = (p.features & IORING_FEAT_SINGLE_MMAP) ? sq : mmap(0, cq_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring, IORING_OFF_CQ_RING);
+	struct io_uring_sqe *sqes = mmap(0, p.sq_entries * sizeof(struct io_uring_sqe), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, ring, IORING_OFF_SQES);
+	if (sq == MAP_FAILED || cq == MAP_FAILED || sqes == MAP_FAILED) {
+		printf("ERROR: bench: cannot map the io_uring\n");
+		return;
+	}
+	unsigned *sq_tail = (unsigned *)(sq + p.sq_off.tail), *sq_mask = (unsigned *)(sq + p.sq_off.ring_mask);
+	unsigned *sq_array = (unsigned *)(sq + p.sq_off.array);
+	unsigned *cq_head = (unsigned *)(cq + p.cq_off.head), *cq_tail = (unsigned *)(cq + p.cq_off.tail);
+	unsigned *cq_mask = (unsigned *)(cq + p.cq_off.ring_mask);
+	struct io_uring_cqe *cqes = (struct io_uring_cqe *)(cq + p.cq_off.cqes);
+	unsigned long sent = 0, done = 0, start = now_ns();
+	while (done < DEEP_READS) {
+		unsigned queued = 0, tail = *sq_tail;
+		while (sent < DEEP_READS && sent - done < DEPTH) {
+			unsigned at = tail & *sq_mask;
+			struct io_uring_sqe *e = &sqes[at];
+			memset(e, 0, sizeof(*e));
+			e->opcode = IORING_OP_READ;
+			e->fd = fd;
+			e->addr = (unsigned long)(block_buf + (sent % DEPTH) * 4096);
+			e->len = 4096;
+			e->off = block_at(sent);
+			e->user_data = sent;
+			sq_array[at] = at;
+			tail++;
+			sent++;
+			queued++;
+		}
+		__atomic_store_n(sq_tail, tail, __ATOMIC_RELEASE);
+		if (syscall(__NR_io_uring_enter, ring, queued, 1, IORING_ENTER_GETEVENTS, 0UL, 0UL) < 0) {
+			printf("ERROR: bench: io_uring_enter failed\n");
+			return;
+		}
+		unsigned head = *cq_head;
+		while (head != __atomic_load_n(cq_tail, __ATOMIC_ACQUIRE)) {
+			if (cqes[head & *cq_mask].res != 4096) {
+				printf("ERROR: bench: a queued direct read failed\n");
+				return;
+			}
+			head++;
+			done++;
+		}
+		__atomic_store_n(cq_head, head, __ATOMIC_RELEASE);
+	}
+	printf("BENCH blk_read4k_qd32 %lu ops/s\n", DEEP_READS * 1000000000UL / (now_ns() - start));
+	close(fd);
+}
+
 int main(void)
 {
 	// The host stamps this line: the first instruction-level sign of userspace.
@@ -250,6 +357,7 @@ int main(void)
 			printf("BENCH ipc_cross_scaling %lu.%02lu x\n", four / one, four * 100 / one % 100);
 		}
 	}
+	block_reads();
 	printf("BENCH DONE\n");
 
 	// Wait until the console has sent everything (TCSBRK with a non-zero

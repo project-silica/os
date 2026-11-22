@@ -3,9 +3,15 @@
 #   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--serial <file>] [--timeout <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
+#           [--until <extended regex>] [--no-exit-device]
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
+# --no-exit-device leaves out the debug-exit device (x86_64): the guest
+# must turn the machine off itself (ACPI), and exit status 0 then means the
+# emulator stopped because the guest turned it off or reset it.
+# --until ends the run, as a success, when a serial line matches: for a
+# system that stays up (it does not turn the machine off when it is ready).
 # --pin runs the emulator on the given host processors (taskset), for
 # benchmarks. --stamp writes one line per serial line, "<host time in seconds
 # with microseconds> <text>", after a first line "<time> QEMU START", so boot
@@ -19,10 +25,10 @@
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 
 orig_args=("$@")
-arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=()
+arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -38,7 +44,9 @@ while [ $# -gt 0 ]; do
     --pin) pin=$2; shift 2 ;;
     --stamp) stamp=$2; shift 2 ;;
     --no-iommu) iommu=""; shift ;;
+    --no-exit-device) exitdev=""; shift ;;
     --device) devices+=(-device "$2"); shift 2 ;;
+    --until) until=$2; shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
 done
@@ -77,7 +85,7 @@ case "$arch" in
     bin=qemu-system-x86_64
     # TCG needs -cpu max: the kernel requires x2APIC, the TSC-deadline timer and XSAVE.
     accel=(-machine q35 -cpu max); [ -w /dev/kvm ] && [ -z "${SILICA_NO_KVM:-}" ] && accel=(-machine q35,accel=kvm -cpu host)
-    extra=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
+    extra=(); [ -z "$exitdev" ] || extra=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
     # The boot disk is a virtio 1.0 device; with the IOMMU it is told to do
     # its DMA through it (without that, QEMU's virtio devices bypass it).
     disk=(-device "virtio-blk-pci,drive=boot,disable-legacy=on${iommu:+,iommu_platform=on}")
@@ -188,11 +196,19 @@ while kill -0 "$pid" 2>/dev/null; do
     echo "ERROR: qemu: $arch: timeout after ${after}s$where (serial: $serial)"
     exit 124
   fi
+  if [ -n "$until" ] && tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "$until"; then
+    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; stop_shot
+    [ -z "$stamper" ] || wait "$stamper" 2>/dev/null
+    exit 0
+  fi
   sleep 0.1; waited=$((waited + 1))
 done
 wait "$pid"; rc=$?
 [ -z "$stamper" ] || wait "$stamper" 2>/dev/null
 stop_shot
+# Without the exit device, the guest turned the machine off (or reset it,
+# which -no-reboot also ends the emulator on).
+if [ -z "$exitdev" ] && [ "$rc" = 0 ]; then exit 0; fi
 # isa-debug-exit returns (value << 1) | 1; the success value is 0x10.
 if [ "$rc" != 33 ]; then
   if [ "$rc" != 1 ] && [ $((rc & 1)) = 1 ]; then why="guest exit code $((rc >> 1)) via debug-exit (exit status $rc)"

@@ -71,7 +71,10 @@ timer_overshoot ns lower le 1 2 25
 insns_null_syscall insns lower none 0 2
 insns_ipc_roundtrip insns lower none 0 2
 insns_ctx_switch insns lower none 0 2
-insns_page_fault insns lower none 0 2'
+insns_page_fault insns lower none 0 2
+blk_read4k_qd1 ns lower le 1 3
+blk_read4k_qd1_p99 ns lower le 1 3
+blk_read4k_qd32 ops/s higher le 1 3'
 
 runs=5 out="" update=0 compare="" sweep=""
 while [ $# -gt 0 ]; do
@@ -139,6 +142,13 @@ if [ -z "$compare$sweep" ]; then
 log=$LOGS/bench/build.silica.log
 # $SILICA_BENCH_IMG names a ready-made Silica image (used by the tool's own test).
 silica=${SILICA_BENCH_IMG:-$(build_image x86_64 "$log" bench)} && [ -f "$silica" ] || { err "cannot build the Silica benchmark image (log: $log)"; echo "RESULT: pass=0 fail=1 skipped=0 time=$((SECONDS - start))"; exit 2; }
+# The block benchmarks run in the system image: the device manager, the
+# virtio-blk driver confined by the IOMMU, and blkcheck as the client.
+log=$LOGS/bench/build.silica-system.log
+silica_sys=""
+if [ -z "${SILICA_BENCH_IMG:-}" ]; then
+  silica_sys=$(build_system_image x86_64 "$log" "checks=block bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; echo "RESULT: pass=0 fail=1 skipped=0 time=$((SECONDS - start))"; exit 2; }
+fi
 log=$LOGS/bench/build.linux.log
 linux=$(build_linux "$log"); rc=$?
 if [ $rc = 3 ]; then
@@ -150,9 +160,10 @@ elif [ $rc != 0 ]; then
 fi
 fi
 
-# boot <system> <image> <run>: one boot; appends "<metric> <value>" lines to $RUN/<system>.values
+# boot <system> <image> <run> [<values>]: one boot; appends "<metric> <value>" lines to
+# $RUN/<values>.values (default: <system>), and its boot time unless the values are another system's.
 boot() {
-  local sys=$1 img=$2 i=$3 ser=$RUN/$1.$3.serial st=$RUN/$1.$3.stamp qlog=$LOGS/bench/$1.$3.log rc t0 t1
+  local sys=$1 img=$2 i=$3 vals=${4:-$1} ser=$RUN/$1.$3.serial st=$RUN/$1.$3.stamp qlog=$LOGS/bench/$1.$3.log rc t0 t1
   "$TOOLS/qemu.sh" --image "$img" --serial "$ser" --stamp "$st" --timeout "${SILICA_BENCH_TIMEOUT:-300}" \
     --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} >"$qlog" 2>&1
   rc=$?
@@ -161,7 +172,8 @@ boot() {
     echo "ERROR: bench::$sys: run $i did not finish (qemu.sh exit $rc, no BENCH DONE; serial $ser)"
     echo "RESULT: pass=$pass fail=1 skipped=$skipped time=$((SECONDS - start))"; exit 1
   fi
-  tr -d '\r' <"$ser" | awk '$1 == "BENCH" && NF == 4 && $3 ~ /^[0-9]+([.][0-9]+)?$/ { print $2, $3, $4 }' >>"$RUN/$sys.values"
+  tr -d '\r' <"$ser" | awk '$1 == "BENCH" && NF == 4 && $3 ~ /^[0-9]+([.][0-9]+)?$/ { print $2, $3, $4 }' >>"$RUN/$vals.values"
+  [ "$vals" = "$sys" ] || return 0
   # Boot time, by the host's clock: from the firmware starting the boot
   # option (the operating system's loader) to the first line from userspace.
   # The firmware before that is the same code for both systems and moves by
@@ -208,6 +220,7 @@ if [ -z "$compare$sweep" ]; then
   counts
   for ((i = 1; i <= runs; i++)); do
     boot silica "$silica" "$i"
+    [ -z "$silica_sys" ] || boot silica-system "$silica_sys" "$i" silica
     boot linux "$linux" "$i"
   done
 fi

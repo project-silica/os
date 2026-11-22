@@ -243,19 +243,41 @@ run_system() {
   return 1
 }
 
+# run_power <arch> <suite>: the machine is turned off, and reset, by the
+# system itself. The system image boots without the harness's exit device,
+# so nothing ends the emulator but the guest turning the machine off (ACPI
+# S5) or resetting it (the FADT's reset register; -no-reboot ends the
+# emulator on a reset). A reset that failed would say so on the console and
+# turn the machine off instead: no ERROR line may appear.
+run_power() {
+  local arch=$1 suite=$2 log img serial rc name halt
+  for name in power_off power_reset; do
+    halt=""; [ $name = power_reset ] && halt=" halt=reboot"
+    log=$(logfile "$suite" "build.$name")
+    img=$(build_system_image "$arch" "$log" "checks=block$halt") || { record fail "$suite" $name "image build failed: $(first_error "$log") (log: $log)"; continue; }
+    serial=$(logfile "$suite" $name)
+    "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device >"$serial.qemu" 2>&1
+    rc=$?
+    if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'BOOT OK' && ! tr -d '\r' <"$serial" | grep -q '^ERROR'; then record pass "$suite" $name
+    else record fail "$suite" $name "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+  done
+}
+
 # run_rogue <arch> <suite>: what a driver cannot do. The system image boots
 # with a hostile driver in place of the disk's (driver=...=virtio-rogue), on
 # the machine with an IOMMU. One result per check: the driver's own `TEST
 # <name> PASS` lines, and three it cannot see for itself, taken from who
 # enforces them: the kernel's line for each access the IOMMU refused, and
 # the device manager's line for the fault on writing configuration space.
-# The run must still end with BOOT OK: the system survives the driver.
+# The system must have come up (BOOT OK) and nothing may have failed.
 run_rogue() {
   local arch=$1 suite=$2 log img serial rc name text want
   log=$(logfile "$suite" build.rogue)
-  img=$(build_system_image "$arch" "$log" "driver=1af4:1042=virtio-rogue") || { record fail "$suite" rogue "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "driver=1af4:1042=virtio-rogue checks=") || { record fail "$suite" rogue "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" rogue)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  # The system stays up; the run ends when the driver's second run is over.
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --until '^devmgr: virtio-rogue for 00:01\.0 ended with status 0' >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r' <"$serial")
   for name in rogue_other_device rogue_other_interrupt rogue_physical_address rogue_address_above_the_top \

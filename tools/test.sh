@@ -370,6 +370,7 @@ else
   if { in_scope kernel || in_scope os || in_scope system; } && [ -f "$(checkout_of system)/Cargo.toml" ]; then
     run_system x86_64 system.x86_64
     run_rogue x86_64 system.x86_64
+    run_power x86_64 system.x86_64
     [ "$tier" != fast ] && run_systest x86_64 systest.x86_64
     # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
     # "aarch64 boots to the same test"), emulated, so not in the fast tier.
