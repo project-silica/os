@@ -405,7 +405,7 @@ run_console() {
   # The machine: 00:01.0 the disk, 00:02.0 the display, 00:03.0 the keyboard.
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device \
     --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
-    --type '^silica> $=services\n' --type '^  shell +running=devices\n' \
+    --type '^silica> $=services\n' --type '^  shell +running=caps console\n' --type '^  thread .* on processor=devices\n' \
     --type '^  00:03\.0 input +virtio-input$=restart-driver 00:03.0\n' \
     --type "^console: the keyboard's driver ended; reading its successor\$=restart-driver 00:02.0\n" \
     --type "^console: the display's driver ended; showing on its successor\$=echo back\n" \
@@ -415,6 +415,7 @@ run_console() {
   bad=""
   [ $rc = 0 ] || bad="the machine was not turned off (exit status $rc)"
   for want in '^console: on the display and the serial line, reading the keyboard$' '^silica> services$' '^  console +running +failures 0  silica\.console\.Terminal$' \
+              '^silica> caps console$' '^process console: [0-9]+ capabilities, 1 threads$' '^  slot [0-9]+: Endpoint rights ' \
               '^silica> devices$' '^  00:02\.0 display +fbdisplay$' '^  00:03\.0 input +virtio-input$' \
               '^restart-driver: 00:03\.0: done$' '^restart-driver: 00:02\.0: done$' '^back$' '^silica> shutdown$' '^init: shutting down'; do
     [ -n "$bad" ] || grep -qE "$want" <<<"$text" || bad="the serial log has no line matching: $want"
@@ -439,6 +440,11 @@ for r in range(h // 16):
     xs = [x for y in range(r * 16, r * 16 + 16) for x in range(w) if px[(y * w + x) * 3:(y * w + x) * 3 + 3] != bg]
     rows.append(max(xs) + 1 if xs else 0)
 text = [i for i, n in enumerate(rows) if n]
+if lines >= len(rows):
+    # Scrolled: every row holds text, the banner gone off the top.
+    if text != list(range(len(rows))):
+        print(f"the screen scrolled, but its rows of text are {text}, not all {len(rows)}")
+    sys.exit()
 if text[:lines] != list(range(lines)) or len(text) > lines + 1 or text[-1] != len(text) - 1:
     print(f"the screen's rows of text are {text}, not the first {lines} or {lines + 1}"); sys.exit()
 if not 34 * 8 < rows[0] <= 35 * 8:
