@@ -16,7 +16,7 @@ null_syscall	0.865979	vs-linux	84	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 ipc_roundtrip_p99	0.116482	vs-linux	440	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 ctx_switch_p99	0.42115	vs-linux	227	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 timer_overshoot	0.0405405	vs-linux	837	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-insns_null_syscall	138.6	value
-insns_ipc_roundtrip	994.7	value
-insns_ctx_switch	379.7	value
-insns_page_fault	2766.3	value
+insns_null_syscall	113.4	value
+insns_ipc_roundtrip	907.5	value
+insns_ctx_switch	369.6	value
+insns_page_fault	2625.5	value
