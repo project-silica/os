@@ -429,7 +429,7 @@ run_nvme_namespaces() { run_nvme "$1" "$2" namespaces; }
 run_net() {
   local arch=$1 suite=$2 log img serial rc text name
   log=$(logfile "$suite" build.net)
-  img=$(build_system_image "$arch" "$log" "checks=net") || { record fail "$suite" net "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd") || { record fail "$suite" net "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" net)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user >"$serial.qemu" 2>&1
   rc=$?
@@ -450,7 +450,7 @@ run_net() {
 run_net_recovery() {
   local arch=$1 suite=$2 log img serial rc text
   log=$(logfile "$suite" build.net_recovery)
-  img=$(build_system_image "$arch" "$log" "checks=netload") || { record fail "$suite" net_recovery "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=netload off=netd") || { record fail "$suite" net_recovery "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" net_recovery)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user >"$serial.qemu" 2>&1
   rc=$?
@@ -588,7 +588,7 @@ run_faults() {
   for fault in "${faults[@]}"; do
     name=fault_virtio_net_$fault
     log=$(logfile "$suite" "build.$name")
-    img=$(build_system_image "$arch" "$log" "checks=netfault inject=virtio-net:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+    img=$(build_system_image "$arch" "$log" "checks=netfault off=netd inject=virtio-net:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
     serial=$(logfile "$suite" "$name")
     "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user >"$serial.qemu" 2>&1
     rc=$?
@@ -892,6 +892,27 @@ run_rogue() {
 run_rogue_tcg() {
   local SILICA_NO_KVM=1; export SILICA_NO_KVM
   rogue_on "$1" "$2" _tcg 1af4:1042 '00:01\.0'
+}
+
+# run_dhcp <arch> <suite>: the server's first step (M4). The system boots
+# on QEMU's user-mode network with no checks; the network stack (netd)
+# must take the interface, get 10.0.2.15/24 from the user-mode DHCP server
+# with its router and DNS server, and find the router answering a ping.
+run_dhcp() {
+  local arch=$1 suite=$2 log img serial rc text bad=""
+  log=$(logfile "$suite" build.dhcp)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" dhcp "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" dhcp)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
+    --until '^netd: the router 10\.0\.2\.2 answers a ping in [0-9]+ us$' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r' <"$serial")
+  [ $rc = 0 ] || bad="the router was never pinged: $(grep -m1 -E '^(ERROR|netd: )' <<<"$text" | tail -1 | cut -c1-140) (exit status $rc)"
+  [ -n "$bad" ] || grep -qx 'netd: 10\.0\.2\.15/24 from DHCP server 10\.0\.2\.2, router 10\.0\.2\.2, DNS 10\.0\.2\.3, lease 86400 s' <<<"$text" ||
+    bad="no lease of 10.0.2.15/24 with router 10.0.2.2 and DNS 10.0.2.3: $(grep -m1 '^netd: .* from DHCP' <<<"$text")"
+  [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
+  if [ -z "$bad" ]; then record pass "$suite" dhcp
+  else record fail "$suite" dhcp "$bad (serial: $serial)"; fi
 }
 
 # run_rogue_net <arch> <suite>: the same hostile driver in the network
