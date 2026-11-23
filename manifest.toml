@@ -13,7 +13,7 @@ commit = "a89ef876d55e0c13108390e84ca3f28da4d5e50f"
 [repos.system]
 url = "https://github.com/project-silica/system"
 milestone = 0
-commit = "27b6d287385b0fdb8451718961570779bb1f2d50"
+commit = "2b8759d6448f7d44c4e836bf8a5aab226cb6a4ee"
 
 [repos.".github"]
 url = "https://github.com/project-silica/.github"
