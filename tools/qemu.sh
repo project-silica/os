@@ -197,8 +197,11 @@ if [ "$arch" = aarch64 ]; then
   # firmware describes it in the DSDT and the kernel keeps only the first.
   serial_dev=(-chardev "$backend,id=con,mux=on" -serial chardev:con -serial null)
 fi
+# Why the emulator stops, in the same log: each shutdown request with its
+# cause, each change of run state, and a watchdog acting.
+why_stopped=(-trace enable=qemu_system_shutdown_request -trace enable=runstate_set -trace enable=watchdog_perform_action -trace enable=tco_timer_expired)
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
-  cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${accel[@]}" -smp "$smp" -m "$mem" \
+  cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp" -m "$mem" \
   "${serial_dev[@]}" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
   -drive "format=raw,file=$image,if=none,id=boot,snapshot=on,aio=io_uring" "${disk[@]}" "${vga[@]}" "${extra[@]}" "${devices[@]+"${devices[@]}"}" ) 2>"$RUN/qemu.out" &
@@ -352,8 +355,13 @@ if [ "$rc" != 33 ]; then
     at=$(grep -a '^RIP=' "$RUN/qemu-reset.log" 2>/dev/null | tail -n "$smp" | awk '{ print $1 }' | sort | uniq -c | awk '{ printf "%s x%s ", $2, $1 }')
     # The emulator's own last words, whole, beside the serial log: its
     # first lines are often warnings and the reason it died comes last.
-    [ -s "$RUN/qemu.out" ] && cp "$RUN/qemu.out" "$serial.stderr"
-    why="qemu exited with status $rc, not through the debug-exit device: $(tail -c 200 "$RUN/qemu.out" | tr '\n' ' ')${at:+(the machine reset; processors at $at; registers: $RUN/qemu-reset.log)}${at:-(stderr: $serial.stderr)}"
+    local_stderr=""
+    [ -s "$RUN/qemu.out" ] && cp "$RUN/qemu.out" "$serial.stderr" && local_stderr=" (stderr: $serial.stderr)"
+    # What asked it to stop (cause 6 is the guest's power-off, 7 a reset
+    # under -no-reboot, 4 a signal), and a watchdog's doing.
+    stopped=$( { grep -ahE '^(qemu_system_shutdown_request|watchdog_perform_action|tco_timer_expired)' "$RUN/qemu-reset.log" | head -3
+      grep -ah '^runstate_set' "$RUN/qemu-reset.log" | tail -1; } 2>/dev/null | tr '\n' ' ')
+    why="qemu exited with status $rc, not through the debug-exit device: $(tail -c 200 "$RUN/qemu.out" | tr '\n' ' ')${stopped:+[$stopped] }${at:+(the machine reset; processors at $at; registers: $RUN/qemu-reset.log)}$local_stderr"
   fi
   echo "ERROR: qemu: $arch: $why (serial: $serial)"
   exit 1

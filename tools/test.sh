@@ -20,7 +20,7 @@
 #            and which of its inputs changed
 #   --guest  runs just the named x86_64 guest test (repeatable), always: a
 #            kernel test, or one of the system image's (SYSTEM_TESTS below,
-#            and faults)
+#            faults and systest)
 # A check that judges a time (a scheduling latency, a recovery deadline) is
 # contaminated by anything running beside it, so those run first, one at a
 # time, before the rest run at once ("quiet": a test's line in the kernel's
@@ -580,9 +580,11 @@ if [ "${#guests[@]}" -gt 0 ]; then
   for PHASE in quiet rest; do
     for guest in "${guests[@]}"; do
       # The system image's own tests, by name.
-      case " ${SYSTEM_TESTS[*]} faults " in
+      case " ${SYSTEM_TESTS[*]} faults systest " in
         *" $guest "*)
           if [ "$guest" = faults ]; then for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
+          elif [ "$guest" = systest ]; then
+            [ "$PHASE" = rest ] && { gin x86_64 system; unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64; }
           else system_test "$guest"; fi
           continue ;;
       esac
