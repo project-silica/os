@@ -329,6 +329,10 @@ boot() {
   local sys=$1 img=$2 i=$3 vals=${4:-$1} machine=${5:-iommu} keep=${6:-all} ser=$RUN/$1.$3.serial st=$RUN/$1.$3.stamp qlog=$LOGS/bench/$1.$3.log rc t0 t1
   local -a margs=()
   [ "$machine" = plain ] && margs=(--no-iommu)
+  # The system image runs netcheck even on a host without a spare core
+  # for the TAP echo. Its functional ARP and ping checks need a NIC.
+  # Only the benchmark echo can produce net_rtt and net_tx.
+  if [ "$keep" != all ] && [ "$net_ok" = no ]; then margs+=(--net user); fi
   # $SILICA_BENCH_MACHINE: further qemu.sh arguments, the same for every boot.
   "$TOOLS/qemu.sh" --image "$img" --serial "$ser" --stamp "$st" --timeout "${SILICA_BENCH_TIMEOUT:-300}" \
     --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} ${pin:+${emu:+--emulator "$emu"}} --disk-props "$disk_props" "${margs[@]+"${margs[@]}"}" "${netargs[@]+"${netargs[@]}"}" ${SILICA_BENCH_MACHINE:-} >"$qlog" 2>&1
@@ -384,12 +388,12 @@ count_start() {
       img=$(PIECES_ONCE=1 PIECES_DIR=$RUN/v.$label UNIT_DIR=$RUN/count.$label.$b.$n build_image x86_64 "$LOGS/bench/count.$label.$b.$n.build.log" "bench=$b:$n") ||
         { err "cannot build the counting image of $label (log: $LOGS/bench/count.$label.$b.$n.build.log)"; quit 2; }
       while [ "$(jobs -rp | wc -l)" -ge "$(nproc)" ]; do wait -n 2>/dev/null || break; done
-      "$TOOLS/profile.sh" --count --bench "$b" --times "$n" --image "$img" --out "$RUN/count.$label.$b.$n" >"$RUN/count.$label.$b.$n.out" 2>"$LOGS/bench/count.$label.$b.$n.log" &
+      "$TOOLS/profile.sh" --count --bench "$b" --times "$n" --image "$img" --out "$RUN/count.$label.$b.$n" >"$RUN/count.$label.$b.$n.out" 2>&1 &
     done
   done
 }
 count_finish() {
-  local label=$1 to=$2 spec b name per more one two
+  local label=$1 to=$2 spec b name per more one two n
   if [ -n "${SILICA_BENCH_COUNTS:-}" ]; then cat "$SILICA_BENCH_COUNTS" >"$to"; return; fi
   : >"$to"
   for spec in "${COUNT_SPECS[@]}"; do
@@ -397,6 +401,7 @@ count_finish() {
     one=$(awk '$1 == "COUNT" { print $2 }' "$RUN/count.$label.$b.1.out" 2>/dev/null)
     two=$(awk '$1 == "COUNT" { print $2 }' "$RUN/count.$label.$b.$((1 + more)).out" 2>/dev/null)
     if [ -z "$one" ] || [ -z "$two" ]; then
+      for n in 1 $((1 + more)); do cp "$RUN/count.$label.$b.$n.out" "$LOGS/bench/count.$label.$b.$n.log"; done
       echo "bench: no instruction count for $name of $label (logs $LOGS/bench/count.$label.$b.*.log)"; continue
     fi
     awk -v a="$one" -v b="$two" -v p="$((per * more))" -v n="$name" 'BEGIN { printf "insns_%s %.1f insns\n", n, (b - a) / p }' >>"$to"
