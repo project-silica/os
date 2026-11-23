@@ -505,6 +505,9 @@ stat() {
 # and after them the working tree ("new"). --sweep NAME=v1,v2,...: the
 # working tree built once per value of the build-time constant
 # SILICA_TUNE_<NAME> (kernel_core::tuned). An instrument: nothing is gated.
+# The devices' metrics (blk_*, net_* and their *_confined) come from each
+# variant's kernel under the same system image, booted on the machine
+# without an IOMMU and on the one with, interleaved as the kernel's are.
 #
 # Two measurements, and how each stays clean with many variants at once:
 # - Instruction counts are emulated and exact, so nothing one boot does can
@@ -570,12 +573,12 @@ if [ -n "$compare$sweep" ]; then
     TREE[kernel]=$tree_here; EV_OBJECTS[kernel]=$objects_here
     for n in "${vtunes[@]}"; do [ -z "$n" ] || unset "SILICA_TUNE_${n%%=*}"; done
   }
-  want_counts=0 want_timings=0
+  want_counts=0 want_timings=0 want_io=0
   while read -r name _; do
     wanted "$name" || continue
-    case "$name" in insns_*) want_counts=1 ;; blk_*|net_*) ;; *) want_timings=1 ;; esac
+    case "$name" in insns_*) want_counts=1 ;; blk_*|net_*) want_io=1 ;; *) want_timings=1 ;; esac
   done <<<"$METRICS"
-  [ $((want_counts + want_timings)) -gt 0 ] || die "--only $only names no metric a kernel's benchmark image reports"
+  [ $((want_counts + want_timings + want_io)) -gt 0 ] || die "--only $only names no metric to measure"
   # The counts: every variant not counted before, all at once.
   if [ $want_counts = 1 ]; then
     counting=() ckey=() ctext=()
@@ -613,6 +616,29 @@ if [ -n "$compare$sweep" ]; then
     [ $tuned = no ] && echo "bench: host not held still, so differences of a few percent mean nothing"
     for ((i = 1; i <= runs; i++)); do
       for ((j = 0; j < ${#labels[@]}; j++)); do v=${labels[$(((i - 1 + j) % ${#labels[@]}))]}; boot "$v" "$RUN/$v.img" "$i"; done
+    done
+  fi
+  # The devices' metrics come from the system image: each variant's kernel
+  # under the same system, booted on the machine without an IOMMU and on
+  # the one with (blk_*, and *_confined), as the main run boots them.
+  if [ $want_io = 1 ]; then
+    for n in "${!labels[@]}"; do
+      v=${labels[$n]}; select_variant "$n"
+      ( img=$(UNIT_DIR=$RUN/v.$v.system build_system_image x86_64 "$LOGS/bench/build.$v.system.log" "checks=block,net off=netd bench") && cp "$img" "$RUN/$v.system.img" ) &
+      [ -n "${vdirs[$n]}" ] || wait
+    done
+    deselect_variant
+    wait
+    for v in "${labels[@]}"; do [ -f "$RUN/$v.system.img" ] || { err "cannot build the system image of $v (log: $LOGS/bench/build.$v.system.log)"; exit 2; }; done
+    hold_host
+    [ $tuned = no ] && echo "bench: host not held still, so differences of a few percent mean nothing"
+    [ -n "${SILICA_BENCH_IMG:-}" ] || net_up || echo "bench: no network benchmarks (the tap and the host's echo need passwordless sudo and a spare processor)"
+    for ((i = 1; i <= runs; i++)); do
+      for ((j = 0; j < ${#labels[@]}; j++)); do
+        v=${labels[$(((i - 1 + j) % ${#labels[@]}))]}
+        boot "$v-system" "$RUN/$v.system.img" "$i" "$v" plain blk
+        boot "$v-confined" "$RUN/$v.system.img" "$i" "$v" iommu confined
+      done
     done
   fi
   for l in "${legend[@]}"; do echo "bench: $l"; done
