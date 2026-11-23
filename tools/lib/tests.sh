@@ -866,8 +866,16 @@ run_power() {
     serial=$(logfile "$suite" $name)
     "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device >"$serial.qemu" 2>&1
     rc=$?
-    if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'BOOT OK' && ! tr -d '\r' <"$serial" | grep -q '^ERROR'; then record pass "$suite" $name
-    else record fail "$suite" $name "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+    # Which condition failed, said: on 2026-11-23 CI failed power_reset with
+    # nothing to say (status 0, and the uploaded serial log passed every
+    # condition when read again).
+    local why=""
+    if [ $rc != 0 ]; then why="the machine did not turn itself off (exit status $rc)"
+    elif ! tr -d '\r' <"$serial" | grep -aqx 'BOOT OK'; then why="no BOOT OK line when the emulator had ended ($(wc -c <"$serial") bytes of serial; last: $(tr -d '\r' <"$serial" | grep -a . | tail -1 | cut -c1-80))"
+    elif tr -d '\r' <"$serial" | grep -aq '^ERROR'; then why="$(tr -d '\r' <"$serial" | grep -m1 -aE '^ERROR' | cut -c1-140)"
+    fi
+    if [ -z "$why" ]; then record pass "$suite" $name
+    else record fail "$suite" $name "$why (serial: $serial)"; fi
   done
 }
 
