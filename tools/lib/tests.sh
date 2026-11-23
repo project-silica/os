@@ -871,8 +871,8 @@ run_power() {
     # condition when read again).
     local why=""
     if [ $rc != 0 ]; then why="the machine did not turn itself off (exit status $rc)"
-    elif ! tr -d '\r' <"$serial" | grep -aqx 'BOOT OK'; then why="no BOOT OK line when the emulator had ended ($(wc -c <"$serial") bytes of serial; last: $(tr -d '\r' <"$serial" | grep -a . | tail -1 | cut -c1-80))"
-    elif tr -d '\r' <"$serial" | grep -aq '^ERROR'; then why="$(tr -d '\r' <"$serial" | grep -m1 -aE '^ERROR' | cut -c1-140)"
+    elif ! grep -aExq $'BOOT OK\r?' "$serial"; then why="no BOOT OK line when the emulator had ended ($(wc -c <"$serial") bytes of serial; last: $(tr -d '\r' <"$serial" | grep -a . | tail -1 | cut -c1-80))"
+    elif grep -aq '^ERROR' "$serial"; then why="$(grep -am1 '^ERROR' "$serial" | tr -d '\r' | cut -c1-140)"
     fi
     if [ -z "$why" ]; then record pass "$suite" $name
     else record fail "$suite" $name "$why (serial: $serial)"; fi
