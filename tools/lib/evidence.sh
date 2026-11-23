@@ -68,8 +68,17 @@ if [ -z "$EVID" ]; then
 fi
 FRESH=${SILICA_FRESH:-0}
 PLAN=0
-# Units at once: each is mostly one emulator of one to four processors.
-JOBS=${SILICA_JOBS:-$(( $(nproc 2>/dev/null || echo 4) / 3 ))}
+# Units at once: each is mostly one emulator of one to four processors, a
+# third of a processor each on a large host. Most of a unit is spent waiting
+# (a boot, a device, a build step), so a host of four to eight processors
+# still runs two: a hosted CI runner (4) ran its whole --fast tier one unit
+# at a time and past the job's 5 minutes. On 4 processors (taskset), the
+# kernel's --fast --fresh: 1 at once 71 s, 2 at once 47 s, 3 at once 44 s
+# (work 71 -> 74 s, guests contending). The units that judge a time run
+# alone whatever this is.
+_n=$(nproc 2>/dev/null || echo 4)
+JOBS=${SILICA_JOBS:-$(( _n / 3 > 2 ? _n / 3 : (_n >= 4 ? 2 : 1) ))}
+unset _n
 [ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
 
 declare -A TREE=() EV_MEMO=() EV_KEYS=() EV_GIT=() EV_OBJECTS=() EV_FN=()
