@@ -248,13 +248,16 @@ host_restore "$policy"   # left by a run that was killed
 can_sudo=no; sudo -n true 2>/dev/null && can_sudo=yes
 [ $accel = kvm ] && [ -n "$pin" ] && [ $tuned = no ] && [ $can_sudo = yes ] && tuned=yes
 held_host=0
-# Someone at the machine: a graphical session that is active and not idle.
+# Someone at the machine: a graphical session that is active, not idle and
+# not locked (KDE's lock screen leaves IdleHint at "no": nobody uses a
+# locked desktop).
 desk_in_use() {
   local s
   command -v loginctl >/dev/null || return 1
   for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
     [ "$(loginctl show-session "$s" -p Active --value 2>/dev/null)" = yes ] || continue
     case "$(loginctl show-session "$s" -p Type --value 2>/dev/null)" in wayland|x11) ;; *) continue ;; esac
+    [ "$(loginctl show-session "$s" -p LockedHint --value 2>/dev/null)" = yes ] && continue
     [ "$(loginctl show-session "$s" -p IdleHint --value 2>/dev/null)" = yes ] || return 0
   done
   return 1

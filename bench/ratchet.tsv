@@ -20,17 +20,17 @@ insns_null_syscall	113.4	value
 insns_ipc_roundtrip	881.5	value
 insns_ctx_switch	356.6	value
 insns_page_fault	2603.4	value
-blk_read4k_qd1	0.944466	vs-linux	4864	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-blk_read4k_qd1_p99	0.923255	vs-linux	5197	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-blk_read4k_qd32	0.832737	vs-linux	507213	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-blk_read4k_qd1_confined	0.60549	vs-linux	5559	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-blk_read4k_qd1_p99_confined	0.163425	vs-linux	5940	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-blk_read4k_qd32_confined	0.365771	vs-linux	395225	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-net_rtt	0.91626	vs-linux	9377	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd1	0.705243	vs-linux	3632	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd1_p99	0.731569	vs-linux	4118	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd32	0.783415	vs-linux	539146	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd1_confined	0.464873	vs-linux	4268	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd1_p99_confined	0.140232	vs-linux	5097	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+blk_read4k_qd32_confined	0.353985	vs-linux	408385	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+net_rtt	0.895153	vs-linux	9161	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 net_rtt_p99	0.723941	vs-linux	9876	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 net_tx	0.821895	vs-linux	2630337	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-net_rtt_confined	0.412314	vs-linux	9409	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-net_rtt_p99_confined	0.303071	vs-linux	9918	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+net_rtt_confined	0.400833	vs-linux	9147	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+net_rtt_p99_confined	0.300565	vs-linux	9836	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 net_tx_confined	0.0512922	vs-linux	2567233	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 sched_latency_p999	3400	value
 sched_latency_max	135083	value
