@@ -33,7 +33,9 @@ if [ -f "$elf" ]; then
   fast=$(sections "$elf" '^[.]text[.]fast')
   if [ "$fast" -gt 0 ]; then check "IPC fast path + context switch + syscall entry" "$fast" 32768 2 " bytes"
   else missing "IPC fast path section .text.fast" 2; fi
-  if nm "$elf" 2>/dev/null | grep -qE '__rust_(alloc|alloc_zeroed|realloc)$|__rg_alloc'; then
+  # The symbols read whole first: grep stops at a match, and nm writing on
+  # into the closed pipe would fail the pipeline (pipefail) and hide it.
+  if grep -qE '__rust_(alloc|alloc_zeroed|realloc)$|__rg_alloc' <<<"$(nm "$elf" 2>/dev/null)"; then
     bad "kernel heap: the x86_64 kernel links an allocator (ceiling 0)"
   fi
 else

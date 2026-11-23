@@ -292,7 +292,7 @@ run_system() {
   serial=$(logfile "$suite" boot)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
-  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'BOOT OK'; then
+  if [ $rc = 0 ] && serial_has "$serial" -x 'BOOT OK'; then
     # The x86_64 machine has an IOMMU: the system must not call itself unconfined there.
     if [ "$arch" = x86_64 ] && grep -aq '^devmgr: this machine cannot confine DMA' "$serial"; then
       record fail "$suite" boot "the device manager says it cannot confine DMA on a machine with an IOMMU (serial: $serial)"; return 1
@@ -622,12 +622,12 @@ run_recovery() {
   disk=(--disk "$scratch"); [ "${3:-}" != nvme ] || disk=(--nvme-disk "$scratch")
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-120}" "${disk[@]}" >"$serial.qemu" 2>&1
   rc=$?
-  if [ $rc != 0 ] || ! tr -d '\r' <"$serial" | grep -qx 'BLKLOAD OK'; then
+  if [ $rc != 0 ] || ! serial_has "$serial" -x 'BLKLOAD OK'; then
     record fail "$suite" "$test" "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; return 1
   fi
   # The driver killed is the scratch disk's.
   driver=virtio-blk; [ "${3:-}" != nvme ] || driver=nvme
-  if ! tr -d '\r' <"$serial" | grep -q "^devmgr: restarting $driver for "; then
+  if ! serial_has "$serial" "^devmgr: restarting $driver for "; then
     record fail "$suite" "$test" "blkload did not restart $driver (serial: $serial)"; return 1
   fi
   record pass "$suite" "$test"
@@ -729,8 +729,8 @@ run_shutdown() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
     --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
   rc=$?
-  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -q '^init: shutting down' && tr -d '\r' <"$serial" | grep -q '^init: devmgr stopped' \
-      && ! tr -d '\r' <"$serial" | grep -q '^ERROR'; then record pass "$suite" shutdown
+  if [ $rc = 0 ] && serial_has "$serial" '^init: shutting down' && serial_has "$serial" '^init: devmgr stopped' \
+      && ! serial_has "$serial" '^ERROR'; then record pass "$suite" shutdown
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
@@ -1001,7 +1001,7 @@ run_systest() {
       "ERROR: systest: "*": "*) name=${l#ERROR: systest: }; record fail "$suite" "${name%%: *}" "${name#*: } (serial: $serial)" ;;
     esac
   done < <(tr -d '\r' <"$serial")
-  if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -qx 'SYSTEST OK'; then
+  if [ $rc = 0 ] && serial_has "$serial" -x 'SYSTEST OK'; then
     [ "${#seen[@]}" = "$expected" ] && return 0
     record fail "$suite" systest "guest announced ${expected:-no} tests and reported ${#seen[@]} distinct passes (serial: $serial)"; return 1
   fi

@@ -23,6 +23,13 @@ WS=$(find_ws) || die "cannot find the workshop root above $TOOLS"
 export SILICA_WS=$WS
 MANIFEST=$TOOLS/../manifest.toml
 realdir() { (cd "$1" 2>/dev/null && pwd -P); }
+# serial_has <file> <grep options and pattern>: whether the log has a line
+# grep matches, carriage returns removed. No process writes to grep: grep
+# stops at its first match (with -q, and also when its output is /dev/null),
+# a writer piped into it then fails with a broken pipe, and under pipefail a
+# check whose line is there fails (seen on CI, where SIGPIPE is ignored and
+# uutils' tr writes a log in pieces).
+serial_has() { local text; text=$(tr -d '\r' <"$1" 2>/dev/null); shift; grep -aq "$@" <<<"$text"; }
 
 # Builds use the pinned toolchain and nothing from the developer's Cargo
 # configuration: a rustc wrapper found in ~/.cargo/config.toml (sccache hangs

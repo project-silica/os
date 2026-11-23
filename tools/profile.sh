@@ -95,10 +95,10 @@ if [ $kvm = 1 ]; then
   [ -n "$pid" ] || { wait "$q"; die "QEMU did not start (log: $out/qemu.log)"; }
   if [ $system = 1 ]; then
     # Only the depth-1 reads: from the check before them to their result.
-    until tr -d '\r' <"$out/serial" 2>/dev/null | grep -aq 'block_many_pages PASS'; do kill -0 "$q" 2>/dev/null || break; sleep 0.01; done
+    until serial_has "$out/serial" 'block_many_pages PASS'; do kill -0 "$q" 2>/dev/null || break; sleep 0.01; done
     sudo -n perf record -q -e cycles:G -c 10007 -p "$pid" -o "$out/perf.data" >/dev/null 2>&1 &
     p=$!
-    until tr -d '\r' <"$out/serial" 2>/dev/null | grep -aq '^BENCH blk_read4k_qd1 '; do kill -0 "$q" 2>/dev/null || break; sleep 0.01; done
+    until serial_has "$out/serial" '^BENCH blk_read4k_qd1 '; do kill -0 "$q" 2>/dev/null || break; sleep 0.01; done
     sudo -n kill -INT $(pgrep -P "$p" perf || echo "$p") 2>/dev/null; wait "$p" 2>/dev/null
     wait "$q"
   else
@@ -150,7 +150,7 @@ else
   done
 fi
 
-tr -d '\r' <"$out/serial" | grep -qx 'BENCH DONE' || die "the benchmark did not finish (serial: $out/serial)"
+serial_has "$out/serial" -x 'BENCH DONE' || die "the benchmark did not finish (serial: $out/serial)"
 slide=$(tr -d '\r' <"$out/serial" | sed -n 's/.*kernel slide \(0x[0-9a-f]*\).*/\1/p' | head -n 1)
 [ -n "$slide" ] || die "no kernel slide in the serial log"
 [ -s "$out/counts" ] || die "nothing was counted (see $out/qemu.log)"
