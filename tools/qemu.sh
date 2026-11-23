@@ -385,10 +385,18 @@ if [ "$rc" != 33 ]; then
     # first lines are often warnings and the reason it died comes last.
     local_stderr=""
     [ -s "$RUN/qemu.out" ] && cp "$RUN/qemu.out" "$serial.stderr" && local_stderr=" (stderr: $serial.stderr)"
-    # What asked it to stop (cause 6 is the guest's power-off, 7 a reset
-    # under -no-reboot, 4 a signal), and a watchdog's doing.
+    # What asked it to stop (cause 6 is the guest's power-off, 4 a signal),
+    # and a watchdog's doing.
     stopped=$( { grep -ahE '^(qemu_system_shutdown_request|watchdog_perform_action|tco_timer_expired)' "$RUN/qemu-reset.log" | head -3
       grep -ah '^runstate_set' "$RUN/qemu-reset.log" | tail -1; } 2>/dev/null | tr '\n' ' ')
+    # A reset under -no-reboot is not a shutdown request: QEMU sets the
+    # shutdown itself, traces nothing for it and resets no processor (so
+    # the reset log has no registers). Stopped with nothing asked and no
+    # signal, the guest reset itself: a triple fault, or a reset port.
+    if [[ "$stopped" == *"new_state 11 (shutdown)"* && "$stopped" != *qemu_system_shutdown_request* ]] &&
+      ! grep -aq 'terminating on signal' "$RUN/qemu.out" 2>/dev/null; then
+      stopped+="(nothing asked it to stop and no signal came: the guest reset itself, a triple fault or a reset port) "
+    fi
     why="qemu exited with status $rc, not through the debug-exit device: $(tail -c 200 "$RUN/qemu.out" | tr '\n' ' ')${stopped:+[$stopped] }${at:+(the machine reset; processors at $at; registers: $RUN/qemu-reset.log)}$local_stderr"
   fi
   echo "ERROR: qemu: $arch: $why (serial: $serial)"
