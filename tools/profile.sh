@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Profile of one kernel path (spec/TESTING.md section 4.1).
-#   profile.sh [--bench <name>] [--kvm] [--times <n>] [--per <n>] [--top <n>] [--lines]
+#   profile.sh [--bench <name>] [--kvm] [--system] [--times <n>] [--per <n>] [--top <n>] [--lines]
 #              [--kernel <dir>] [--count] [--out <dir>] [--image <disk image>]
 #
 # Builds the x86_64 image whose root task runs "bench=<name>[:<times>]"
@@ -23,6 +23,12 @@
 # Figures are each function's share of the guest-kernel samples, in percent.
 # Needs perf and passwordless sudo (guest samples are privileged).
 #
+# --system (implies --kvm): the system image's block check instead, sampled
+# only through its depth-1 reads (one
+# virtual processor for the driver and one for the client, the disk as
+# bench.sh's), so a block read's cycles are seen: the kernel's by function,
+# and user mode as one figure, `<user>` (programs share one address layout,
+# so an address names no program).
 # --kernel profiles another checkout of the kernel repository (an older
 # commit, to compare one path before and after a change).
 # --count (instructions only): print just "COUNT <n>", every kernel
@@ -37,10 +43,11 @@
 # Exit 0, or 2 on a setup error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
-mode=ipc per=22000 top=40 lines=0 kvm=0 times="" count=0 out=$OUTBASE/profile image=""
+mode=ipc per=22000 top=40 lines=0 kvm=0 times="" count=0 out=$OUTBASE/profile image="" system=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --bench) mode=$2; shift 2 ;;
+    --system) system=1; kvm=1; shift ;;
     --kvm) kvm=1; shift ;;
     --times) times=$2; shift 2 ;;
     --per) per=$2; shift 2 ;;
@@ -65,10 +72,18 @@ if [ $kvm = 1 ]; then
   command -v perf >/dev/null || die "perf is not installed"
   [ -w /dev/kvm ] || die "KVM is not available"
   sudo -n true 2>/dev/null || die "--kvm needs passwordless sudo for perf (guest samples are privileged)"
-  img=$(build_image x86_64 "$out/build.log" "bench=$mode:$times") || die "image build failed (log: $out/build.log)"
+  if [ $system = 1 ]; then
+    # The system image's block check alone, its disk as bench.sh's (no
+    # event indices), on two processors: the driver's and the client's.
+    img=$(build_system_image x86_64 "$out/build.log" "checks=block off=netd bench") || die "image build failed (log: $out/build.log)"
+    cpu=$(fastest_cpus 2)
+    "$TOOLS/qemu.sh" --image "$img" --serial "$out/serial" --timeout 600 --smp 2 ${cpu:+--pin "$cpu"} --disk-props event_idx=off >"$out/qemu.log" 2>&1 &
+  else
+    img=$(build_image x86_64 "$out/build.log" "bench=$mode:$times") || die "image build failed (log: $out/build.log)"
+    cpu=$(fastest_cpus 1)
+    "$TOOLS/qemu.sh" --image "$img" --serial "$out/serial" --timeout 600 --smp 1 ${cpu:+--pin "$cpu"} >"$out/qemu.log" 2>&1 &
+  fi
   elf=$(art_dir x86_64)/kernel.elf
-  cpu=$(fastest_cpus 1)
-  "$TOOLS/qemu.sh" --image "$img" --serial "$out/serial" --timeout 600 --smp 1 ${cpu:+--pin "$cpu"} >"$out/qemu.log" 2>&1 &
   q=$!
   # qemu.sh starts QEMU itself; find that process among its children.
   pid=""
@@ -78,12 +93,25 @@ if [ $kvm = 1 ]; then
     sleep 0.05
   done
   [ -n "$pid" ] || { wait "$q"; die "QEMU did not start (log: $out/qemu.log)"; }
-  sudo -n perf record -q -e cycles:G -c 10007 -p "$pid" -o "$out/perf.data" >/dev/null 2>&1
-  wait "$q"
+  if [ $system = 1 ]; then
+    # Only the depth-1 reads: from the check before them to their result.
+    until tr -d '\r' <"$out/serial" 2>/dev/null | grep -aq 'block_many_pages PASS'; do kill -0 "$q" 2>/dev/null || break; sleep 0.01; done
+    sudo -n perf record -q -e cycles:G -c 10007 -p "$pid" -o "$out/perf.data" >/dev/null 2>&1 &
+    p=$!
+    until tr -d '\r' <"$out/serial" 2>/dev/null | grep -aq '^BENCH blk_read4k_qd1 '; do kill -0 "$q" 2>/dev/null || break; sleep 0.01; done
+    sudo -n kill -INT $(pgrep -P "$p" perf || echo "$p") 2>/dev/null; wait "$p" 2>/dev/null
+    wait "$q"
+  else
+    sudo -n perf record -q -e cycles:G -c 10007 -p "$pid" -o "$out/perf.data" >/dev/null 2>&1
+    wait "$q"
+  fi
   # Samples taken in the guest kernel carry the guest's address; one line
-  # per sample, weight 1.
+  # per sample, weight 1. With --system the guest's user mode counts too, as
+  # one: programs share their layout, so an address names no program.
   sudo -n perf script -f -i "$out/perf.data" -D 2>/dev/null |
-    sed -n 's/.*PERF_RECORD_SAMPLE(IP, 0x[0-9a-f]*): [0-9/]*: 0x\(ffff[0-9a-f]\{12\}\) period.*/\1 1/p' >"$out/counts"
+    sed -n 's/.*PERF_RECORD_SAMPLE(IP, 0x[0-9a-f]*): [0-9/]*: 0x\([0-9a-f]*\) period.*/\1 1/p' |
+    awk -v sys=$system '/^ffff/ { print; next } sys { u++ } END { if (u) print "user", u }' >"$out/counts"
+  user=$(awk '$1 == "user" { print $2 }' "$out/counts"); sed -i '/^user /d' "$out/counts"
   sudo -n rm -f "$out/perf.data"
 else
   command -v pkg-config >/dev/null && pkg-config --exists glib-2.0 && [ -f /usr/include/qemu-plugin.h ] || die "the QEMU plugin header or glib is missing"
@@ -149,7 +177,7 @@ else
       gsub(/ /, "_", r); print r }' "$out/syms" - >"$out/funcs"
 fi
 if [ $kvm = 1 ]; then
-  paste -d' ' "$out/linked" "$out/funcs" | awk '{ c[$3] += $2; t += $2 } END { for (f in c) if (c[f] * 1000 >= t) printf "%.1f %s\n", 100 * c[f] / t, f; printf "TOTAL %d\n", t > "/dev/stderr" }' 2>"$out/total" |
+  { paste -d' ' "$out/linked" "$out/funcs"; [ -z "${user:-}" ] || echo "- $user <user>"; } | awk '{ c[$3] += $2; t += $2 } END { for (f in c) if (c[f] * 1000 >= t) printf "%.1f %s\n", 100 * c[f] / t, f; printf "TOTAL %d\n", t > "/dev/stderr" }' 2>"$out/total" |
     sort -rn | head -n "$top"
 else
   paste -d' ' "$out/linked" "$out/funcs" | awk -v p="$per" '{ c[$3] += $2 } END { for (f in c) { t += c[f]; if (c[f] >= p) printf "%d %s\n", c[f] / p, f } ; printf "TOTAL %d\n", t / p > "/dev/stderr" }' 2>"$out/total" |
