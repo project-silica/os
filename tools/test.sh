@@ -20,7 +20,8 @@
 #            and which of its inputs changed
 #   --guest  runs just the named x86_64 guest test (repeatable), always: a
 #            kernel test, or one of the system image's (SYSTEM_TESTS below,
-#            faults, svcload and systest)
+#            faults, svcload and systest; panic_backtrace, null_object_faults
+#            and panic_screen)
 # A check that judges a time (a scheduling latency, a recovery deadline) is
 # contaminated by anything running beside it, so those run first, one at a
 # time, before the rest run at once ("quiet": a test's line in the kernel's
@@ -242,6 +243,7 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
   done
   unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
   unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
+  unit any inos.x86_64/panic_screen "${GIN[@]}" -- run_panic_screen x86_64 inos.x86_64
   # Boots that cannot succeed say why.
   local e=inos.x86_64 boot='EFI/BOOT/BOOTX64.EFI=$L'
   boot_error() { local label=$1; shift; unit any "$e/$label" "${GIN[@]}" -- run_boot_error x86_64 $e "$label" "$@"; }
@@ -588,6 +590,19 @@ if [ "${#guests[@]}" -gt 0 ]; then
           elif [ "$guest" = systest ]; then
             [ "$PHASE" = rest ] && { gin x86_64 system; unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64; }
           else system_test "$guest"; fi
+          continue ;;
+      esac
+      # The kernel's panic tests, by name.
+      case "$guest" in
+        panic_backtrace | null_object_faults | panic_screen)
+          if [ "$PHASE" = rest ]; then
+            gin x86_64
+            case "$guest" in
+              panic_backtrace) unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64 ;;
+              null_object_faults) unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null ;;
+              panic_screen) unit any inos.x86_64/panic_screen "${GIN[@]}" -- run_panic_screen x86_64 inos.x86_64 ;;
+            esac
+          fi
           continue ;;
       esac
       opts=$(awk -v t="$guest" '$1 == t { $1 = ""; print; exit }' "$manifest" 2>/dev/null)

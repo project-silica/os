@@ -201,6 +201,56 @@ run_panic() {
   record pass "$suite" "$label"
 }
 
+# run_panic_screen <arch> <suite>: a kernel panic is on the screen (C30),
+# for a machine whose serial port nobody reads. The machine has a display
+# and no debug-exit device, so it stays up after panic=test; once the
+# panic's last line is on the serial port the host takes a screendump, and
+# the cells of the screen's second text row must be, pixel for pixel, the
+# font's glyphs of "PANIC: deliberate panic" in white on black.
+run_panic_screen() {
+  local arch=$1 suite=$2 log img serial rc shot bad
+  log=$(logfile "$suite" build.panic_screen)
+  img=$(build_image "$arch" "$log" "panic=test") || { record fail "$suite" panic_screen "image build failed (log: $log)"; return 1; }
+  serial=$(logfile "$suite" panic_screen)
+  shot=$(cd "$(dirname "$serial")" && pwd)/panic_screen.ppm
+  rm -f "$shot"
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 1 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device \
+    --screendump "$shot" --screendump-after 60 --on "^  kernel slide=screendump $shot" --until '^  kernel slide' >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc != 0 ] || [ ! -s "$shot" ]; then record fail "$suite" panic_screen "no screen taken after the panic (exit status $rc; serial: $serial)"; return 1; fi
+  bad=$(python3 -I - "$shot" "$(checkout_of kernel)/formats/src/font.rs" <<'PY'
+import re, sys
+shot, font = sys.argv[1], sys.argv[2]
+glyphs = {}
+for line in open(font):
+    m = re.match(r"\s*\[(.*)\], // (.)(.)?(.)?$", line.rstrip())
+    if m:
+        c = m.group(2) if m.group(2) not in "'\"" else m.group(3)
+        glyphs[c] = [int(x, 16) for x in m.group(1).split(",")]
+data = open(shot, "rb").read()
+parts = data.split(maxsplit=4)
+w, h = int(parts[1]), int(parts[2])
+px = parts[4]
+def pixel(x, y):
+    i = (y * w + x) * 3
+    return tuple(px[i:i + 3])
+text = "PANIC: deliberate panic"
+for n, c in enumerate(text):
+    g = glyphs.get(c)
+    if g is None:
+        print(f"the font has no glyph for {c!r}"); sys.exit()
+    for dy in range(16):
+        for dx in range(8):
+            on = g[dy] & (0x80 >> dx) != 0
+            want = (255, 255, 255) if on else (0, 0, 0)
+            got = pixel(n * 8 + dx, 16 + dy)
+            if got != want:
+                print(f"character {n} ({c!r}) of the panic line: pixel ({dx},{dy}) is {got}, not {want}"); sys.exit()
+PY
+)
+  if [ -n "$bad" ]; then record fail "$suite" panic_screen "$bad (screen: $shot)"; else record pass "$suite" panic_screen; fi
+}
+
 # run_boot_error <arch> <suite> <label> <expected text> <silica-image arguments...>
 # A boot that cannot succeed must say why on the serial port and leave with
 # the failure code. The image is built from the given ESP contents; $K, $L and
