@@ -31,6 +31,22 @@ realdir() { (cd "$1" 2>/dev/null && pwd -P); }
 # uutils' tr writes a log in pieces).
 serial_has() { local text; text=$(tr -d '\r' <"$1" 2>/dev/null); shift; grep -aq "$@" <<<"$text"; }
 
+# Every tool runs in a memory cgroup of its own, at most half the host's
+# memory and none of its swap, so that a test which allocates without end
+# (an unfinished TCP test reached 42 GB on 2026-11-23) is killed by the
+# kernel within its own group in seconds and fails as a check, instead of
+# swapping the host until systemd-oomd kills the whole terminal session it
+# was started from (it did, twice, that day). A --fast --fresh run peaks at
+# 2.5 GB. SILICA_MEMORY_MAX overrides the cap (systemd's syntax: 16G,
+# infinity). Where there is no user service manager (CI runners,
+# containers) the tool runs as it is.
+if [ -z "${SILICA_CONTAINED:-}" ] && command -v systemd-run >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
+  export SILICA_CONTAINED=1
+  _mem_max=${SILICA_MEMORY_MAX:-$(awk '/^MemTotal:/ { printf "%dK", $2 / 2 }' /proc/meminfo)}
+  exec systemd-run --user --scope --quiet --collect --unit="silica-$TOOL_NAME-$$" \
+    -p MemoryMax="$_mem_max" -p MemorySwapMax=0 -- "$0" "$@"
+fi
+
 # Builds use the pinned toolchain and nothing from the developer's Cargo
 # configuration: a rustc wrapper found in ~/.cargo/config.toml (sccache hangs
 # on -Zbuild-std's core; a wrapper's link arguments change the artifacts) is off.
