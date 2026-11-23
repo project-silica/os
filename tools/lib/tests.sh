@@ -544,6 +544,8 @@ run_partitions() {
 # found the controller as configured.
 run_faults() {
   local arch=$1 suite=$2 log img serial rc text token driver config fault restarts other want name say missing
+  local -a faults=(garbage stuck spurious missed reset)
+  if [ -n "${4:-}" ]; then faults=("$4"); fi
   local -a machine says
   # One driver's five boots when named (the drivers' run at once); the
   # network driver's are below.
@@ -555,7 +557,7 @@ run_faults() {
       nvme_machine "$config" "$(build_system_image "$arch" "$(logfile "$suite" build.faults_disk)")"
       machine=("${NVME_MACHINE[@]}") says=("${NVME_SAYS[@]}")
     fi
-    for fault in garbage stuck spurious missed reset; do
+    for fault in "${faults[@]}"; do
       name=fault_${token//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
       img=$(build_system_image "$arch" "$log" "checks=block inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
@@ -568,7 +570,7 @@ run_faults() {
       case $fault in garbage|stuck|reset) want=1 ;; *) want=0 ;; esac
       missing=""; for say in "${says[@]+"${says[@]}"}"; do [ -n "$missing" ] || grep -qE "$say" <<<"$text" || missing=$say; done
       if [ $rc != 0 ] || ! grep -qx 'BOOT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
-      elif ! grep -q "^inject: [A-Za-z]* committed\$" <<<"$text"; then record fail "$suite" "$name" "the fault was never committed (serial: $serial)"
+      elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
       elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
       elif [ -n "$missing" ]; then record fail "$suite" "$name" "the driver never said: $missing (serial: $serial)"
       elif [ "$(grep -c "^TEST $driver\.[a-z_]* PASS" <<<"$text")" != 5 ]; then record fail "$suite" "$name" "blkcheck did not pass every check on the disk (serial: $serial)"
@@ -583,7 +585,7 @@ run_faults() {
   # on (a frame sent, or a buffer offered for one to arrive in) decides
   # whether the driver ends or absorbs it.
   case " ${3:-virtio-net} " in *" virtio-net "*) ;; *) return 0 ;; esac
-  for fault in garbage stuck spurious missed reset; do
+  for fault in "${faults[@]}"; do
     name=fault_virtio_net_$fault
     log=$(logfile "$suite" "build.$name")
     img=$(build_system_image "$arch" "$log" "checks=netfault inject=virtio-net:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
@@ -594,7 +596,7 @@ run_faults() {
     restarts=$(grep -c "^devmgr: virtio-net for .* started again" <<<"$text")
     other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: virtio-net: " | head -1 | cut -c1-140)
     if [ $rc != 0 ] || ! grep -qx 'NETFAULT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
-    elif ! grep -q "^inject: [A-Za-z]* committed\$" <<<"$text"; then record fail "$suite" "$name" "the fault was never committed (serial: $serial)"
+    elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
     elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
     elif [ "$restarts" -gt 1 ]; then record fail "$suite" "$name" "the driver was started again $restarts times (serial: $serial)"
     else record pass "$suite" "$name"; fi

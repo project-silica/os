@@ -20,7 +20,7 @@
 #            and which of its inputs changed
 #   --guest  runs just the named x86_64 guest test (repeatable), always: a
 #            kernel test, or one of the system image's (SYSTEM_TESTS below,
-#            faults, svcload and systest; panic_backtrace, null_object_faults
+#            faults or a reported fault case, svcload and systest; panic_backtrace, null_object_faults
 #            and panic_screen)
 # A check that judges a time (a scheduling latency, a recovery deadline) is
 # contaminated by anything running beside it, so those run first, one at a
@@ -583,6 +583,18 @@ if [ "${#guests[@]}" -gt 0 ]; then
   manifest="$(checkout_of kernel)/tests/inos-x86_64.txt"
   for PHASE in quiet rest; do
     for guest in "${guests[@]}"; do
+      if [[ $guest == fault_* ]]; then
+        for driver in "${FAULT_DRIVERS[@]}"; do
+          prefix=fault_${driver//-/_}_
+          fault=${guest#"$prefix"}
+          case "$fault" in
+            garbage|stuck|spurious|missed|reset)
+              gin x86_64 system
+              unit any "system.x86_64/$guest" "${GIN[@]}" -- run_faults x86_64 system.x86_64 "$driver" "$fault"
+              continue 2 ;;
+          esac
+        done
+      fi
       # The system image's own tests, by name.
       case " ${SYSTEM_TESTS[*]} faults systest svcload " in
         *" $guest "*)
