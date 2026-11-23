@@ -20,7 +20,7 @@
 #            and which of its inputs changed
 #   --guest  runs just the named x86_64 guest test (repeatable), always: a
 #            kernel test, or one of the system image's (SYSTEM_TESTS below,
-#            faults and systest)
+#            faults, svcload and systest)
 # A check that judges a time (a scheduling latency, a recovery deadline) is
 # contaminated by anything running beside it, so those run first, one at a
 # time, before the rest run at once ("quiet": a test's line in the kernel's
@@ -60,7 +60,7 @@ evidence_init
 
 # The system image's guest tests (run_<name> in lib/tests.sh), and those of
 # them that judge a time.
-SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net power recovery svcload shutdown console nvme net net_recovery hotplug partitions
+SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net power recovery shutdown console nvme net net_recovery hotplug partitions
   recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces)
 QUIET_SYSTEM=" recovery recovery_nvme net_recovery svcload "
 # unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has
@@ -542,8 +542,10 @@ guests() {
   if { in_scope kernel || in_scope os || in_scope system; } && [ -n "$have_system" ]; then
     for t in "${SYSTEM_TESTS[@]}"; do system_test "$t"; done
     if [ "$tier" != fast ]; then
-      # One boot per fault and driver, so not in the fast tier.
+      # One boot per fault and driver, so not in the fast tier; nor the
+      # services restarted forty times under load, a quiet test of seconds.
       for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
+      system_test svcload
       unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64
       # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
       # "aarch64 boots to the same test"), emulated, so not in the fast tier.
@@ -580,7 +582,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
   for PHASE in quiet rest; do
     for guest in "${guests[@]}"; do
       # The system image's own tests, by name.
-      case " ${SYSTEM_TESTS[*]} faults systest " in
+      case " ${SYSTEM_TESTS[*]} faults systest svcload " in
         *" $guest "*)
           if [ "$guest" = faults ]; then for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
           elif [ "$guest" = systest ]; then
