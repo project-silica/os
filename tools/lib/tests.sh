@@ -587,8 +587,10 @@ run_recovery() {
 run_recovery_nvme() { run_recovery "$1" "$2" nvme; }
 
 # run_shutdown <arch> <suite>: the power button shuts the system down in
-# order. The system stays up (no checks); once it says BOOT OK the host
-# presses the button (QEMU's system_powerdown, an ACPI fixed event); the
+# order. The system stays up (no checks); once the device manager says the
+# button is armed the host presses it (QEMU's system_powerdown, an ACPI
+# fixed event; a press before that is cleared with the button's old status,
+# as a machine keeps the press that turned it on); the
 # device manager hears it and asks the service manager to shut down, which
 # stops the services last-started first and turns the machine off.
 run_shutdown() {
@@ -597,7 +599,7 @@ run_shutdown() {
   img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" shutdown "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" shutdown)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
-    --on '^BOOT OK$=system_powerdown' >"$serial.qemu" 2>&1
+    --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
   rc=$?
   if [ $rc = 0 ] && tr -d '\r' <"$serial" | grep -q '^init: shutting down' && tr -d '\r' <"$serial" | grep -q '^init: devmgr stopped' \
       && ! tr -d '\r' <"$serial" | grep -q '^ERROR'; then record pass "$suite" shutdown
@@ -717,11 +719,23 @@ run_power() {
 # with a hostile driver in place of the disk's (driver=...=virtio-rogue), on
 # the machine with an IOMMU. One result per check: the driver's own `TEST
 # <name> PASS` lines, and three it cannot see for itself, taken from who
-# enforces them: the kernel's line for each access the IOMMU refused, and
+# enforces them: the kernel's line for each access and each interrupt
+# message the IOMMU refused, and
 # the device manager's line for the fault on writing configuration space.
 # The system must have come up (BOOT OK) and nothing may have failed.
 run_rogue() {
   rogue_on "$1" "$2" "" 1af4:1042 '00:01\.0'
+}
+
+# run_rogue_tcg <arch> <suite>: the hostile disk driver again under QEMU's
+# emulated processor, where its device's forged interrupt message (one
+# naming the I/O APIC's remapping entry) takes the device's ordinary path
+# and the IOMMU must refuse it as from the wrong device: under KVM, QEMU's
+# virtio-pci asserts on that refusal instead (hw/pci/msix.c), so that run
+# does not try it.
+run_rogue_tcg() {
+  local SILICA_NO_KVM=1; export SILICA_NO_KVM
+  rogue_on "$1" "$2" _tcg 1af4:1042 '00:01\.0'
 }
 
 # run_rogue_net <arch> <suite>: the same hostile driver in the network
@@ -749,6 +763,8 @@ rogue_on() {
     else record fail "$suite" "$name$sfx" "$(grep -m1 -a "^ERROR: virtio-rogue: $name" <<<"$text" | cut -c1-160) (no PASS line; serial: $serial)"; fi
   done
   while IFS='|' read -r name want; do
+    # The forged remapped interrupt is sent under TCG only (run_rogue_tcg).
+    [ "$name" = rogue_interrupt_other_entry_refused ] && [ "$sfx" != _tcg ] && continue
     want=${want//%/$at}
     if grep -qE "$want" <<<"$text"; then record pass "$suite" "$name$sfx"
     else record fail "$suite" "$name$sfx" "the serial log has no line matching: $want (serial: $serial)"; fi
@@ -757,6 +773,7 @@ rogue_write_unmapped|^kernel: device % was refused a write at 0x100000
 rogue_read_unmapped|^kernel: device % was refused a read at 0x200000 
 rogue_log_ring|^logd: the log ring of devmgr/virtio-rogue@% made no sense; what it held is skipped$
 rogue_config_space|^devmgr: virtio-rogue for % touched memory it may not \(page fault\)
+rogue_interrupt_other_entry_refused|^kernel: device % was refused interrupt entry 9 \(IOMMU fault reason 0x26\)$
 CHECKS
   if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" "rogue_system_survives$sfx"; return 0; fi
   record fail "$suite" "rogue_system_survives$sfx" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"

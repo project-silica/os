@@ -60,7 +60,7 @@ evidence_init
 
 # The system image's guest tests (run_<name> in lib/tests.sh), and those of
 # them that judge a time.
-SYSTEM_TESTS=(system unconfined rogue rogue_net power recovery shutdown console nvme net net_recovery hotplug partitions
+SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net power recovery shutdown console nvme net net_recovery hotplug partitions
   recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces)
 QUIET_SYSTEM=" recovery recovery_nvme net_recovery "
 # unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has

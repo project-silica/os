@@ -129,7 +129,17 @@ case "$arch" in
     # host's file through io_uring (below; QEMU's default is a pool of
     # threads, a hand-off more per request).
     disk=(-object iothread,id=io0 -device "virtio-blk-pci,drive=boot,iothread=io0,disable-legacy=on${iommu:+,iommu_platform=on}${disk_props:+,$disk_props}")
-    [ -z "$iommu" ] || extra+=(-device intel-iommu,aw-bits=48)
+    # Under TCG the disk is served by the main loop: QEMU's IOMMU raises its
+    # fault interrupt from the thread that made the refused access, and an
+    # emulated processor's interrupt from an I/O thread trips QEMU's own
+    # assertion (system/cpus.c, cpu_interrupt: bql_locked()).
+    [ "${accel[1]}" = q35 ] && disk=(-device "virtio-blk-pci,drive=boot,disable-legacy=on${iommu:+,iommu_platform=on}${disk_props:+,$disk_props}")
+    # Interrupts are remapped too (a device raises only what its driver
+    # bound); under KVM that needs the I/O APIC in QEMU (a split irqchip).
+    if [ -n "$iommu" ]; then
+      extra+=(-device intel-iommu,aw-bits=48,intremap=on,eim=on)
+      [ "${accel[1]}" = q35,accel=kvm ] && accel[1]=q35,accel=kvm,kernel-irqchip=split
+    fi
     [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}")
     [ -z "$hotplug" ] || extra+=(-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off -device pcie-root-port,id=hp0,chassis=1,slot=1,mem-reserve=8M,pref64-reserve=64M
       -drive "format=raw,file=$hotplug,if=none,id=hot")
@@ -340,7 +350,10 @@ if [ "$rc" != 33 ]; then
     # A guest that reset itself (a triple fault): where each processor was
     # is the last register dump of the reset log.
     at=$(grep -a '^RIP=' "$RUN/qemu-reset.log" 2>/dev/null | tail -n "$smp" | awk '{ print $1 }' | sort | uniq -c | awk '{ printf "%s x%s ", $2, $1 }')
-    why="qemu exited with status $rc, not through the debug-exit device: $(head -c 200 "$RUN/qemu.out" | tr '\n' ' ')${at:+(the machine reset; processors at $at; registers: $RUN/qemu-reset.log)}"
+    # The emulator's own last words, whole, beside the serial log: its
+    # first lines are often warnings and the reason it died comes last.
+    [ -s "$RUN/qemu.out" ] && cp "$RUN/qemu.out" "$serial.stderr"
+    why="qemu exited with status $rc, not through the debug-exit device: $(tail -c 200 "$RUN/qemu.out" | tr '\n' ' ')${at:+(the machine reset; processors at $at; registers: $RUN/qemu-reset.log)}${at:-(stderr: $serial.stderr)}"
   fi
   echo "ERROR: qemu: $arch: $why (serial: $serial)"
   exit 1
