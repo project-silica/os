@@ -714,6 +714,43 @@ run_console_port() {
   else record pass "$suite" console_port; fi
 }
 
+# run_http <arch> <suite>: TCP for programs (M4's exit test, its first
+# part). The system runs httpd as a check (`checks=http`) on QEMU's
+# user-mode network with a host port forwarded to the guest's port 80;
+# once it listens, the host sends SILICA_HTTP_REQUESTS (default 10,000)
+# requests of 1 KiB to 1 MiB over 64 kept-alive connections at once
+# (lib/httpload.py), checking every body byte, then asks it to end. Every
+# answer must be right, and httpd must end in order (`init: httpd passed`).
+run_http() {
+  local arch=$1 suite=$2 log img serial rc port qemu load i
+  log=$(logfile "$suite" build.http)
+  img=$(build_system_image "$arch" "$log" "checks=http") || { record fail "$suite" http "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" http)
+  # A host port of this run's own (runs in parallel must not share one).
+  port=$((20000 + ($$ + RANDOM) % 20000))
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
+    --net "user:$port-80" >"$serial.qemu" 2>&1 &
+  qemu=$!
+  for i in $(seq 600); do
+    serial_has "$serial" '^httpd: listening on port 80' && break
+    kill -0 $qemu 2>/dev/null || break
+    sleep 0.1
+  done
+  if ! serial_has "$serial" '^httpd: listening on port 80'; then
+    kill $qemu 2>/dev/null; wait $qemu
+    record fail "$suite" http "httpd never listened: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"
+    return 1
+  fi
+  load=$(python3 -I "$TOOLS/lib/httpload.py" "$port" "${SILICA_HTTP_REQUESTS:-10000}" 64 2>&1); local lrc=$?
+  printf '%s\n' "$load" >"${serial%.log}.load"
+  wait $qemu; rc=$?
+  if [ $lrc != 0 ]; then record fail "$suite" http "$(head -2 <<<"$load" | tr '\n' ' ' | cut -c1-200) (serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^init: httpd passed'; then
+    record fail "$suite" http "httpd did not end in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC|httpd)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif serial_has "$serial" '^ERROR'; then record fail "$suite" http "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
+  else record pass "$suite" http; fi
+}
+
 # run_shutdown <arch> <suite>: the power button shuts the system down in
 # order. The system stays up (no checks); once the device manager says the
 # button is armed the host presses it (QEMU's system_powerdown, an ACPI

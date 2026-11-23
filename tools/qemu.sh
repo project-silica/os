@@ -4,7 +4,7 @@
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
-#           [--net user|tap:<interface>] [--hotplug <disk image>] [--emulator <host cpu list>] [--disk-props <k=v,...>]
+#           [--net user[:<host port>-<guest port>,...]|tap:<interface>] [--hotplug <disk image>] [--emulator <host cpu list>] [--disk-props <k=v,...>]
 #           [--nvme-disk <disk image>] [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 #           [--console-port <file>] [--port-type '<extended regex>=<text>']...
@@ -21,6 +21,8 @@
 # of the image for a device to use (--nvme-ns, --device, --on device_add).
 # --net adds a virtio network device on QEMU's user-mode network (the guest is 10.0.2.15, the gateway 10.0.2.2,
 # which answers ARP and ping), or on the host's tap interface (vhost-net).
+# user:<host port>-<guest port>[,...] also forwards those TCP ports of the host's loopback to the guest
+# (a test's client reaches a server in the guest).
 # --hotplug gives the machine an empty PCI Express root port with native
 # hot-plug (id hp0; QEMU's ACPI hot-plug off) and a disk image ready to be
 # hot-added there: `--on '<regex>=device_add virtio-blk-pci,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on'`.
@@ -59,6 +61,18 @@
 # the guest wrote the success code to the debug-exit device, 1 for any other
 # exit code, 124 on timeout, 2 on a usage or setup error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
+# The hostfwd options of --net user:<host port>-<guest port>,...: the host's
+# loopback only, never every address of the host.
+user_forwards() {
+  local spec=${1#user} f out=""
+  spec=${spec#:}
+  [ -n "$spec" ] || return 0
+  for f in ${spec//,/ }; do
+    [[ "$f" =~ ^[0-9]+-[0-9]+$ ]] || die "--net user: a forward is <host port>-<guest port>, not $f"
+    out+=",hostfwd=tcp:127.0.0.1:${f%-*}-:${f#*-}"
+  done
+  printf '%s' "$out"
+}
 
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
@@ -158,9 +172,9 @@ case "$arch" in
       # The network device does its DMA through the platform's translation
       # (iommu_platform), as every real PCI device does, on both machines:
       # Linux's AF_XDP zero-copy, its fastest raw path, needs it.
-      user) extra+=(-netdev user,id=net0 -device virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on) ;;
+      user|user:*) extra+=(-netdev "user,id=net0$(user_forwards "$net")" -device virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on) ;;
       tap:*) extra+=(-netdev "tap,id=net0,ifname=${net#tap:},script=no,downscript=no,vhost=on" -device virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on) ;;
-      *) die "--net: user or tap:<interface>, not $net" ;;
+      *) die "--net: user[:<host port>-<guest port>,...] or tap:<interface>, not $net" ;;
     esac ;;
   aarch64)
     bin=qemu-system-aarch64
