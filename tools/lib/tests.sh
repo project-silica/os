@@ -586,6 +586,36 @@ run_recovery() {
 }
 run_recovery_nvme() { run_recovery "$1" "$2" nvme; }
 
+# run_svcload <arch> <suite>: services killed under their clients' load
+# (spec/MILESTONES.md M3). svcload restarts partitions, logd, console and
+# shell ten times each, 200 ms apart, while it and the shell use them, and
+# fails if a recovery took over 250 ms, a read of a partition failed, a
+# service failed, or the service manager has less memory to give out after
+# than before. Besides its SVCLOAD OK: every numbered line it wrote while
+# the log service restarted reached the console, in order and none missing,
+# and the shell's banner is there once per start of it (the first and ten).
+run_svcload() {
+  local arch=$1 suite=$2 log img serial rc text n want
+  log=$(logfile "$suite" build.svcload)
+  img=$(build_system_image "$arch" "$log" "checks=services") || { record fail "$suite" svcload "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" svcload)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if [ $rc = 0 ] && grep -qx 'SVCLOAD OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" svcload
+  else record fail "$suite" svcload "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+  want=$(sed -n 's/^svcload: \([0-9]*\) numbered lines written$/\1/p' <<<"$text")
+  n=$(grep -cE '^svcload: line [0-9]+$' <<<"$text")
+  if [ -n "$want" ] && [ "$n" = "$want" ] && grep -oE '^svcload: line [0-9]+$' <<<"$text" | awk '{ if ($3 != NR - 1) exit 1 }'; then
+    record pass "$suite" svcload_no_line_lost
+  else record fail "$suite" svcload_no_line_lost "${n} numbered lines reached the console, ${want:-an unknown number} were written (serial: $serial)"; fi
+  # (After a prompt, on its line: the console's text reaches the serial line
+  # through the log, which ends another writer's unfinished line first.)
+  n=$(grep -c 'Silica\. Type help for the commands\.$' <<<"$text")
+  if [ "$n" = 11 ]; then record pass "$suite" svcload_shell_restarts
+  else record fail "$suite" svcload_shell_restarts "the shell's banner is there $n times, not 11 (serial: $serial)"; fi
+}
+
 # run_shutdown <arch> <suite>: the power button shuts the system down in
 # order. The system stays up (no checks); once the device manager says the
 # button is armed the host presses it (QEMU's system_powerdown, an ACPI
