@@ -638,6 +638,29 @@ run_entropy() {
   else record fail "$suite" entropy "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_console_port <arch> <suite>: the shell through a virtual machine's
+# console port (virtio-console, port 0, behind the IOMMU). The host types
+# into the port once the console says it uses it (`echo through the port`,
+# then `shutdown`); what the port sends back must hold the shell's prompt and
+# the echo, line ends as a terminal wants them, and the machine must turn
+# itself off when told to there.
+run_console_port() {
+  local arch=$1 suite=$2 log img serial rc port out
+  log=$(logfile "$suite" build.console_port)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" console_port "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" console_port)
+  port=${serial%.log}.port
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --console-port "$port" \
+    --port-type '^console: .* and the console port=echo through the port\rshutdown\r' >"$serial.qemu" 2>&1
+  rc=$?
+  out=$(tr -d '\0' <"$port")
+  if [ $rc != 0 ]; then record fail "$suite" console_port "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! grep -q '^virtio-console: port 0, DMA confined by the IOMMU' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "the driver did not say it runs confined (serial: $serial)"
+  elif ! grep -q $'silica> \r\?$\|silica> ' <<<"$out" || ! grep -q $'^through the port\r$' <<<"$out"; then record fail "$suite" console_port "the port did not carry the prompt and the echo (port output: $port)"
+  elif ! grep -q '^init: shutting down' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "shutdown typed at the port did not shut down (serial: $serial)"
+  else record pass "$suite" console_port; fi
+}
+
 # run_shutdown <arch> <suite>: the power button shuts the system down in
 # order. The system stays up (no checks); once the device manager says the
 # button is armed the host presses it (QEMU's system_powerdown, an ACPI
