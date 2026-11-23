@@ -201,6 +201,56 @@ run_panic() {
   record pass "$suite" "$label"
 }
 
+# run_panic_screen <arch> <suite>: a kernel panic is on the screen (C30),
+# for a machine whose serial port nobody reads. The machine has a display
+# and no debug-exit device, so it stays up after panic=test; once the
+# panic's last line is on the serial port the host takes a screendump, and
+# the cells of the screen's second text row must be, pixel for pixel, the
+# font's glyphs of "PANIC: deliberate panic" in white on black.
+run_panic_screen() {
+  local arch=$1 suite=$2 log img serial rc shot bad
+  log=$(logfile "$suite" build.panic_screen)
+  img=$(build_image "$arch" "$log" "panic=test") || { record fail "$suite" panic_screen "image build failed (log: $log)"; return 1; }
+  serial=$(logfile "$suite" panic_screen)
+  shot=$(cd "$(dirname "$serial")" && pwd)/panic_screen.ppm
+  rm -f "$shot"
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 1 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device \
+    --screendump "$shot" --screendump-after 60 --on "^  kernel slide=screendump $shot" --until '^  kernel slide' >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc != 0 ] || [ ! -s "$shot" ]; then record fail "$suite" panic_screen "no screen taken after the panic (exit status $rc; serial: $serial)"; return 1; fi
+  bad=$(python3 -I - "$shot" "$(checkout_of kernel)/formats/src/font.rs" <<'PY'
+import re, sys
+shot, font = sys.argv[1], sys.argv[2]
+glyphs = {}
+for line in open(font):
+    m = re.match(r"\s*\[(.*)\], // (.)(.)?(.)?$", line.rstrip())
+    if m:
+        c = m.group(2) if m.group(2) not in "'\"" else m.group(3)
+        glyphs[c] = [int(x, 16) for x in m.group(1).split(",")]
+data = open(shot, "rb").read()
+parts = data.split(maxsplit=4)
+w, h = int(parts[1]), int(parts[2])
+px = parts[4]
+def pixel(x, y):
+    i = (y * w + x) * 3
+    return tuple(px[i:i + 3])
+text = "PANIC: deliberate panic"
+for n, c in enumerate(text):
+    g = glyphs.get(c)
+    if g is None:
+        print(f"the font has no glyph for {c!r}"); sys.exit()
+    for dy in range(16):
+        for dx in range(8):
+            on = g[dy] & (0x80 >> dx) != 0
+            want = (255, 255, 255) if on else (0, 0, 0)
+            got = pixel(n * 8 + dx, 16 + dy)
+            if got != want:
+                print(f"character {n} ({c!r}) of the panic line: pixel ({dx},{dy}) is {got}, not {want}"); sys.exit()
+PY
+)
+  if [ -n "$bad" ]; then record fail "$suite" panic_screen "$bad (screen: $shot)"; else record pass "$suite" panic_screen; fi
+}
+
 # run_boot_error <arch> <suite> <label> <expected text> <silica-image arguments...>
 # A boot that cannot succeed must say why on the serial port and leave with
 # the failure code. The image is built from the given ESP contents; $K, $L and
@@ -494,6 +544,8 @@ run_partitions() {
 # found the controller as configured.
 run_faults() {
   local arch=$1 suite=$2 log img serial rc text token driver config fault restarts other want name say missing
+  local -a faults=(garbage stuck spurious missed reset)
+  if [ -n "${4:-}" ]; then faults=("$4"); fi
   local -a machine says
   # One driver's five boots when named (the drivers' run at once); the
   # network driver's are below.
@@ -505,7 +557,7 @@ run_faults() {
       nvme_machine "$config" "$(build_system_image "$arch" "$(logfile "$suite" build.faults_disk)")"
       machine=("${NVME_MACHINE[@]}") says=("${NVME_SAYS[@]}")
     fi
-    for fault in garbage stuck spurious missed reset; do
+    for fault in "${faults[@]}"; do
       name=fault_${token//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
       img=$(build_system_image "$arch" "$log" "checks=block inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
@@ -518,7 +570,7 @@ run_faults() {
       case $fault in garbage|stuck|reset) want=1 ;; *) want=0 ;; esac
       missing=""; for say in "${says[@]+"${says[@]}"}"; do [ -n "$missing" ] || grep -qE "$say" <<<"$text" || missing=$say; done
       if [ $rc != 0 ] || ! grep -qx 'BOOT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
-      elif ! grep -q "^inject: [A-Za-z]* committed\$" <<<"$text"; then record fail "$suite" "$name" "the fault was never committed (serial: $serial)"
+      elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
       elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
       elif [ -n "$missing" ]; then record fail "$suite" "$name" "the driver never said: $missing (serial: $serial)"
       elif [ "$(grep -c "^TEST $driver\.[a-z_]* PASS" <<<"$text")" != 5 ]; then record fail "$suite" "$name" "blkcheck did not pass every check on the disk (serial: $serial)"
@@ -533,7 +585,7 @@ run_faults() {
   # on (a frame sent, or a buffer offered for one to arrive in) decides
   # whether the driver ends or absorbs it.
   case " ${3:-virtio-net} " in *" virtio-net "*) ;; *) return 0 ;; esac
-  for fault in garbage stuck spurious missed reset; do
+  for fault in "${faults[@]}"; do
     name=fault_virtio_net_$fault
     log=$(logfile "$suite" "build.$name")
     img=$(build_system_image "$arch" "$log" "checks=netfault inject=virtio-net:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
@@ -544,7 +596,7 @@ run_faults() {
     restarts=$(grep -c "^devmgr: virtio-net for .* started again" <<<"$text")
     other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: virtio-net: " | head -1 | cut -c1-140)
     if [ $rc != 0 ] || ! grep -qx 'NETFAULT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
-    elif ! grep -q "^inject: [A-Za-z]* committed\$" <<<"$text"; then record fail "$suite" "$name" "the fault was never committed (serial: $serial)"
+    elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
     elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
     elif [ "$restarts" -gt 1 ]; then record fail "$suite" "$name" "the driver was started again $restarts times (serial: $serial)"
     else record pass "$suite" "$name"; fi
@@ -614,6 +666,52 @@ run_svcload() {
   n=$(grep -c 'Silica\. Type help for the commands\.$' <<<"$text")
   if [ "$n" = 11 ]; then record pass "$suite" svcload_shell_restarts
   else record fail "$suite" svcload_shell_restarts "the shell's banner is there $n times, not 11 (serial: $serial)"; fi
+}
+
+# run_entropy <arch> <suite>: the entropy service (D14) on a machine with a
+# virtio entropy device behind the IOMMU (virtio-rng, its driver): the
+# service mixed the device in, and entropycheck's checks pass (answers not
+# lopsided, never repeated, not across a restart of the service either).
+run_entropy() {
+  local arch=$1 suite=$2 log img serial rc text name
+  log=$(logfile "$suite" build.entropy)
+  img=$(build_system_image "$arch" "$log" "checks=entropy") || { record fail "$suite" entropy "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" entropy)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --device virtio-rng-pci,disable-legacy=on,iommu_platform=on >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing; do
+    if grep -qx "TEST entropy.$name PASS" <<<"$text"; then record pass "$suite" "entropy_$name"
+    else record fail "$suite" "entropy_$name" "$(grep -m1 -a '^ERROR' <<<"$text" | cut -c1-140) (no PASS line; serial: $serial)"; fi
+  done
+  if [ $rc = 0 ] && grep -qx 'ENTROPY OK' <<<"$text" && grep -q '^virtio-rng: an entropy source, DMA confined by the IOMMU$' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then
+    record pass "$suite" entropy
+  else record fail "$suite" entropy "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+}
+
+# run_console_port <arch> <suite>: the shell through a virtual machine's
+# console port (virtio-console, port 0, behind the IOMMU). The host types
+# into the port once the console says it uses it (`echo through the port`,
+# then `shutdown`); what the port sends back must hold the shell's prompt and
+# the echo, line ends as a terminal wants them, and the machine must turn
+# itself off when told to there.
+run_console_port() {
+  local arch=$1 suite=$2 log img serial rc port out
+  log=$(logfile "$suite" build.console_port)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" console_port "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" console_port)
+  port=${serial%.log}.port
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --console-port "$port" \
+    --port-type '^console: .* and the console port=echo through the port\rshu' \
+    --port-type '^through the port$=tdown\r' >"$serial.qemu" 2>&1
+  rc=$?
+  out=$(tr -d '\0' <"$port")
+  if [ $rc != 0 ]; then record fail "$suite" console_port "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! grep -q '^virtio-console: port 0, DMA confined by the IOMMU' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "the driver did not say it runs confined (serial: $serial)"
+  elif [[ "$out" != *$'silica> echo through the port\r\nthrough the port\r\nsilica> shutdown\r\n'* ]]; then record fail "$suite" console_port "queued input did not follow its prompt (port output: $port)"
+  elif ! grep -q '^init: shutting down' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "shutdown typed at the port did not shut down (serial: $serial)"
+  else record pass "$suite" console_port; fi
 }
 
 # run_shutdown <arch> <suite>: the power button shuts the system down in

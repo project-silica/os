@@ -7,6 +7,7 @@
 #           [--net user|tap:<interface>] [--hotplug <disk image>] [--emulator <host cpu list>] [--disk-props <k=v,...>]
 #           [--nvme-disk <disk image>] [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
+#           [--console-port <file>] [--port-type '<extended regex>=<text>']...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
@@ -28,6 +29,11 @@
 # --no-exit-device leaves out the debug-exit device (x86_64): the guest
 # must turn the machine off itself (ACPI), and exit status 0 then means the
 # emulator stopped because the guest turned it off or reset it.
+# --console-port gives the machine a virtio console (port 0 of a
+# virtio-serial device, behind the IOMMU): what the guest sends there is
+# written to <file>. --port-type types <text> there (printf escapes: \r)
+# once the serial line matches the regex: the firmware reads the port too,
+# and would swallow what was typed before the system listens (x86_64).
 # --on sends a command to QEMU's monitor (system_powerdown: the power
 # button) the first time a serial line matches the expression. --type types
 # the text on the keyboard the same way, a key at a time ('\n' is Enter;
@@ -56,10 +62,10 @@
 
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
-disk_props="" emulator="" hotplug="" net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=()
+cport="" disk_props="" emulator="" hotplug="" net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--hotplug|--emulator|--disk-props)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--hotplug|--emulator|--disk-props|--console-port|--port-type)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -81,6 +87,8 @@ while [ $# -gt 0 ]; do
     --nvme) nvme=$2; shift 2 ;;
     --net) net=$2; shift 2 ;;
     --hotplug) hotplug=$2; shift 2 ;;
+    --console-port) cport=$2; shift 2 ;;
+    --port-type) port_typing+=("$2"); shift 2 ;;
     --emulator) emulator=$2; shift 2 ;;
     --disk-props) disk_props=$2; shift 2 ;;
     --disk) disk2=$2; shift 2 ;;
@@ -140,6 +148,8 @@ case "$arch" in
       extra+=(-device intel-iommu,aw-bits=48,intremap=on,eim=on)
       [ "${accel[1]}" = q35,accel=kvm ] && accel[1]=q35,accel=kvm,kernel-irqchip=split
     fi
+    [ -z "$cport" ] || extra+=(-chardev "pipe,id=cport,path=$RUN/cport"
+      -device "virtio-serial-pci,disable-legacy=on${iommu:+,iommu_platform=on}" -device virtconsole,chardev=cport,nr=0)
     [ -z "$disk2" ] || extra+=(-drive "format=raw,file=$disk2,if=none,id=disk2" -device "virtio-blk-pci,drive=disk2,disable-legacy=on${iommu:+,iommu_platform=on}")
     [ -z "$hotplug" ] || extra+=(-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off -device pcie-root-port,id=hp0,chassis=1,slot=1,mem-reserve=8M,pref64-reserve=64M
       -drive "format=raw,file=$hotplug,if=none,id=hot")
@@ -199,6 +209,15 @@ if [ "$arch" = aarch64 ]; then
 fi
 # Why the emulator stops, in the same log: each shutdown request with its
 # cause, each change of run state, and a watchdog acting.
+# The console port: two pipes QEMU holds open (what is typed in, what the
+# guest sends out), the second copied to the caller's file as it comes.
+cport_copy=""
+if [ -n "$cport" ]; then
+  mkfifo "$RUN/cport.in" "$RUN/cport.out" || die "cannot make the console port's pipes"
+  : >"$cport"
+  { cat <"$RUN/cport.out" >>"$cport"; } &
+  cport_copy=$!
+fi
 why_stopped=(-trace enable=qemu_system_shutdown_request -trace enable=runstate_set -trace enable=watchdog_perform_action -trace enable=tco_timer_expired)
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
   cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp" -m "$mem" \
@@ -246,7 +265,8 @@ if [ -n "$shot" ]; then
     printf 'screendump %s\n' "$shot" | socat -T5 - "UNIX-CONNECT:$mon" >/dev/null 2>&1 ) >/dev/null 2>&1 &
   shotpid=$!
 fi
-stop_shot() { # a screendump still pending must not outlive the run
+stop_shot() { # a screendump still pending, or the console port's copy, must not outlive the run
+  [ -z "$cport_copy" ] || { sleep 0.2; kill "$cport_copy" 2>/dev/null; wait "$cport_copy" 2>/dev/null; cport_copy=""; }
   [ -n "$shotpid" ] || return 0
   pkill -P "$shotpid" 2>/dev/null; kill "$shotpid" 2>/dev/null; wait "$shotpid" 2>/dev/null; return 0
 }
@@ -315,6 +335,13 @@ while kill -0 "$pid" 2>/dev/null; do
       unset "on[$k]"
     fi
   done
+  for k in "${!port_typing[@]}"; do
+    rule=${port_typing[$k]}
+    if tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "${rule%%=*}"; then
+      unset "port_typing[$k]"
+      printf '%b' "${rule#*=}" >"$RUN/cport.in"
+    fi
+  done
   for k in "${!typing[@]}"; do
     rule=${typing[$k]}
     if tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "${rule%%=*}"; then
@@ -341,6 +368,7 @@ while kill -0 "$pid" 2>/dev/null; do
   sleep 0.1; waited=$((waited + 1))
 done
 wait "$pid"; rc=$?
+stop_shot
 [ -z "$stamper" ] || wait "$stamper" 2>/dev/null
 stop_shot
 # Without the exit device, the guest turned the machine off (or reset it,
