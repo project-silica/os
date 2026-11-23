@@ -330,21 +330,21 @@ while kill -0 "$pid" 2>/dev/null; do
   fi
   for k in "${!on[@]}"; do
     rule=${on[$k]}
-    if tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "${rule%%=*}"; then
+    if serial_has "$serial" -E "${rule%%=*}"; then
       (cd "$RUN" && printf '%s\n' "${rule#*=}" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon") >/dev/null 2>&1
       unset "on[$k]"
     fi
   done
   for k in "${!port_typing[@]}"; do
     rule=${port_typing[$k]}
-    if tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "${rule%%=*}"; then
+    if serial_has "$serial" -E "${rule%%=*}"; then
       unset "port_typing[$k]"
       printf '%b' "${rule#*=}" >"$RUN/cport.in"
     fi
   done
   for k in "${!typing[@]}"; do
     rule=${typing[$k]}
-    if tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "${rule%%=*}"; then
+    if serial_has "$serial" -E "${rule%%=*}"; then
       unset "typing[$k]"
       text=${rule#*=} enter=""
       [ "${text: -2}" = '\n' ] && { text=${text%\\n}; enter=1; }
@@ -360,7 +360,7 @@ while kill -0 "$pid" 2>/dev/null; do
         [ -z "$enter" ] || printf 'sendkey ret 30\n' | timeout 5 socat -t1 - "UNIX-CONNECT:$mon" >/dev/null 2>&1 ) &
     fi
   done
-  if [ -n "$until" ] && tr -d '\r' <"$serial" 2>/dev/null | grep -aqE "$until"; then
+  if [ -n "$until" ] && serial_has "$serial" -E "$until"; then
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; stop_shot
     [ -z "$stamper" ] || wait "$stamper" 2>/dev/null
     exit 0

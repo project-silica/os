@@ -117,10 +117,12 @@ do_check() {
     grep -Eq -- '--profile[ \t]+minimal' <<<"$inst" || bad "rustup toolchain install does not use --profile minimal"
   fi
 
-  # hygiene
-  logical | grep -Eq '^[ \t]*RUN\b.*\b(curl|wget)\b.*\|[ \t]*(sudo[ \t]+)?(ba|z)?sh\b' && bad "RUN pipes a download into a shell"
-  logical | grep -Eq '^[ \t]*COPY\b' && bad "COPY copies sources into the image (the image holds tools only)"
-  logical | grep -Eq '^[ \t]*ADD\b' && bad "ADD copies sources into the image (the image holds tools only)"
+  # hygiene (the rules read whole first: a writer piped into grep -q fails
+  # under pipefail once grep has its match)
+  local rules; rules=$(logical)
+  grep -Eq '^[ \t]*RUN\b.*\b(curl|wget)\b.*\|[ \t]*(sudo[ \t]+)?(ba|z)?sh\b' <<<"$rules" && bad "RUN pipes a download into a shell"
+  grep -Eq '^[ \t]*COPY\b' <<<"$rules" && bad "COPY copies sources into the image (the image holds tools only)"
+  grep -Eq '^[ \t]*ADD\b' <<<"$rules" && bad "ADD copies sources into the image (the image holds tools only)"
 
   if [ $fails = 0 ]; then echo "TOOLCHAIN-IMAGE: OK"; return 0; fi
   return 1

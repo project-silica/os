@@ -338,7 +338,7 @@ boot() {
     --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} ${pin:+${emu:+--emulator "$emu"}} --disk-props "$disk_props" "${margs[@]+"${margs[@]}"}" "${netargs[@]+"${netargs[@]}"}" ${SILICA_BENCH_MACHINE:-} >"$qlog" 2>&1
   rc=$?
   if [ $rc = 2 ]; then err "$sys: qemu.sh setup error: $(head -c 200 "$qlog" | tr '\n' ' ')"; quit 2; fi
-  if ! tr -d '\r' <"$ser" 2>/dev/null | grep -qx 'BENCH DONE'; then
+  if ! serial_has "$ser" -x 'BENCH DONE'; then
     echo "ERROR: bench::$sys: run $i did not finish (qemu.sh exit $rc, no BENCH DONE; serial $ser)"
     quit 1
   fi
