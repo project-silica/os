@@ -435,7 +435,7 @@ if [ -z "$compare$sweep" ]; then
     # The device benchmarks run in the system image: the device manager, the
     # drivers confined by the IOMMU, and blkcheck and netcheck as the clients.
     log=$LOGS/bench/build.silica-system.log
-    silica_sys=$(build_system_image x86_64 "$log" "checks=spawn,block,net bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; quit 2; }
+    silica_sys=$(build_system_image x86_64 "$log" "checks=spawn,block,net off=netd bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; quit 2; }
   fi
   if [ $do_linux = 1 ]; then
     log=$LOGS/bench/build.linux.log
