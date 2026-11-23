@@ -823,6 +823,34 @@ PY
   else record fail "$suite" console "$bad (serial: $serial)"; fi
 }
 
+# run_typeahead <arch> <suite>: keys typed before the console has attached
+# to the keyboard are not lost. The command is typed the moment the
+# keyboard's driver says it is up, before the console can have connected
+# (in CI the first key of a command typed then was lost, 2026-11-23: the
+# driver dropped keys while it had no client); the shell must run it whole.
+# The window is the guest's time from the driver's start to the console's
+# connection against the harness's first key (it polls the serial log and
+# types through the monitor): on a slow host, as the CI runner where it
+# was seen, the keys land in it; on the reference host the console is
+# there first, under KVM and under emulation alike, and the old driver
+# passed 7 of 7 here. It is not a deterministic guard there.
+run_typeahead() {
+  local arch=$1 suite=$2 log img serial rc text bad=""
+  log=$(logfile "$suite" build.typeahead)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" typeahead "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" typeahead)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --no-exit-device \
+    --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --type '^virtio-input: =echo early\n' --type '^early$=shutdown\n' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  [ $rc = 0 ] || bad="the machine was not turned off (exit status $rc): $(grep -m1 '^ERROR' "$serial.qemu" | cut -c1-140)"
+  [ -n "$bad" ] || grep -qx 'early' <<<"$text" || bad="the command typed before the console attached did not run whole: $(grep -E 'silica> .*(echo|cho|ho|early)' <<<"$text" | head -2 | tr '\n' '|')"
+  [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
+  if [ -z "$bad" ]; then record pass "$suite" typeahead
+  else record fail "$suite" typeahead "$bad (serial: $serial)"; fi
+}
+
 # run_power <arch> <suite>: the machine is turned off, and reset, by the
 # system itself. The system image boots without the harness's exit device,
 # so nothing ends the emulator but the guest turning the machine off (ACPI
