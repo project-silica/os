@@ -616,6 +616,28 @@ run_svcload() {
   else record fail "$suite" svcload_shell_restarts "the shell's banner is there $n times, not 11 (serial: $serial)"; fi
 }
 
+# run_entropy <arch> <suite>: the entropy service (D14) on a machine with a
+# virtio entropy device behind the IOMMU (virtio-rng, its driver): the
+# service mixed the device in, and entropycheck's checks pass (answers not
+# lopsided, never repeated, not across a restart of the service either).
+run_entropy() {
+  local arch=$1 suite=$2 log img serial rc text name
+  log=$(logfile "$suite" build.entropy)
+  img=$(build_system_image "$arch" "$log" "checks=entropy") || { record fail "$suite" entropy "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" entropy)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --device virtio-rng-pci,disable-legacy=on,iommu_platform=on >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing; do
+    if grep -qx "TEST entropy.$name PASS" <<<"$text"; then record pass "$suite" "entropy_$name"
+    else record fail "$suite" "entropy_$name" "$(grep -m1 -a '^ERROR' <<<"$text" | cut -c1-140) (no PASS line; serial: $serial)"; fi
+  done
+  if [ $rc = 0 ] && grep -qx 'ENTROPY OK' <<<"$text" && grep -q '^virtio-rng: an entropy source, DMA confined by the IOMMU$' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then
+    record pass "$suite" entropy
+  else record fail "$suite" entropy "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+}
+
 # run_shutdown <arch> <suite>: the power button shuts the system down in
 # order. The system stays up (no checks); once the device manager says the
 # button is armed the host presses it (QEMU's system_powerdown, an ACPI

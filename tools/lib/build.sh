@@ -89,6 +89,7 @@ build_system() {
       + (if $s.machine then ["machine"] else [] end)
       + (if $s.start then ["start=\($s.start)"] else [] end)
       + (if $s.restart then ["restart=\($s.restart)"] else [] end)
+      + (if $s.seed then ["seed"] else [] end)
     | join(" ")' <<<"$meta" >"$out/services.list" || return 1
   echo "$out"
 }
