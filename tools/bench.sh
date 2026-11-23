@@ -295,14 +295,21 @@ quit() { echo "RESULT: pass=$pass fail=1 skipped=$skipped time=$((SECONDS - star
 # host's caches, memory and hardware threads with whatever else runs, so
 # this is measured, reported with the results and kept beside them.
 busy_now() { awk '$1 == "cpu" { printf "%.2f", ($2 + $3 + $4 + $7 + $8 + $9) / 100; exit }' /proc/stat; }
+# ours_now: sets $ours, the processor seconds this tool and what it ran used
+# so far. `times` runs in this shell, not in a $( ) subshell: there it
+# reports the subshell's own children, none, and every benchmark guest
+# counted as another program's load (2026-11-23: "7.72 processors busy"
+# while top showed QEMU at 797% and the echo at 99%, and nothing else).
 ours_now() {
   local e=0
   [ -z "$echo_pid" ] || e=$(ps -o cputimes= --ppid "$echo_pid" 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
-  times | awk -v e="$e" '{ for (i = 1; i <= NF; i++) { split($i, a, /[ms]/); s += a[1] * 60 + a[2] } } END { printf "%.2f", s + e }'
+  times >"$RUN/times"
+  ours=$(awk -v e="$e" '{ for (i = 1; i <= NF; i++) { split($i, a, /[ms]/); s += a[1] * 60 + a[2] } } END { printf "%.2f", s + e }' "$RUN/times")
 }
-watch_start() { w_busy=$(busy_now) w_ours=$(ours_now) w_at=$EPOCHREALTIME; }
+watch_start() { ours_now; w_busy=$(busy_now) w_ours=$ours w_at=$EPOCHREALTIME; }
 watch_end() { # sets host_other
-  host_other=$(awk -v b0="$w_busy" -v b1="$(busy_now)" -v o0="$w_ours" -v o1="$(ours_now)" -v t0="$w_at" -v t1="$EPOCHREALTIME" \
+  ours_now
+  host_other=$(awk -v b0="$w_busy" -v b1="$(busy_now)" -v o0="$w_ours" -v o1="$ours" -v t0="$w_at" -v t1="$EPOCHREALTIME" \
     'BEGIN { d = t1 - t0; x = (d > 0) ? ((b1 - b0) - (o1 - o0)) / d : 0; printf "%.2f", (x > 0 ? x : 0) }')
 }
 
