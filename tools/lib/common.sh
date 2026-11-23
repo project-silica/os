@@ -36,13 +36,17 @@ serial_has() { local text; text=$(tr -d '\r' <"$1" 2>/dev/null); shift; grep -aq
 # (an unfinished TCP test reached 42 GB on 2026-11-23) is killed by the
 # kernel within its own group in seconds and fails as a check, instead of
 # swapping the host until systemd-oomd kills the whole terminal session it
-# was started from (it did, twice, that day). A --fast --fresh run peaks at
-# 2.5 GB. SILICA_MEMORY_MAX overrides the cap (systemd's syntax: 16G,
-# infinity). Where there is no user service manager (CI runners,
-# containers) the tool runs as it is.
+# was started from (it did, twice, that day). The cap is what the host can
+# spare when the tool starts: at most half its memory, and at most what is
+# available then less 8 GiB for the desktop and whatever else runs there
+# (other virtual machines grow later), but never under 4 GiB. A --fast
+# --fresh run peaks at 2.5 GB, a --full at 4.4 GB. SILICA_MEMORY_MAX
+# overrides it (systemd's syntax: 16G, infinity). Where there is no user
+# service manager (CI runners, containers) the tool runs as it is.
 if [ -z "${SILICA_CONTAINED:-}" ] && command -v systemd-run >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
   export SILICA_CONTAINED=1
-  _mem_max=${SILICA_MEMORY_MAX:-$(awk '/^MemTotal:/ { printf "%dK", $2 / 2 }' /proc/meminfo)}
+  _mem_max=${SILICA_MEMORY_MAX:-$(awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 }
+    END { m = t / 2; if (a - 8388608 < m) m = a - 8388608; if (m < 4194304) m = 4194304; printf "%dK", m }' /proc/meminfo)}
   exec systemd-run --user --scope --quiet --collect --unit="silica-$TOOL_NAME-$$" \
     -p MemoryMax="$_mem_max" -p MemorySwapMax=0 -- "$0" "$@"
 fi
