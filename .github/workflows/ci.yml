@@ -3,16 +3,17 @@ on:
   push:
   pull_request:
   merge_group:
+  workflow_dispatch:
   schedule:
     - cron: "17 3 * * *"
 permissions:
   contents: read
 jobs:
   check:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
     uses: project-silica/.github/.github/workflows/pre-merge.yml@main
     with:
       repo: os
   nightly:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     uses: project-silica/.github/.github/workflows/nightly.yml@main
