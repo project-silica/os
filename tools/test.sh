@@ -208,7 +208,10 @@ suite_builds() { # the kernel for all three targets and the UEFI loader
 # inos_machine <arch> <test> <options> <manifest>: set INOS_QEMU to the
 # machine a test's line in the manifest names (smp=<processors> mem=<MiB>),
 # INOS_QUIET to "quiet" when the line says the test judges a time (else
-# "any"), and INOS_NAMED to whether it named a machine.
+# "any"), and INOS_NAMED to whether it named a machine. "progress": the test
+# says how far it got every few seconds and fails itself when it stops
+# getting anywhere, so the harness ends it after a minute of silence
+# instead of a total time (on an emulated slow host it may take many).
 inos_machine() {
   local o
   INOS_QEMU=() INOS_QUIET=any INOS_NAMED=""
@@ -216,6 +219,7 @@ inos_machine() {
     case "$o" in
       smp=*) INOS_QEMU+=(--smp "${o#smp=}"); INOS_NAMED=1 ;;
       mem=*) INOS_QEMU+=(--mem "${o#mem=}"); INOS_NAMED=1 ;;
+      progress) INOS_QEMU+=(--timeout 1800 --quiet 60) ;;
       quiet) INOS_QUIET=quiet ;;
       *) record fail "inos.$1" "$2" "unknown option $o in $4"; return 1 ;;
     esac

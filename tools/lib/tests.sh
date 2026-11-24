@@ -1025,7 +1025,10 @@ run_systest() {
   log=$(logfile "$suite" build.systest)
   img=$(build_system_image "$arch" "$log" "" systest) || { record fail "$suite" systest "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" systest)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 8 --timeout "${SILICA_SYSTEST_TIMEOUT:-600}" >"$serial.qemu" 2>&1
+  # A hang is a minute without a line (systest says every 10 s that it still
+  # waits, and fails a program itself at its limits, which follow the
+  # machine's pace); the total is only a backstop.
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 8 --timeout "${SILICA_SYSTEST_TIMEOUT:-3600}" --quiet 60 >"$serial.qemu" 2>&1
   rc=$?
   while IFS= read -r l; do
     if [[ "$l" =~ $plan ]]; then

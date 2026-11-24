@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Headless QEMU boot (component A04).
-#   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--serial <file>] [--timeout <s>]
+#   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--serial <file>] [--timeout <s>] [--quiet <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
@@ -56,7 +56,11 @@
 # time in seconds with microseconds> <text>", after a first line "<time>
 # QEMU START", so boot times are measured by the host.
 # Serial goes to a file; a hard timeout kills the guest (counted from the
-# firmware's hand-over to the loader; the firmware has its own allowance). The processors'
+# firmware's hand-over to the loader; the firmware has its own allowance).
+# --quiet <s> kills it sooner if its serial output stops growing for that
+# long: a test whose time depends on the machine (emulated, on a slow host)
+# says how far it got every few seconds, and then a hang is found as soon on
+# a slow machine as on a fast one, while a slow run is not one. The processors'
 # registers at every reset go to qemu-reset.log beside it, so a guest that
 # dies by triple fault says where. Exit status: 0 when
 # the guest wrote the success code to the debug-exit device, 1 for any other
@@ -77,10 +81,10 @@ user_forwards() {
 
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
-cport="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
+cport="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type)
+    --arch|--image|--serial|--timeout|--quiet|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -89,6 +93,7 @@ while [ $# -gt 0 ]; do
     --image) image=$2; shift 2 ;;
     --serial) serial=$2; shift 2 ;;
     --timeout) timeout=$2; shift 2 ;;
+    --quiet) quiet=$2; shift 2 ;;
     --screendump) shot=$2; shift 2 ;;
     --screendump-after) shot_after=$2; shift 2 ;;
     --smp) smp=$2; shift 2 ;;
@@ -119,7 +124,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$image" ] || die "--image is required"
 [ -f "$image" ] || die "image $image not found"
-for n in "$timeout" "$shot_after" "$smp" "$mem"; do
+for n in "$timeout" "$quiet" "$shot_after" "$smp" "$mem"; do
   case "$n" in ''|*[!0-9]*) die "not a number: $n" ;; esac
 done
 [ "$timeout" -ge 1 ] && [ "$smp" -ge 1 ] && [ "$mem" -ge 1 ] || die "--timeout, --smp and --mem must be at least 1"
@@ -297,14 +302,20 @@ stop_shot() { # a screendump still pending, or the console port's copy, must not
 # hangs for good before it starts any boot option (spinning on an event, with
 # several processors under TCG); such a boot is tried once more, and the
 # output says so. Nothing of Silica had run.
-waited=0 fw=0 fw_limit=${SILICA_FW_TIMEOUT:-120} started=0
+waited=0 fw=0 fw_limit=${SILICA_FW_TIMEOUT:-120} started=0 last_size=-1 still=0 silent=""
 while kill -0 "$pid" 2>/dev/null; do
   if [ $started = 0 ]; then
     if [ $((fw % 10)) = 0 ] && grep -aq "BdsDxe: starting\|Booting\|silica:\|ERROR: loader" "$serial" 2>/dev/null; then started=1
     elif [ "$fw" -lt $((fw_limit * 10)) ]; then fw=$((fw + 1)); sleep 0.1; continue
     else started=1; waited=$((timeout * 10)); fi
   fi
-  if [ "$waited" -ge $((timeout * 10)) ]; then
+  # --quiet: the seconds the serial log has not grown, counted once a second.
+  if [ "$quiet" -gt 0 ] && [ $((waited % 10)) = 0 ]; then
+    size=$(stat -c %s "$serial" 2>/dev/null || echo 0)
+    if [ "$size" != "$last_size" ]; then last_size=$size still=0; else still=$((still + 1)); fi
+    [ "$still" -lt "$quiet" ] || silent=1
+  fi
+  if [ "$waited" -ge $((timeout * 10)) ] || [ -n "$silent" ]; then
     # The serial log often ends before a firmware or kernel stall. Keep
     # where the guest is before destroying the VM: eight samples of the boot
     # processor's PC an eighth of a second apart (a spin shows the same few
@@ -322,8 +333,11 @@ while kill -0 "$pid" 2>/dev/null; do
       done
       command -v eu-stack >/dev/null && timeout 20 eu-stack -p "$pid" 2>&1; } >"$serial.stacks"
     if [ -S "$RUN/$mon" ] && command -v socat >/dev/null; then
+      # (QEMU's monitor knows $pc on x86_64 only: on aarch64 the samples are
+      # the same processor's registers, its PC among them.)
+      sample='p/x $pc'; [ "$arch" = aarch64 ] && sample='info registers'
       (cd "$RUN" && {
-        for _ in 1 2 3 4 5 6 7 8; do printf '%s\n' 'p/x $pc'; sleep 0.125; done
+        for _ in 1 2 3 4 5 6 7 8; do printf '%s\n' "$sample"; sleep 0.125; done
         printf '%s\n' 'stop' 'info registers -a' 'x/24i $pc-0x40' 'info pic'
         sleep 0.5
       } | timeout 5 socat -t2 - "UNIX-CONNECT:$mon") >"$serial.monitor" 2>/dev/null
@@ -344,7 +358,8 @@ while kill -0 "$pid" 2>/dev/null; do
       echo "qemu: $arch: the firmware stalled for ${fw_limit}s before starting the loader; booting once more"
       SILICA_FW_RETRIED=1 exec "$0" "${orig_args[@]}"
     fi
-    echo "ERROR: qemu: $arch: timeout after ${after}s$where (serial: $serial)"
+    if [ -n "$silent" ]; then echo "ERROR: qemu: $arch: no output for ${quiet}s$where (serial: $serial)"
+    else echo "ERROR: qemu: $arch: timeout after ${after}s$where (serial: $serial)"; fi
     exit 124
   fi
   for k in "${!on[@]}"; do

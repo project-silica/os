@@ -24,7 +24,8 @@ fw_files
 echo disk >"$FX/disk.img"
 
 # The fake QEMU. FAKE_MODE: exit:<n> | silent | hang (after the firmware
-# started the loader) | fwhang (in the firmware) | shot:<n> (serves one
+# started the loader) | talk (started, a line every half second for 6 s,
+# then silent) | fwhang (in the firmware) | shot:<n> (serves one
 # monitor "screendump <file>" command, then exits with <n>). It records its
 # argument vector in $FAKE_ARGV and writes a line to the serial file.
 cat >"$BIN/qemu-system-x86_64" <<'FAKE'
@@ -43,6 +44,10 @@ case "$FAKE_MODE" in
   exit:*) exit "${FAKE_MODE#exit:}" ;;
   silent) exit 0 ;;
   hang) echo "BdsDxe: starting Boot0001" >>"$serial"; echo $$ >"$FAKE_PID"; exec sleep 300 ;;
+  talk)
+    echo "BdsDxe: starting Boot0001" >>"$serial"; echo $$ >"$FAKE_PID"
+    for i in $(seq 12); do echo "still going $i" >>"$serial"; sleep 0.5; done
+    exec sleep 300 ;;
   fwhang) echo $$ >"$FAKE_PID"; exec sleep 300 ;;
   shot:*)
     line=$(socat -T10 "UNIX-LISTEN:$mon" - 2>/dev/null | head -1)
@@ -95,6 +100,16 @@ expect "timeout" 124 1
 case "$OUT" in *timeout*) ;; *) bad "timeout ERROR does not say timeout" ;; esac
 case "$OUT" in *"$S"*) ;; *) bad "timeout ERROR does not name the serial file" ;; esac
 [ "$SECS" -ge 2 ] && [ "$SECS" -le 8 ] || bad "timeout took ${SECS}s for --timeout 2"
+# --quiet: a guest that keeps talking is not ended by it; one that stops is,
+# that many seconds after its last line, long before --timeout.
+run talk --image "$FX/disk.img" --serial "$S" --timeout 60 --quiet 2
+expect "silence" 124 1
+case "$OUT" in *"no output for 2s"*) ;; *) bad "a silent guest must be reported as silent: $OUT" ;; esac
+[ "$SECS" -ge 8 ] && [ "$SECS" -le 14 ] || bad "--quiet 2 ended a guest that talked for 6 s after ${SECS}s"
+grep -qx 'still going 12' "$S" || bad "--quiet ended the guest while it was still talking"
+if [ -f "$FX/pid" ] && kill -0 "$(cat "$FX/pid")" 2>/dev/null; then
+  bad "the guest is still running after it was found silent"; kill -9 "$(cat "$FX/pid")" 2>/dev/null
+fi
 # The firmware has its own allowance, and its timeout says where it stopped.
 SILICA_FW_TIMEOUT=2 run fwhang --image "$FX/disk.img" --serial "$S" --timeout 60
 expect "firmware timeout" 124 1
