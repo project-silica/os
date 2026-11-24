@@ -265,6 +265,9 @@ grep -q '^page_fault' "$OS/bench/open.tsv" && bad "open gap: --update-ratchet dr
 grep -q "^ipc_roundtrip	0.333333	vs-linux	400	" "$OS/bench/ratchet.tsv" || bad "open gap: the ratchet itself never loosens: $(grep ipc_roundtrip "$OS/bench/ratchet.tsv")"
 transcript "$SER/silica.img" "${GOOD[@]/400/470}"; run 2 --runs 1
 [ "$RC" = 1 ] && has '^ERROR: bench::ipc_roundtrip: regression: .*now worse' || bad "open gap: a regression past its bound must fail: exit $RC: $OUT"
+# Worse than its bound, an open gap stays as it was: it has not closed.
+run 2 --runs 1 --update-ratchet
+grep -q "^ipc_roundtrip	ratchet	455	" "$OS/bench/open.tsv" || bad "open gap: --update-ratchet keeps a gap that got worse than its bound, unchanged: $(cat "$OS/bench/open.tsv")"
 
 # ---- 8. usage ----------------------------------------------------------------------
 run 2 --runs 0; [ "$RC" = 2 ] || bad "--runs 0 must be a usage error"

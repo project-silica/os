@@ -194,7 +194,9 @@ enforce() { # enforce <metric> <from-milestone> <message>: a metric not measured
   if [ "$ms" -ge "$2" ] && gated "$1"; then echo "ERROR: bench::$1: $3"; fail=$((fail + 1))
   else echo "SKIP: bench: $1: $3 (required from M$2 under KVM)"; skipped=$((skipped + 1)); fi
 }
+declare -A missed=()   # metrics that missed (miss): an open gap of one is not closed
 miss() { # miss <metric> <message>: a measured result that misses its gate or ratchet: ERROR at every milestone (under KVM)
+  missed[$1]=1
   if gated "$1"; then echo "ERROR: bench::$1: $2"; fail=$((fail + 1))
   else echo "SKIP: bench: $1: $2 (timings are gated under KVM only)"; skipped=$((skipped + 1)); fi
 }
@@ -832,6 +834,11 @@ if [ $update = 1 ]; then
         case "$m" in ''|'#'*) printf '%s\n' "$line"; continue ;; esac
         [ -n "${judged[$m]:-}" ] || { printf '%s\n' "$line"; continue; }
         now=${open_now[$m,$k]:-}
+        if [ -z "$now" ] && [ -n "${missed[$m]:-}" ]; then
+          # Worse than its bound: still owed, and worse; the line stays as
+          # it was (its run said ERROR), with what it says of the cause.
+          echo "bench: open gap worse than recorded, kept: $m ($k)" >&2; printf '%s\n' "$line"; continue
+        fi
         [ -n "$now" ] || { echo "bench: open gap closed, $m ($k)" >&2; continue; }
         dir=higher; [ "$k" = linux ] || dir=$(awk -v m="$m" '$1 == m { print ($3 == "lower") ? "higher" : "lower" }' <<<"$METRICS")
         better_than "$now" "$b" "$dir" && b=$now
