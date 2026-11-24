@@ -22,7 +22,8 @@
 # --net adds a virtio network device on QEMU's user-mode network (the guest is 10.0.2.15, the gateway 10.0.2.2,
 # which answers ARP and ping), or on the host's tap interface (vhost-net).
 # user:<host port>-<guest port>[,...] also forwards those TCP ports of the host's loopback to the guest
-# (a test's client reaches a server in the guest).
+# (a test's client reaches a server in the guest). --capture <file> records the user network's packets there
+# (pcap, each packet's first 96 bytes).
 # --hotplug gives the machine an empty PCI Express root port with native
 # hot-plug (id hp0; QEMU's ACPI hot-plug off) and a disk image ready to be
 # hot-added there: `--on '<regex>=device_add virtio-blk-pci,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on'`.
@@ -76,10 +77,10 @@ user_forwards() {
 
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
-cport="" disk_props="" emulator="" hotplug="" net="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
+cport="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--hotplug|--emulator|--disk-props|--console-port|--port-type)
+    --arch|--image|--serial|--timeout|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -100,6 +101,7 @@ while [ $# -gt 0 ]; do
     --until) until=$2; shift 2 ;;
     --nvme) nvme=$2; shift 2 ;;
     --net) net=$2; shift 2 ;;
+    --capture) capture=$2; shift 2 ;;
     --hotplug) hotplug=$2; shift 2 ;;
     --console-port) cport=$2; shift 2 ;;
     --port-type) port_typing+=("$2"); shift 2 ;;
@@ -172,7 +174,10 @@ case "$arch" in
       # The network device does its DMA through the platform's translation
       # (iommu_platform), as every real PCI device does, on both machines:
       # Linux's AF_XDP zero-copy, its fastest raw path, needs it.
-      user|user:*) extra+=(-netdev "user,id=net0$(user_forwards "$net")" -device virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on) ;;
+      user|user:*) extra+=(-netdev "user,id=net0$(user_forwards "$net")" -device virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on)
+        # Each packet's first 96 bytes (Ethernet, IP and TCP headers): enough
+        # to follow every connection, small enough to keep.
+        [ -z "$capture" ] || extra+=(-object "filter-dump,id=capture,netdev=net0,file=$capture,maxlen=96") ;;
       tap:*) extra+=(-netdev "tap,id=net0,ifname=${net#tap:},script=no,downscript=no,vhost=on" -device virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on) ;;
       *) die "--net: user[:<host port>-<guest port>,...] or tap:<interface>, not $net" ;;
     esac ;;

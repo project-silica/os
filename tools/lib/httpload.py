@@ -7,6 +7,13 @@ connections at once, n cycling through sizes from 1 KiB to 1 MiB, and
 checks every body against the pattern the server sends (byte i is i % 251)
 and its length against Content-Length. Then asks GET /quit. Prints one
 line: answers, errors, bytes, seconds; exits 1 on any error.
+
+The connections are opened one after another, each through its first
+answer, and only then all run at once: QEMU's user-mode network listens on
+a forwarded port with a backlog of 1 (seen with ss: Send-Q 1), so
+connections opened together overflow the host's accept queue and complete
+only when the host retransmits, up to 30 s later. That is the emulator's
+port forwarding, not the system under test, which never sees them.
 """
 import http.client
 import sys
@@ -30,9 +37,14 @@ def main():
             state["next"] += 1
             return n
 
+    opening = threading.Lock()
+
     def worker():
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        first = True
         while True:
+            if first:
+                opening.acquire()
             k = take()
             if k is None:
                 break
@@ -51,6 +63,12 @@ def main():
                     state["errors"].append(f"request {k} (/{size}): {e!r}")
                 c.close()
                 c = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+            finally:
+                if first:
+                    first = False
+                    opening.release()
+        if first:
+            opening.release()
         c.close()
 
     start = time.monotonic()

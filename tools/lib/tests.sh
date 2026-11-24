@@ -729,7 +729,7 @@ run_http() {
   # A host port of this run's own (runs in parallel must not share one).
   port=$((20000 + ($$ + RANDOM) % 20000))
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
-    --net "user:$port-80" >"$serial.qemu" 2>&1 &
+    --net "user:$port-80" ${SILICA_HTTP_CAPTURE:+--capture "$SILICA_HTTP_CAPTURE"} >"$serial.qemu" 2>&1 &
   qemu=$!
   for i in $(seq 600); do
     serial_has "$serial" '^httpd: listening on port 80' && break
