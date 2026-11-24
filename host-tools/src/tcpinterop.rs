@@ -14,6 +14,8 @@
 //!
 //! - `basic`: one request, one answer.
 //! - `large`: 16 MiB on one connection (windows, many segments in flight).
+//! - `sequence_wrap` on the plain path: one kept-alive connection delivers
+//!   more than 4 GiB, checking every byte across the sequence wrap.
 //! - `slow_reader`: 2 MiB read in pauses, so the host's window closes and
 //!   the guest must wait for it to open (zero window, its probes).
 //! - `pipelined`: ten requests in one write, ten answers in order.
@@ -112,6 +114,15 @@ fn case(addr: SocketAddr, name: &str) -> Result<String, String> {
             let t = Instant::now();
             get(addr, 16 << 20)?;
             Ok(format!("16 MiB in {} ms", t.elapsed().as_millis()))
+        }
+        "sequence_wrap" => {
+            let mut s = connect(addr)?;
+            for i in 0..257 {
+                s.write_all(request(16 << 20, i == 256).as_bytes())
+                    .map_err(|e| e.to_string())?;
+                answer(&mut s, 16 << 20, Duration::ZERO).map_err(|e| format!("answer {}: {e}", i + 1))?;
+            }
+            Ok("4 GiB + 16 MiB verified on one connection".into())
         }
         "slow_reader" => {
             let mut s = connect(addr)?;
@@ -281,7 +292,11 @@ fn main() {
     }
     let mut failed = 0;
     let only = args.get(2);
-    for name in CASES.iter().copied().filter(|c| only.is_none_or(|o| o == c)) {
+    let cases = CASES
+        .iter()
+        .copied()
+        .chain((phase == "plain").then_some("sequence_wrap"));
+    for name in cases.filter(|c| only.is_none_or(|o| o == c)) {
         let t = Instant::now();
         match case(addr, name) {
             Ok(what) => println!("interop: {phase}/{name}: ok ({what}; {} ms)", t.elapsed().as_millis()),
