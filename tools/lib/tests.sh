@@ -770,6 +770,44 @@ run_http() {
   else record pass "$suite" "$name"; fi
 }
 
+# run_idle <arch> <suite>: the idle server makes no periodic wake-ups (M4;
+# spec/TESTING.md: "Idle wakeups over 60 s: 0 on the server image", observed
+# from the host as the virtual processors' wake-ups from halt). The system
+# boots with its services and the network (netd has its lease and the
+# router answers), settles for 10 s, and KVM's count of halt wake-ups for the
+# machine (debugfs, read with sudo) must not move over the next 60 s. On
+# 2026-11-24 it moved by 200 a second: every device client looked every
+# 10 ms for its driver's end; the kernel now tells it (CapNotice).
+run_idle() {
+  local arch=$1 suite=$2 log img serial qemu pid dir a b i
+  log=$(logfile "$suite" build.idle)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" idle "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" idle)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout 180 --net user >"$serial.qemu" 2>&1 &
+  qemu=$!
+  for i in $(seq 600); do
+    serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping' && break
+    kill -0 $qemu 2>/dev/null || break
+    sleep 0.1
+  done
+  if ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping'; then
+    kill $qemu 2>/dev/null; wait $qemu
+    record fail "$suite" idle "the network never came up: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"; return 1
+  fi
+  sleep 10
+  pid=$(pgrep -f "qemu-system-[a-z0-9_]*.*$serial" | head -1)
+  dir=$(sudo -n ls /sys/kernel/debug/kvm/ 2>/dev/null | grep "^$pid-" | head -1)
+  if [ -z "$pid" ] || [ -z "$dir" ]; then
+    kill $qemu 2>/dev/null; wait $qemu
+    record fail "$suite" idle "cannot read KVM's statistics of the machine (needs KVM and sudo for /sys/kernel/debug/kvm; pid '${pid}')"; return 1
+  fi
+  a=$(sudo -n cat "/sys/kernel/debug/kvm/$dir/halt_wakeup"); sleep 60; b=$(sudo -n cat "/sys/kernel/debug/kvm/$dir/halt_wakeup")
+  kill $qemu 2>/dev/null; wait $qemu 2>/dev/null
+  echo "idle: $((b - a)) wake-ups from halt in 60 s" >>"$serial.qemu"
+  if [ "$((b - a))" = 0 ]; then record pass "$suite" idle
+  else record fail "$suite" idle "$((b - a)) wake-ups from halt in 60 s of an idle system, not 0 (serial: $serial)"; fi
+}
+
 # run_ntp <arch> <suite>: the wall clock set from a time server (M4: "syncs
 # time"). A server on the host's loopback (host-tools' sntpd), reached from the
 # guest as 10.0.2.2, answers with the host's time plus 1,000 s; the system
