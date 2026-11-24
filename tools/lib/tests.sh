@@ -770,6 +770,104 @@ run_http() {
   else record pass "$suite" "$name"; fi
 }
 
+# run_remote <arch> <suite>: remote management (M4: "accepts a remote
+# management session that can inspect, restart and update any service").
+# The image is provisioned as an installer would: a machine key and one
+# owner (remote.key, remote.owners); the system stays up and the host's
+# silica-remote, holding the owner's key, does everything over QEMU's
+# user-mode network: lists the services, describes one, reads a log,
+# restarts the log service; starts httpd, updates it while it serves to a
+# program that differs in its bytes (served, checked by its hash), then to
+# bytes that are no program (refused) and to one that faults at its first
+# instruction (on trial: the program before it is put back by itself), and
+# reverts it to the boot archive's; a stranger's key and a wrong machine key
+# get nothing. Then it shuts the machine down. Each step's failure is said.
+run_remote() {
+  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i
+  log=$(logfile "$suite" build.remote)
+  rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
+  dir=${UNIT_DIR:-$RUN}/remote; rm -rf "$dir"; mkdir -p "$dir"
+  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") \
+    || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
+  printf '# who may manage this machine\n%s test-owner\n' "$owner" >"$dir/owners"
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=") \
+    && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  # Two new programs for httpd: the same code with bytes after it (an ELF
+  # file's loader reads only what its headers name), and one whose entry
+  # point is an address nothing is mapped at.
+  { cat "$httpd"; printf 'a new version of httpd, for the remote management test\n'; } >"$dir/httpd-new.elf"
+  cp "$httpd" "$dir/httpd-faults.elf" && printf '\000\020\000\000\000\000\000\000' | dd of="$dir/httpd-faults.elf" bs=1 seek=24 conv=notrunc status=none
+  printf 'not a program\n' >"$dir/notes.txt"
+  serial=$(logfile "$suite" remote)
+  port=$((20000 + ($$ + RANDOM) % 20000)); web=$((port + 1))
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
+    --net "user:$port-22,$web-80" --nic "${NIC:-virtio}" >"$serial.qemu" 2>&1 &
+  qemu=$!
+  for i in $(seq 600); do
+    serial_has "$serial" '^remote: listening on port 22' && break
+    kill -0 $qemu 2>/dev/null || break
+    sleep 0.1
+  done
+  if ! serial_has "$serial" '^remote: listening on port 22'; then
+    kill $qemu 2>/dev/null; wait $qemu
+    record fail "$suite" remote "the remote service never listened: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC|remote)' | cut -c1-140) (serial: $serial)"
+    return 1
+  fi
+  R() { "$rmt" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" "$@" 2>&1; }
+  # until <pattern> [<n>]: wait (at most 30 s) for the serial line to appear
+  # <n> times.
+  until_seen() { local k; for k in $(seq 300); do [ "$(tr -d '\r' <"$serial" | grep -acE "$1")" -ge "${2:-1}" ] && return 0; sleep 0.1; done; return 1; }
+  step() { [ -n "$why" ] || why=$1; }
+  hash_of() { "$rmt" hash "$1" | cut -c1-16; }
+  out=$(R services); printf '%s\n' "$out" >"$dir/services.1"
+  grep -qE '^remote +running' <<<"$out" && grep -qE '^netd +running .* silica.net.Tcp' <<<"$out" || step "services did not list remote and netd running: $(head -3 <<<"$out" | tr '\n' ' ')"
+  grep -qE "^httpd +stopped .* $(hash_of "$httpd")\$" <<<"$out" || step "services did not show httpd stopped with the boot archive's program $(hash_of "$httpd")"
+  out=$(R describe netd); grep -q '^process netd: ' <<<"$out" || step "describe netd said: $(head -1 <<<"$out")"
+  out=$(R log remote); grep -q 'listening on port 22' <<<"$out" || step "log remote said: $(head -1 <<<"$out")"
+  out=$(R logs); grep -q '^netd ' <<<"$out" || step "logs did not name netd: $(head -1 <<<"$out")"
+  out=$(R memory); grep -q '^free [0-9]* KiB' <<<"$out" || step "memory said: $out"
+  R restart logd >/dev/null && until_seen '^init: logd restarted, as asked' && serial_has "$serial" '^remote: test-owner asks the service manager to restart logd' \
+    || step "restart logd: not seen restarted, or not in the log as the owner's"
+  # Strangers: an owner the machine does not know, and a machine that is not
+  # the one whose key the owner holds.
+  out=$("$rmt" -i "$dir/stranger.key" -m "$machine" "127.0.0.1:$port" services 2>&1) && step "a stranger's key was served: $out"
+  until_seen "is no owner's" || step "the machine did not say that it closed on a stranger's key"
+  out=$("$rmt" -i "$dir/owner.key" -m "$stranger" "127.0.0.1:$port" services 2>&1) && step "a session to a wrong machine key was served: $out"
+  until_seen 'its handshake did not open' || step "the machine did not say that a handshake for another key did not open"
+  # httpd: started, then updated while it serves.
+  R start httpd >/dev/null && until_seen '^httpd: listening on port 80' || step "start httpd: it never listened"
+  out=$(R update httpd "$dir/httpd-new.elf") || step "update httpd: $out"
+  until_seen '^init: httpd started on its new program' && until_seen '^httpd: listening on port 80' 2 || step "httpd was not started on its new program"
+  out=$("$httpload" "$web" 64 4 2>&1) || step "the updated httpd did not serve: $out"
+  until_seen '^init: httpd ended' || step "the updated httpd did not end in order"
+  out=$(R services); grep -qE "^httpd +stopped .* $(hash_of "$dir/httpd-new.elf") \(updated\)\$" <<<"$out" || step "services did not show httpd on its new program: $(grep '^httpd' <<<"$out")"
+  # Bytes that are no program: refused, nothing changes.
+  out=$(R update httpd "$dir/notes.txt") && step "a text file was installed as httpd"
+  grep -q 'NotAProgram' <<<"$out" || step "a text file as httpd was refused, but not as no program: $out"
+  # A program that faults at once: the one before it comes back.
+  R update httpd "$dir/httpd-faults.elf" >/dev/null || step "update httpd to the faulting program was refused"
+  R start httpd >/dev/null
+  until_seen "^init: httpd's new program failed within 10 s of its update" && until_seen '^init: httpd started again on the program before its update' \
+    && until_seen '^httpd: listening on port 80' 3 || step "the faulting update of httpd was not undone"
+  out=$(R services); grep -qE "^httpd +running .* $(hash_of "$dir/httpd-new.elf") \(updated\)\$" <<<"$out" || step "after the faulting update, httpd does not run the program before it: $(grep '^httpd' <<<"$out")"
+  out=$("$httpload" "$web" 64 4 2>&1) || step "httpd did not serve after its faulting update was undone: $out"
+  until_seen '^init: httpd ended' 2 || step "httpd did not end in order after the undone update"
+  R revert httpd >/dev/null || step "revert httpd was refused"
+  out=$(R services); grep -qE "^httpd +stopped .* $(hash_of "$httpd")\$" <<<"$out" || step "after revert, httpd does not have the boot archive's program: $(grep '^httpd' <<<"$out")"
+  # The session's own service: its update ends the session that asked for
+  # it, and the client asks a new one what runs.
+  { cat "$(system_program "$arch" remote "$log")"; printf 'a new version of remote\n'; } >"$dir/remote-new.elf"
+  out=$(R update remote "$dir/remote-new.elf") && grep -q '^remote runs the program sent' <<<"$out" || step "update remote (the session's own service): $out"
+  until_seen '^init: remote started on its new program' || step "remote was not started on its new program"
+  R shutdown >/dev/null
+  wait $qemu; rc=$?
+  if [ -n "$why" ]; then record fail "$suite" remote "$why (serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^init: shutting down' || ! serial_has "$serial" '^remote: test-owner asks the service manager to shut down the machine'; then
+    record fail "$suite" remote "the machine was not shut down from the session (exit status $rc; serial: $serial)"
+  elif serial_has "$serial" -E '^(ERROR|PANIC)'; then record fail "$suite" remote "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"
+  else record pass "$suite" remote; fi
+}
+
 # run_idle <arch> <suite>: the idle server makes no periodic wake-ups (M4;
 # spec/TESTING.md: "Idle wakeups over 60 s: 0 on the server image", observed
 # from the host as the virtual processors' wake-ups from halt). The system

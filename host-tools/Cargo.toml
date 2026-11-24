@@ -1,6 +1,6 @@
 [package]
 name = "silica-host"
-description = "Programs the tests run on the host beside a guest: HTTP load, a time server, screen checks."
+description = "Programs the tests run on the host beside a guest (HTTP load, a time server, screen checks), and the owner's remote management client."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,20 @@ path = "src/sntpd.rs"
 [[bin]]
 name = "screen"
 path = "src/screen.rs"
+
+[[bin]]
+name = "silica-remote"
+path = "src/remote.rs"
+
+# The remote session's client is written on the machine's own crates: the
+# framing and the cryptography it shares with the machine's service, and
+# the generated bindings of the protocols it calls (the workshop layout is
+# the build layout).
+[dependencies]
+silica-crypto = { path = "../../system/crypto" }
+silica-remote = { path = "../../system/remote/proto" }
+silica-protocols = { path = "../../system/protocols" }
+silica-idl-rt = { path = "../../idl/rt" }
 
 [lints]
 workspace = true

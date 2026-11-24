@@ -108,6 +108,7 @@ build_system() {
       + (if $s.seed then ["seed"] else [] end)
       + (if $s.keeps then ["keeps"] else [] end)
       + (if $s.sets_time then ["sets_time"] else [] end)
+      + (if ($s.files // []) != [] then ["files=\($s.files | join(","))"] else [] end)
     | join(" ")' <<<"$meta" >"$out/services.list" || return 1
   echo "$out"
 }
@@ -221,8 +222,12 @@ build_system_image_locked() {
     entries+=(--ramdisk-entry "$n=$f")
   done
   entries+=(--ramdisk-entry "drivers=$sys/drivers.list" --ramdisk-entry "services=$sys/services.list")
+  # Files provisioned for this machine ($SYSTEM_FILES: "<name>=<host file>"
+  # words), as an installer would put them in its archive: a service
+  # declared with `files=` is given them (the remote service's keys).
+  for f in ${SYSTEM_FILES:-}; do entries+=(--ramdisk-entry "$f"); done
   n=system.img; [ "$root" = init ] || n=system-$root.img
-  tag=$(printf '%s' "$cmdline" | cksum | cut -d' ' -f1)
+  tag=$(printf '%s %s' "$cmdline" "${SYSTEM_FILES:-}" | cksum | cut -d' ' -f1)
   if [ -n "${UNIT_DIR:-}" ]; then out=$UNIT_DIR/image-$tag
   elif [ -n "$cmdline" ] && [ -n "${RUN:-}" ]; then out=$RUN/image-$tag; fi
   mkdir -p "$out" || return 1
@@ -232,6 +237,16 @@ build_system_image_locked() {
   fi
   "$t" --out "$out/$n" "$lp=$l" "SILICA/KERNEL.ELF=$k" "${entries[@]}" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
   echo "$out/$n"
+}
+
+# system_program <arch> <name> <log>: the path of the system repository's
+# program <name> as images pack it (stripped), built if needed.
+system_program() {
+  local arch=$1 name=$2 log=$3 sys
+  if [ -n "${PIECES_ONCE:-}" ]; then sys=$(run_pieces system "$arch" "$log")/system || return 1
+  else sys=$(build_system "$arch" "$log") || return 1; fi
+  [ -f "$sys/$name.elf" ] || { echo "the system repository has no program named $name" >>"$log"; return 1; }
+  echo "$sys/$name.elf"
 }
 
 # The UEFI removable-media path of the loader for an architecture.
