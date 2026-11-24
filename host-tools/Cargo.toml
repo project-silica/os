@@ -22,6 +22,10 @@ path = "src/screen.rs"
 name = "silica-remote"
 path = "src/remote.rs"
 
+[[bin]]
+name = "tcpinterop"
+path = "src/tcpinterop.rs"
+
 # The remote session's client is written on the machine's own crates: the
 # framing and the cryptography it shares with the machine's service, and
 # the generated bindings of the protocols it calls (the workshop layout is

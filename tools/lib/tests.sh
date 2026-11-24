@@ -868,6 +868,71 @@ run_remote() {
   else record pass "$suite" remote; fi
 }
 
+# run_interop <arch> <suite>: TCP between the host's own Linux stack and
+# netd's (M4: "interop suite green against the host Linux stack";
+# spec/TESTING.md: "interop against the host Linux stack over TAP"). The
+# guest has a static address on a tap interface of this run's own, the host
+# the other end of it, and httpd runs as the check; host-tools' tcpinterop
+# drives every case three times: on a plain path; with the host's route
+# advertising a 536-byte MSS and an 8 KiB window (`ip route ... advmss
+# window`, so netd must segment small and wait for the window); and with
+# both directions delayed 1 ms, 2% lost, 1% duplicated and 10% reordered
+# (netem, the guest's direction through an ifb). Then httpd is asked to end
+# and the machine turns off. Needs passwordless sudo, as the benchmark's tap
+# does; without it the test fails and says so.
+run_interop() {
+  local arch=$1 suite=$2 log img serial rc qemu tool n host guest tap ifb why="" out i
+  log=$(logfile "$suite" build.interop)
+  sudo -n true 2>/dev/null || { record fail "$suite" interop "needs passwordless sudo for its tap interface and the impairments on it"; return 1; }
+  tool=$(host_tool tcpinterop "$log") || { record fail "$suite" interop "tcpinterop did not build: $(first_error "$log") (log: $log)"; return 1; }
+  n=$((20 + ($$ + RANDOM) % 200)); host=10.211.$n.1; guest=10.211.$n.2; tap=siop$n; ifb=sifb$n
+  img=$(build_system_image "$arch" "$log" "checks=http netd.address=$guest/24 netd.router=$host") \
+    || { record fail "$suite" interop "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  iop_down() {
+    sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
+    sudo -n ip link del "$ifb" 2>/dev/null; sudo -n ip link del "$tap" 2>/dev/null
+  }
+  iop_down
+  sudo -n ip tuntap add dev "$tap" mode tap user "$(id -un)" && sudo -n ip addr add "$host/24" dev "$tap" \
+    && sudo -n ip link set "$tap" up && sudo -n sysctl -q -w "net.ipv6.conf.$tap.disable_ipv6=1" \
+    || { iop_down; record fail "$suite" interop "could not make the tap interface $tap"; return 1; }
+  serial=$(logfile "$suite" interop)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-600}" \
+    --net "tap:$tap" --nic "${NIC:-virtio}" >"$serial.qemu" 2>&1 &
+  qemu=$!
+  for i in $(seq 600); do
+    serial_has "$serial" '^httpd: listening on port 80' && break
+    kill -0 $qemu 2>/dev/null || break
+    sleep 0.1
+  done
+  if ! serial_has "$serial" '^httpd: listening on port 80'; then
+    kill $qemu 2>/dev/null; wait $qemu; iop_down
+    record fail "$suite" interop "httpd never listened: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"
+    return 1
+  fi
+  phase() { out=$("$tool" "$guest" "$1" 2>&1); printf '%s\n' "$out" >>"${serial%.log}.interop"; [ -n "$why" ] || why=$(grep -m1 '^ERROR' <<<"$out"); return 0; }
+  phase plain
+  sudo -n ip route replace "$guest/32" dev "$tap" advmss 536 window 8192 && phase small_mss_and_window \
+    || why=${why:-"could not set the route's MSS and window"}
+  sudo -n ip route del "$guest/32" dev "$tap" 2>/dev/null
+  local impair=(delay 1ms loss 2% duplicate 1% reorder 10% 50%)
+  if sudo -n tc qdisc add dev "$tap" root netem "${impair[@]}" && sudo -n ip link add "$ifb" type ifb && sudo -n ip link set "$ifb" up \
+      && sudo -n tc qdisc add dev "$tap" handle ffff: ingress \
+      && sudo -n tc filter add dev "$tap" parent ffff: matchall action mirred egress redirect dev "$ifb" \
+      && sudo -n tc qdisc add dev "$ifb" root netem "${impair[@]}"; then
+    phase lossy
+  else why=${why:-"could not impair the path (tc netem, ifb)"}; fi
+  sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
+  phase quit
+  wait $qemu; rc=$?
+  iop_down
+  if [ -n "$why" ]; then record fail "$suite" interop "$why (serial: $serial; cases: ${serial%.log}.interop)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^init: httpd passed'; then
+    record fail "$suite" interop "httpd did not end in order (exit status $rc; serial: $serial)"
+  elif serial_has "$serial" -E '^(ERROR|PANIC)'; then record fail "$suite" interop "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"
+  else record pass "$suite" interop; fi
+}
+
 # run_idle <arch> <suite>: the idle server makes no periodic wake-ups (M4;
 # spec/TESTING.md: "Idle wakeups over 60 s: 0 on the server image", observed
 # from the host as the virtual processors' wake-ups from halt). The system
