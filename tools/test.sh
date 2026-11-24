@@ -548,6 +548,7 @@ guests() {
       # services restarted forty times under load, a quiet test of seconds.
       for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
       system_test svcload
+      system_test http_load
       unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64
       # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
       # "aarch64 boots to the same test"), emulated, so not in the fast tier.
@@ -596,7 +597,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
         done
       fi
       # The system image's own tests, by name.
-      case " ${SYSTEM_TESTS[*]} faults systest svcload " in
+      case " ${SYSTEM_TESTS[*]} faults systest svcload http_load " in
         *" $guest "*)
           if [ "$guest" = faults ]; then for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
           elif [ "$guest" = systest ]; then
