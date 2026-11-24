@@ -18,18 +18,23 @@ BUILD_STD_USER=(-Zbuild-std=core,alloc,compiler_builtins -Zbuild-std-features=co
 # with debug information stays beside it for symbolize.sh.
 # The objcopy of the kernel's pinned toolchain (llvm-tools) reads every
 # target; a distribution's binutils objcopy often reads only the host's.
+# The objcopy is found once per shell (two rustc runs: found per file, they
+# were most of a warm system build's 4 s, 2026-11-24).
+STRIP_TOOL="" STRIP_LIB=""
 strip_debug() {
   local t sysroot host
-  sysroot=$(cd "$(checkout_of kernel)" && rustc --print sysroot 2>/dev/null)
-  host=$(cd "$(checkout_of kernel)" && rustc -vV 2>/dev/null | sed -n 's/^host: //p')
-  for t in "$sysroot/lib/rustlib/$host/bin/rust-objcopy" llvm-objcopy; do
-    command -v "$t" >/dev/null 2>&1 || continue
-    # The toolchain's tools find its libLLVM only through the library path.
-    # Written beside and moved into place: another tool reading the old
-    # file meanwhile reads all of it.
-    LD_LIBRARY_PATH="$sysroot/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$t" --strip-debug "$1" "$2.new.$BASHPID" >>"$3" 2>&1 && mv "$2.new.$BASHPID" "$2"; return
-  done
-  echo "error: no objcopy that reads every target: install the toolchain's llvm-tools component (rustup component add llvm-tools) or llvm-objcopy" >>"$3"; return 1
+  if [ -z "$STRIP_TOOL" ]; then
+    sysroot=$(cd "$(checkout_of kernel)" && rustc --print sysroot 2>/dev/null)
+    host=$(cd "$(checkout_of kernel)" && rustc -vV 2>/dev/null | sed -n 's/^host: //p')
+    for t in "$sysroot/lib/rustlib/$host/bin/rust-objcopy" llvm-objcopy; do
+      command -v "$t" >/dev/null 2>&1 && { STRIP_TOOL=$t STRIP_LIB=$sysroot/lib; break; }
+    done
+    [ -n "$STRIP_TOOL" ] || { echo "error: no objcopy that reads every target: install the toolchain's llvm-tools component (rustup component add llvm-tools) or llvm-objcopy" >>"$3"; return 1; }
+  fi
+  # The toolchain's tools find its libLLVM only through the library path.
+  # Written beside and moved into place: another tool reading the old file
+  # meanwhile reads all of it.
+  LD_LIBRARY_PATH="$STRIP_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$STRIP_TOOL" --strip-debug "$1" "$2.new.$BASHPID" >>"$3" 2>&1 && mv "$2.new.$BASHPID" "$2"
 }
 
 art_dir() { local d; d=$(cache_of kernel)/artifacts/$1; mkdir -p "$d"; echo "$d"; }
@@ -42,8 +47,13 @@ build_kernel() {
   [ -f "$dir/targets/$arch-silica.json" ] || { echo "no target spec targets/$arch-silica.json" >"$log"; return 1; }
   cargo_run kernel "$log" build --release -p kernel --target "$dir/targets/$arch-silica.json" \
     -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
-  put "$(cache_of kernel)/target/$arch-silica/release/kernel" "$out/kernel.elf" || return 1
-  strip_debug "$out/kernel.elf" "$out/kernel.stripped" "$log" || return 1
+  # A kernel cargo did not rebuild is already in place, stripped. (The copy
+  # with debug information goes last: when it matches, so does the other.)
+  local built=$(cache_of kernel)/target/$arch-silica/release/kernel
+  if ! { [ -f "$out/kernel.stripped" ] && cmp -s "$built" "$out/kernel.elf"; }; then
+    strip_debug "$built" "$out/kernel.stripped" "$log" || return 1
+    put "$built" "$out/kernel.elf" || return 1
+  fi
   echo "$out/kernel.elf"
 }
 
@@ -69,9 +79,15 @@ build_system() {
   cargo_run system "$log" build --release --workspace --bins --target "$k/targets/$arch-silica-user.json" \
     -Zjson-target-spec "${BUILD_STD_USER[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
   local meta; meta=$(cd "$s" && cargo metadata --no-deps --format-version 1 --offline 2>/dev/null) || { echo "cargo metadata failed in $s" >>"$log"; return 1; }
+  local built
   for n in $(jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' <<<"$meta"); do
-    put "$(cache_of system)/target/$arch-silica-user/release/$n" "$out/$n.debug.elf" || return 1
-    strip_debug "$out/$n.debug.elf" "$out/$n.elf" "$log" || return 1
+    built=$(cache_of system)/target/$arch-silica-user/release/$n
+    # A program cargo did not rebuild is already in place, stripped. (The
+    # copy with debug information goes last: when it matches, so does the
+    # other.)
+    [ -f "$out/$n.elf" ] && cmp -s "$built" "$out/$n.debug.elf" && continue
+    strip_debug "$built" "$out/$n.elf" "$log" || return 1
+    put "$built" "$out/$n.debug.elf" || return 1
   done
   # The drivers list the device manager reads: "<match> <program>" for each
   # match a package declares ([package.metadata.silica] drivers), its

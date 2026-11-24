@@ -130,6 +130,9 @@ done
 [ "$timeout" -ge 1 ] && [ "$smp" -ge 1 ] && [ "$mem" -ge 1 ] || die "--timeout, --smp and --mem must be at least 1"
 new_run
 [ -n "$serial" ] || serial=$RUN/serial.log
+# SILICA_STAMP=1: every run times its serial lines (<serial>.stamps), so a
+# test's slow step can be found without changing the test.
+[ -n "$stamp" ] || [ -z "${SILICA_STAMP:-}" ] || stamp=$serial.stamps
 
 code=$(firmware_of "$arch" code) || die "no UEFI firmware for $arch (run tools/init.sh)"
 vars=$(firmware_of "$arch" vars) || die "no UEFI variable store for $arch"
@@ -382,16 +385,25 @@ while kill -0 "$pid" 2>/dev/null; do
       unset "typing[$k]"
       text=${rule#*=} enter=""
       [ "${text: -2}" = '\n' ] && { text=${text%\\n}; enter=1; }
-      ( cd "$RUN"
-        for ((c = 0; c < ${#text}; c++)); do
-          ch=${text:c:1}
-          case "$ch" in
-            [a-z0-9]) key=$ch ;; [A-Z]) key=shift-${ch,,} ;; ' ') key=spc ;; '-') key=minus ;; '.') key=dot ;;
-            '/') key=slash ;; ':') key=shift-semicolon ;; '_') key=shift-minus ;; '@') key=shift-2 ;; *) continue ;;
-          esac
-          printf 'sendkey %s 30\n' "$key" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon" >/dev/null 2>&1; sleep 0.06
-        done
-        [ -z "$enter" ] || printf 'sendkey ret 30\n' | timeout 5 socat -t1 - "UNIX-CONNECT:$mon" >/dev/null 2>&1 ) &
+      # One monitor connection per command, a key every 15 ms held for 10:
+      # QEMU's input queue sends each key's press and release in order (it
+      # drops input past 100 queued events, which a key every 15 ms never
+      # nears), and the keyboard driver keeps 64 event buffers (16 keys)
+      # offered. A connection and a 60 ms pause per key took 12 of the
+      # console check's 16 s (2026-11-24).
+      # (From the run's directory: a socket's path is at most 108 bytes.)
+      ( cd "$RUN" && {
+          for ((c = 0; c < ${#text}; c++)); do
+            ch=${text:c:1}
+            case "$ch" in
+              [a-z0-9]) key=$ch ;; [A-Z]) key=shift-${ch,,} ;; ' ') key=spc ;; '-') key=minus ;; '.') key=dot ;;
+              '/') key=slash ;; ':') key=shift-semicolon ;; '_') key=shift-minus ;; '@') key=shift-2 ;; *) continue ;;
+            esac
+            printf 'sendkey %s 10\n' "$key"; sleep 0.015
+          done
+          [ -z "$enter" ] || printf 'sendkey ret 10\n'
+          sleep 0.1
+        } | timeout 30 socat -t1 - "UNIX-CONNECT:$mon" >/dev/null 2>&1 ) &
     fi
   done
   if [ -n "$until" ] && serial_has "$serial" -E "$until"; then
