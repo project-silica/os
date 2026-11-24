@@ -19,7 +19,7 @@ timer_overshoot	0.0405405	vs-linux	837	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tune
 insns_null_syscall	113.4	value
 insns_ipc_roundtrip	881.5	value
 insns_ctx_switch	356.6	value
-insns_page_fault	2603.4	value
+insns_page_fault	1798.6	value
 blk_read4k_qd1	0.705243	vs-linux	3632	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 blk_read4k_qd1_p99	0.731569	vs-linux	4118	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 blk_read4k_qd32	0.783415	vs-linux	539146	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned

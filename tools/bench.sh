@@ -379,7 +379,7 @@ boot() {
 # first: a benchmark of few operations (2048 page faults) takes four more,
 # so that what the boot itself varies by is spread over as many operations
 # as the others have.
-COUNT_SPECS=("null null_syscall 22000 1" "ipc ipc_roundtrip 22000 1" "ctx ctx_switch 44000 1" "fault page_fault 2048 4")
+COUNT_SPECS=("null null_syscall 22000 1" "ipc ipc_roundtrip 22000 1" "ctx ctx_switch 44000 1" "fault page_fault 2048 16")
 # count_start <label>: builds the counting images of the kernel selected now
 # (the working tree, or SRC[kernel] and SILICA_TUNE_*: a variant) and starts
 # their boots, as many at once as the host has processors; `wait`, then
@@ -415,7 +415,9 @@ count_finish() {
 LIB=(path:os:tools/lib/common.sh path:os:tools/lib/build.sh)
 # What a count is a function of: the kernel's source (and a constant it was
 # built with), the image, and the tools that count.
-IN_COUNTS=(repo+:kernel crate:os:silica-image "${LIB[@]}" path:os:tools/profile.sh path:os:tools/profile host:qemu-x86_64 fn:count_start fn:count_finish "file:${SILICA_BENCH_COUNTS:-}")
+# (COUNT_SPECS by its text: the functions' text does not hold the variable's.)
+IN_COUNTS=(repo+:kernel crate:os:silica-image "${LIB[@]}" path:os:tools/profile.sh path:os:tools/profile host:qemu-x86_64 fn:count_start fn:count_finish
+  "specs:$(IFS='|'; echo "${COUNT_SPECS[*]}" | tr ' ' _)" "file:${SILICA_BENCH_COUNTS:-}")
 
 # ---- what to measure: what its inputs changed for -----------------------------
 # Four parts, each kept under its inputs: the Linux baseline, Silica's
