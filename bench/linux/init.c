@@ -647,8 +647,205 @@ static void spawn_bench(void)
 	printf("BENCH spawn_p99 %lu ns\n", p99[best]);
 }
 
+// The server image (built with -DSILICA_SERVER, tools/lib/linux.sh): Linux's
+// side of M4's TCP gates (spec/TESTING.md 4.2), measured from the host by
+// host-tools' tcpbench as Silica's httpd is. eth0 takes SERVER_ADDRESS/24
+// and an HTTP/1.1 server answers on port 80 as httpd does, byte for byte:
+// `GET /<n>` is n bytes (at most 16 MiB) whose byte i is i % 251, kept
+// alive unless asked otherwise; `GET /quit` answers and, once its client
+// has closed, the machine turns off. One thread, epoll, sockets that never
+// block, edge-triggered: the fastest a single thread serves on Linux, as
+// httpd is a single thread. Bodies are written from a pattern made once.
+#define SERVER_ADDRESS 0x020fd60a // 10.214.15.2, in network order
+#define SERVER_CONNS 256
+#define SERVER_CHUNK 65536
+struct srv_in { unsigned short family, port; unsigned addr; unsigned char zero[8]; };
+struct srv_ifreq { char name[16]; union { struct srv_in in; short flags; char pad[24]; }; };
+struct srv_event { unsigned events; unsigned long data; } __attribute__((packed));
+struct srv_conn {
+	int fd, quit, close_after;
+	char in[8192];
+	unsigned inlen;
+	char head[192];
+	unsigned headlen, headsent;
+	unsigned long body, bodysent;
+};
+static struct srv_conn srv_conns[SERVER_CONNS];
+static unsigned char srv_pattern[251 + SERVER_CHUNK];
+
+static unsigned srv_put(char *at, const char *s)
+{
+	unsigned n = 0;
+	while (s[n]) { at[n] = s[n]; n++; }
+	return n;
+}
+
+static unsigned srv_num(char *at, unsigned long v)
+{
+	char d[24];
+	unsigned n = 0, k = 0;
+	do { d[n++] = '0' + v % 10; v /= 10; } while (v);
+	while (n) at[k++] = d[--n];
+	return k;
+}
+
+// A whole request is in c->in (its head ends at `end`): set the answer.
+static void srv_request(struct srv_conn *c, unsigned end)
+{
+	char *r = c->in;
+	unsigned long n = 0;
+	int status = 200, ok = 0, close_after = 0;
+	if (end > 9 && !memcmp(r, "GET /quit", 9) && (r[9] == ' ' || r[9] == '\r')) {
+		c->quit = 1;
+		close_after = 1;
+	} else if (end > 5 && !memcmp(r, "GET /", 5)) {
+		unsigned i = 5;
+		while (r[i] >= '0' && r[i] <= '9' && n <= (16UL << 20)) { n = n * 10 + (r[i] - '0'); i++; ok = 1; }
+		if (!ok || r[i] != ' ' || n > (16UL << 20)) { status = 404; n = 0; }
+	} else {
+		status = 405;
+		close_after = 1;
+	}
+	// HTTP/1.0, or Connection: close, end the connection after the answer.
+	for (unsigned i = 0; i + 17 <= end; i++)
+		if ((r[i] == 'C' || r[i] == 'c') && !memcmp(r + i + 1, "onnection: close", 16)) close_after = 1;
+	for (unsigned i = 0; i + 10 <= end && r[i] != '\r'; i++)
+		if (!memcmp(r + i, " HTTP/1.0\r", 10)) close_after = 1;
+	char *h = c->head;
+	unsigned k = srv_put(h, "HTTP/1.1 ");
+	k += srv_put(h + k, status == 200 ? "200 OK" : status == 404 ? "404 Not Found" : "405 Method Not Allowed");
+	k += srv_put(h + k, "\r\nContent-Length: ");
+	k += srv_num(h + k, n);
+	k += srv_put(h + k, "\r\nContent-Type: application/octet-stream\r\nConnection: ");
+	k += srv_put(h + k, close_after ? "close" : "keep-alive");
+	k += srv_put(h + k, "\r\n\r\n");
+	c->headlen = k;
+	c->headsent = 0;
+	c->body = n;
+	c->bodysent = 0;
+	c->close_after = close_after;
+}
+
+// Move what can move on connection c without blocking. Returns 0 while it
+// lives, 1 when it is done (closed by its client, or after a closing answer).
+static int srv_step(struct srv_conn *c)
+{
+	for (;;) {
+		if (c->headsent < c->headlen) {
+			long w = syscall(__NR_write, c->fd, c->head + c->headsent, c->headlen - c->headsent);
+			if (w < 0) return errno == 11 /* EAGAIN */ ? 0 : 1;
+			c->headsent += w;
+			continue;
+		}
+		if (c->bodysent < c->body) {
+			unsigned long want = c->body - c->bodysent;
+			if (want > SERVER_CHUNK) want = SERVER_CHUNK;
+			long w = syscall(__NR_write, c->fd, srv_pattern + c->bodysent % 251, want);
+			if (w < 0) return errno == 11 ? 0 : 1;
+			c->bodysent += w;
+			continue;
+		}
+		if (c->headlen && c->close_after) {
+			// The answer is out: say so, and wait for the client to close.
+			syscall(__NR_shutdown, c->fd, 1);
+			c->headlen = 0;
+		}
+		// The next whole request, if one is in.
+		unsigned end = 0;
+		for (unsigned i = 3; i < c->inlen; i++)
+			if (c->in[i - 3] == '\r' && c->in[i - 2] == '\n' && c->in[i - 1] == '\r' && c->in[i] == '\n') { end = i + 1; break; }
+		if (end && !c->close_after) {
+			srv_request(c, end);
+			memmove(c->in, c->in + end, c->inlen - end);
+			c->inlen -= end;
+			continue;
+		}
+		if (c->inlen == sizeof(c->in)) return 1; // a head longer than we keep
+		long r = syscall(__NR_read, c->fd, c->in + c->inlen, sizeof(c->in) - c->inlen);
+		if (r < 0 && errno == 11) return 0; // nolibc: -1 and errno, as libc
+		if (r <= 0) return 1;
+		c->inlen += r;
+	}
+}
+
+static void http_server(void)
+{
+	for (unsigned i = 0; i < sizeof(srv_pattern); i++) srv_pattern[i] = i % 251;
+	int s = syscall(__NR_socket, 2, 1, 0);
+	struct srv_ifreq ifr;
+	memset(&ifr, 0, sizeof(ifr));
+	memcpy(ifr.name, "eth0", 5);
+	ifr.in.family = 2;
+	ifr.in.addr = SERVER_ADDRESS;
+	long e = syscall(__NR_ioctl, s, 0x8916 /* SIOCSIFADDR */, &ifr);
+	ifr.in.addr = 0x00ffffff; // 255.255.255.0
+	e |= syscall(__NR_ioctl, s, 0x891c /* SIOCSIFNETMASK */, &ifr);
+	memset(&ifr.in, 0, sizeof(ifr.in));
+	e |= syscall(__NR_ioctl, s, 0x8913 /* SIOCGIFFLAGS */, &ifr);
+	ifr.flags |= 1; // IFF_UP
+	e |= syscall(__NR_ioctl, s, 0x8914 /* SIOCSIFFLAGS */, &ifr);
+	syscall(__NR_close, s);
+	int one = 1;
+	int l = syscall(__NR_socket, 2, 1 | 04000 /* SOCK_NONBLOCK */, 0);
+	struct srv_in at = { 2, be16(80), 0, { 0 } };
+	syscall(__NR_setsockopt, l, 1, 2 /* SO_REUSEADDR */, &one, sizeof(one));
+	if (e || l < 0 || syscall(__NR_bind, l, &at, sizeof(at)) || syscall(__NR_listen, l, 512)) {
+		printf("ERROR: server: eth0 or port 80 could not be set up\n");
+		return;
+	}
+	int ep = syscall(__NR_epoll_create1, 0);
+	struct srv_event ev = { 1 /* EPOLLIN */, SERVER_CONNS };
+	syscall(__NR_epoll_ctl, ep, 1 /* ADD */, l, &ev);
+	printf("server: listening on port 80\n");
+	for (int i = 0; i < SERVER_CONNS; i++) srv_conns[i].fd = -1;
+	int quitting = 0;
+	struct srv_event got[64];
+	for (;;) {
+		long n = syscall(__NR_epoll_wait, ep, got, 64, -1);
+		for (long k = 0; k < n; k++) {
+			unsigned long i = got[k].data;
+			if (i == SERVER_CONNS) {
+				for (;;) {
+					int fd = syscall(__NR_accept4, l, 0, 0, 04000 /* SOCK_NONBLOCK */);
+					if (fd < 0) break;
+					int j = 0;
+					while (j < SERVER_CONNS && srv_conns[j].fd >= 0) j++;
+					if (j == SERVER_CONNS) { syscall(__NR_close, fd); continue; }
+					syscall(__NR_setsockopt, fd, 6, 1 /* TCP_NODELAY */, &one, sizeof(one));
+					memset(&srv_conns[j], 0, sizeof(srv_conns[j]));
+					srv_conns[j].fd = fd;
+					struct srv_event ce = { 1 | 4 | (1u << 31) /* IN, OUT, ET */, j };
+					syscall(__NR_epoll_ctl, ep, 1, fd, &ce);
+					if (srv_step(&srv_conns[j])) { syscall(__NR_close, fd); srv_conns[j].fd = -1; }
+				}
+				continue;
+			}
+			struct srv_conn *c = &srv_conns[i];
+			if (c->fd >= 0 && srv_step(c)) {
+				quitting |= c->quit;
+				syscall(__NR_close, c->fd);
+				c->fd = -1;
+			}
+		}
+		if (quitting) return;
+	}
+}
+
 int main(int argc, char **argv)
 {
+#ifdef SILICA_SERVER
+	(void)argc; (void)argv;
+	printf("BENCH MARK userspace\n");
+	http_server();
+	printf("BENCH DONE\n");
+	syscall(__NR_ioctl, 1, 0x5409, 1);
+	if (syscall(__NR_ioperm, 0xf4, 4, 1) == 0)
+		__asm__ volatile("outb %%al, %%dx" : : "a"(0x10), "d"(0xf4));
+	syscall(__NR_reboot, 0xfee1dead, 672274793, 0x4321fedc, 0);
+	for (;;)
+		;
+#endif
+
 	if (argc > 1 && strcmp(argv[1], "spawned") == 0) {
 		// Run again by the spawn benchmark: the time this began, and done.
 		unsigned long t = rdtsc();

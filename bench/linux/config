@@ -46,6 +46,9 @@ CONFIG_VIRTIO_BLK=y
 # Raw frames on the virtio network device (the network benchmarks).
 CONFIG_NET=y
 CONFIG_PACKET=y
+# IPv4 and TCP (CUBIC, Linux's default) for the server image's HTTP server
+# (M4's TCP gates).
+CONFIG_INET=y
 CONFIG_NETDEVICES=y
 CONFIG_NET_CORE=y
 CONFIG_VIRTIO_NET=y
