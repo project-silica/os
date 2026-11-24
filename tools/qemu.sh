@@ -262,8 +262,14 @@ if [ -n "$cport" ]; then
   cport_copy=$!
 fi
 why_stopped=(-trace enable=qemu_system_shutdown_request -trace enable=runstate_set -trace enable=watchdog_perform_action -trace enable=tco_timer_expired)
+# The guest dies with this script, however it ends: the timeout below is
+# this script's to enforce, and a harness killed mid-run (an interrupted
+# test, a lost terminal) once left a guest running for nine hours, taking
+# host processors from every measurement made after it. The kernel kills
+# the emulator when its parent (this script) exits, by any signal.
+command -v setpriv >/dev/null || die "setpriv (util-linux) is needed: the guest must die with its harness"
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
-  cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp" -m "$mem" \
+  cd "$RUN" && TMPDIR=$RUN exec setpriv --pdeathsig KILL "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp" -m "$mem" \
   "${serial_dev[@]}" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
   -drive "format=raw,file=$image,if=none,id=boot,snapshot=on,aio=io_uring" "${disk[@]}" "${vga[@]}" "${extra[@]}" "${devices[@]+"${devices[@]}"}" ) 2>"$RUN/qemu.out" &
