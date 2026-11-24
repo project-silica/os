@@ -539,7 +539,10 @@ run_faults() {
   local -a machine says
   # One driver's five boots when named (the drivers' run at once); the
   # network driver's are below.
-  local -a block=(); for token in ${3:-virtio-blk nvme virtio-net}; do [ "$token" = virtio-net ] || block+=("$token"); done
+  local -a block=() network=()
+  for token in ${3:-virtio-blk nvme virtio-net e1000e}; do
+    case "$token" in virtio-net | e1000e) network+=("$token") ;; *) block+=("$token") ;; esac
+  done
   for token in "${block[@]+"${block[@]}"}"; do
     driver=${token%%_*} config=${token#*_}; [ "$config" != "$token" ] || config=""
     machine=() says=()
@@ -568,28 +571,32 @@ run_faults() {
       else record pass "$suite" "$name"; fi
     done
   done
-  # The network driver, under netfault (eight pings in flight to the
-  # user-mode gateway, nothing restarted on purpose): every ping after the
-  # driver's recovery must be answered, the driver restarted at most once,
-  # and nothing but the driver may say ERROR. Which request the fault lands
-  # on (a frame sent, or a buffer offered for one to arrive in) decides
-  # whether the driver ends or absorbs it.
-  case " ${3:-virtio-net} " in *" virtio-net "*) ;; *) return 0 ;; esac
-  for fault in "${faults[@]}"; do
-    name=fault_virtio_net_$fault
-    log=$(logfile "$suite" "build.$name")
-    img=$(build_system_image "$arch" "$log" "checks=netfault off=netd inject=virtio-net:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
-    serial=$(logfile "$suite" "$name")
-    "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user >"$serial.qemu" 2>&1
-    rc=$?
-    text=$(tr -d '\r\0' <"$serial")
-    restarts=$(grep -c "^devmgr: virtio-net for .* started again" <<<"$text")
-    other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: virtio-net: " | head -1 | cut -c1-140)
-    if [ $rc != 0 ] || ! grep -qx 'NETFAULT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
-    elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
-    elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
-    elif [ "$restarts" -gt 1 ]; then record fail "$suite" "$name" "the driver was started again $restarts times (serial: $serial)"
-    else record pass "$suite" "$name"; fi
+  # The network drivers (virtio-net, e1000e on an Intel 82574), under
+  # netfault (eight pings in flight to the user-mode gateway, nothing
+  # restarted on purpose): every ping after the driver's recovery must be
+  # answered, the driver restarted at most once, and nothing but the driver
+  # may say ERROR. Which request the fault lands on (a frame sent, or a
+  # buffer offered for one to arrive in) decides whether the driver ends or
+  # absorbs it.
+  local nic
+  for driver in "${network[@]+"${network[@]}"}"; do
+    nic=virtio; [ "$driver" = e1000e ] && nic=e1000e
+    for fault in "${faults[@]}"; do
+      name=fault_${driver//-/_}_$fault
+      log=$(logfile "$suite" "build.$name")
+      img=$(build_system_image "$arch" "$log" "checks=netfault off=netd inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+      serial=$(logfile "$suite" "$name")
+      "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" >"$serial.qemu" 2>&1
+      rc=$?
+      text=$(tr -d '\r\0' <"$serial")
+      restarts=$(grep -c "^devmgr: $driver for .* started again" <<<"$text")
+      other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: $driver: " | head -1 | cut -c1-140)
+      if [ $rc != 0 ] || ! grep -qx 'NETFAULT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+      elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
+      elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
+      elif [ "$restarts" -gt 1 ]; then record fail "$suite" "$name" "the driver was started again $restarts times (serial: $serial)"
+      else record pass "$suite" "$name"; fi
+    done
   done
 }
 

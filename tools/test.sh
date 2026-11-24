@@ -562,7 +562,7 @@ system_test() {
     *) unit "$q" "system.x86_64/$t" "${GIN[@]}" "${host[@]+"${host[@]}"}" -- "run_$t" x86_64 system.x86_64 ;;
   esac
 }
-FAULT_DRIVERS=(virtio-blk nvme nvme_one_vector nvme_4k nvme_namespaces virtio-net)
+FAULT_DRIVERS=(virtio-blk nvme nvme_one_vector nvme_4k nvme_namespaces virtio-net e1000e)
 # One repository's lint and host tests, one after another (they share a
 # build directory); the repositories' run at once.
 repo_units() {
