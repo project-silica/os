@@ -790,19 +790,23 @@ run_idle() {
     kill -0 $qemu 2>/dev/null || break
     sleep 0.1
   done
+  # The machine is ended by ending QEMU itself: qemu.sh then sees its
+  # emulator gone and returns (killing qemu.sh alone left the emulator
+  # running, the guest idling for ever; two were found an hour on).
+  stop() { pkill -f "qemu-system-[a-z0-9_]*.*$serial" 2>/dev/null; wait $qemu 2>/dev/null; }
   if ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping'; then
-    kill $qemu 2>/dev/null; wait $qemu
+    stop
     record fail "$suite" idle "the network never came up: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"; return 1
   fi
   sleep 10
   pid=$(pgrep -f "qemu-system-[a-z0-9_]*.*$serial" | head -1)
   dir=$(sudo -n ls /sys/kernel/debug/kvm/ 2>/dev/null | grep "^$pid-" | head -1)
   if [ -z "$pid" ] || [ -z "$dir" ]; then
-    kill $qemu 2>/dev/null; wait $qemu
+    stop
     record fail "$suite" idle "cannot read KVM's statistics of the machine (needs KVM and sudo for /sys/kernel/debug/kvm; pid '${pid}')"; return 1
   fi
   a=$(sudo -n cat "/sys/kernel/debug/kvm/$dir/halt_wakeup"); sleep 60; b=$(sudo -n cat "/sys/kernel/debug/kvm/$dir/halt_wakeup")
-  kill $qemu 2>/dev/null; wait $qemu 2>/dev/null
+  stop
   echo "idle: $((b - a)) wake-ups from halt in 60 s" >>"$serial.qemu"
   if [ "$((b - a))" = 0 ]; then record pass "$suite" idle
   else record fail "$suite" idle "$((b - a)) wake-ups from halt in 60 s of an idle system, not 0 (serial: $serial)"; fi
