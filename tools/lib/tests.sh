@@ -774,6 +774,34 @@ run_http() {
   else record pass "$suite" "$name"; fi
 }
 
+# run_ntp <arch> <suite>: the wall clock set from a time server (M4: "syncs
+# time"). A server on the host's loopback (lib/sntpd.py), reached from the
+# guest as 10.0.2.2, answers with the host's time plus 1,000 s; the system
+# is booted with `netd.ntp=10.0.2.2:<port>`. The network stack must say it
+# set the clock, by about +1,000 s, to the server's time (within 3 s).
+run_ntp() {
+  local arch=$1 suite=$2 log img serial rc port server line at want moved
+  port=$((20000 + ($$ + RANDOM) % 20000))
+  log=$(logfile "$suite" build.ntp)
+  img=$(build_system_image "$arch" "$log" "checks= netd.ntp=10.0.2.2:$port") || { record fail "$suite" ntp "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" ntp)
+  python3 -I "$TOOLS/lib/sntpd.py" "$port" 1000 >"${serial%.log}.sntpd" 2>&1 &
+  server=$!
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
+    --until "^netd: the wall clock is .* from 10\\.0\\.2\\.2:$port " >"$serial.qemu" 2>&1
+  rc=$?
+  kill $server 2>/dev/null; wait $server 2>/dev/null
+  want=$(( $(date -u +%s) + 1000 ))
+  line=$(tr -d '\r' <"$serial" | grep -m1 -a "^netd: the wall clock is .* from 10\\.0\\.2\\.2:$port ")
+  at=$(sed -n 's/^netd: the wall clock is \([0-9T:-]*Z\) from .*/\1/p' <<<"$line"); at=$( [ -n "$at" ] && date -u -d "$at" +%s 2>/dev/null)
+  moved=$(sed -n 's/.*(moved \([-+][0-9]*\) ms.*/\1/p' <<<"$line")
+  if [ $rc != 0 ] || [ -z "$at" ]; then record fail "$suite" ntp "the clock was never set from the server: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|netd: )' | cut -c1-120) (exit status $rc; serial: $serial)"
+  elif [ $((at - want)) -gt 3 ] || [ $((want - at)) -gt 3 ] || [ "${moved#+}" -lt 997000 ] || [ "${moved#+}" -gt 1003000 ]; then
+    record fail "$suite" ntp "set to $at, moved ${moved} ms, against the server's $want and +1000000 ms (serial: $serial)"
+  elif serial_has "$serial" '^ERROR'; then record fail "$suite" ntp "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
+  else record pass "$suite" ntp; fi
+}
+
 # run_shutdown <arch> <suite>: the power button shuts the system down in
 # order. The system stays up (no checks); once the device manager says the
 # button is armed the host presses it (QEMU's system_powerdown, an ACPI
