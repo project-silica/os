@@ -70,7 +70,7 @@ has '^size: pass=1 fail=0 skipped=0$' || bad "green: no size summary line: $OUT"
 has '^RESULT: pass=1 fail=0 skipped=0 time=[0-9]+$' || bad "green: RESULT is not pass=3 fail=0 skipped=0: $(last)"
 shape green
 [ "$SECS" -lt 60 ] || bad "green: --fast took $SECS s, want under 60"
-run; [ "$RC" = 0 ] && has '^RESULT: pass=2 ' && has '^unsafe: pass=1 fail=0 skipped=0$' || bad "green: bare test.sh does not default to --fast: $OUT"
+run; [ "$RC" = 0 ] && has '^RESULT: pass=3 ' && has '^unsafe: pass=1 fail=0 skipped=0$' && has '^no_python: pass=1 fail=0 skipped=0$' || bad "green: bare test.sh does not default to --fast: $OUT"
 
 # ---- 2. one deliberately failing test: exactly one ERROR line, non-zero exit --
 printf '#!/bin/bash\necho "assertion failed: boom"\nexit 1\n' >"$T/fail_x.sh"

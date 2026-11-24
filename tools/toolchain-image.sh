@@ -22,7 +22,7 @@
 
 USAGE="usage: toolchain-image.sh check | tag | key <repo> | restore-key <repo>"
 CF=$(checkout_of os)/tools/image/Containerfile
-REQUIRED_PKGS="ca-certificates git jq mtools ovmf python3 python3-yaml qemu-efi-aarch64 qemu-system-arm qemu-system-x86 rustup socat"
+REQUIRED_PKGS="ca-certificates git jq mtools ovmf qemu-efi-aarch64 qemu-system-arm qemu-system-x86 rustup socat"
 EXTRA_COMPONENTS="llvm-tools"
 
 need_cf() { [ -f "$CF" ] || { err "$CF: Containerfile is missing"; exit 1; }; }

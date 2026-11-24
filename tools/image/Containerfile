@@ -18,11 +18,11 @@ ARG RUST_COMPONENTS=rust-src,miri,clippy,rustfmt,llvm-tools
 
 # qemu-system-*, ovmf and
 # qemu-efi-aarch64: the emulators and their UEFI firmware. mtools: the FAT
-# images. python3 and python3-yaml: the workflow and schema checks.
+# images.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        build-essential ca-certificates git jq mtools ovmf \
-       python3 python3-yaml qemu-efi-aarch64 qemu-system-arm qemu-system-x86 \
+       qemu-efi-aarch64 qemu-system-arm qemu-system-x86 \
        rustup socat \
     && rm -rf /var/lib/apt/lists/*
 

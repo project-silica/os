@@ -44,7 +44,7 @@ commit = "x"
 EOF
 cp -r "$SRC/lib" "$SRC/toolchain-image.sh" "$OS/tools/"
 
-PKGS=(ca-certificates git jq mtools ovmf python3 python3-yaml qemu-efi-aarch64 qemu-system-arm qemu-system-x86 rustup socat)
+PKGS=(ca-certificates git jq mtools ovmf qemu-efi-aarch64 qemu-system-arm qemu-system-x86 rustup socat)
 write_containerfile() { # write_containerfile <path> <channel> <components> <packages...>
   local path=$1 ch=$2 comps=$3; shift 3
   cat >"$path" <<EOF

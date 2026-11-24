@@ -3,5 +3,9 @@
 version = 4
 
 [[package]]
+name = "silica-host"
+version = "0.0.0"
+
+[[package]]
 name = "silica-image"
 version = "0.0.0"

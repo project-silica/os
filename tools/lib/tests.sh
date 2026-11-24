@@ -218,37 +218,10 @@ run_panic_screen() {
     --screendump "$shot" --screendump-after 60 --on "^  kernel slide=screendump $shot" --until '^  kernel slide' >"$serial.qemu" 2>&1
   rc=$?
   if [ $rc != 0 ] || [ ! -s "$shot" ]; then record fail "$suite" panic_screen "no screen taken after the panic (exit status $rc; serial: $serial)"; return 1; fi
-  bad=$(python3 -I - "$shot" "$(checkout_of kernel)/formats/src/font.rs" <<'PY'
-import re, sys
-shot, font = sys.argv[1], sys.argv[2]
-glyphs = {}
-for line in open(font):
-    m = re.match(r"\s*\[(.*)\], // (.)(.)?(.)?$", line.rstrip())
-    if m:
-        c = m.group(2) if m.group(2) not in "'\"" else m.group(3)
-        glyphs[c] = [int(x, 16) for x in m.group(1).split(",")]
-data = open(shot, "rb").read()
-parts = data.split(maxsplit=4)
-w, h = int(parts[1]), int(parts[2])
-px = parts[4]
-def pixel(x, y):
-    i = (y * w + x) * 3
-    return tuple(px[i:i + 3])
-text = "PANIC: deliberate panic"
-for n, c in enumerate(text):
-    g = glyphs.get(c)
-    if g is None:
-        print(f"the font has no glyph for {c!r}"); sys.exit()
-    for dy in range(16):
-        for dx in range(8):
-            on = g[dy] & (0x80 >> dx) != 0
-            want = (255, 255, 255) if on else (0, 0, 0)
-            got = pixel(n * 8 + dx, 16 + dy)
-            if got != want:
-                print(f"character {n} ({c!r}) of the panic line: pixel ({dx},{dy}) is {got}, not {want}"); sys.exit()
-PY
-)
-  if [ -n "$bad" ]; then record fail "$suite" panic_screen "$bad (screen: $shot)"; else record pass "$suite" panic_screen; fi
+  local screen
+  screen=$(host_tool screen "$log") || { record fail "$suite" panic_screen "the screen check did not build: $(first_error "$log") (log: $log)"; return 1; }
+  if bad=$("$screen" text "$shot" "$(checkout_of kernel)/formats/src/font.rs" 1 'PANIC: deliberate panic'); then record pass "$suite" panic_screen
+  else record fail "$suite" panic_screen "${bad:-the screen check failed with no reason} (screen: $shot)"; fi
 }
 
 # run_boot_error <arch> <suite> <label> <expected text> <silica-image arguments...>
@@ -728,7 +701,7 @@ run_console_port() {
 # system runs httpd as a check (`checks=http`) on QEMU's user-mode network
 # with a host port forwarded to the guest's port 80; once it listens, the
 # host sends <requests> (default 640: ten on each connection) requests of
-# 1 KiB to 1 MiB over 64 kept-alive connections at once (lib/httpload.py),
+# 1 KiB to 1 MiB over 64 kept-alive connections at once (host-tools' httpload),
 # checking every body byte, then asks it to end. Every answer must be
 # right, and httpd must end in order (`init: httpd passed`).
 # run_http_load: the same with M4's exit test's 10,000 requests (2.3 GB:
@@ -739,14 +712,19 @@ run_http_load() { run_http "$1" "$2" http_load 10000; }
 # shell (a keyboard, the console's); the connections then open are reset,
 # the program's listener is set up again on the new stack (its events), and
 # the load goes on. Judged: no answer ever wrong, every failure a
-# connection's, at most 1 s without an answer, httpd ends in order.
+# connection's, at most 1 s without an answer, httpd ends in order. The
+# second is a time, so it runs alone (QUIET_SYSTEM). (Its gaps of 1.1 to
+# 5.9 s in one run of three to seven were netd's: a reset without ACK of a
+# connection whose peer still waited in SYN-SENT, which the peer rightly
+# dropped, 2026-11-24.)
 run_http_restart() { run_http "$1" "$2" http_restart 6000 restart; }
 run_http() {
-  local arch=$1 suite=$2 name=${3:-http} requests=${4:-640} mode=${5:-} log img serial rc port qemu load i
+  local arch=$1 suite=$2 name=${3:-http} requests=${4:-640} mode=${5:-} log img serial rc port qemu load i httpload
   local -a extra=()
   [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^httpd: 2000 answers$=restart netd\n')
   log=$(logfile "$suite" "build.$name")
   img=$(build_system_image "$arch" "$log" "checks=http") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  httpload=$(host_tool httpload "$log") || { record fail "$suite" "$name" "httpload did not build: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   # A host port of this run's own (runs in parallel must not share one).
   port=$((20000 + ($$ + RANDOM) % 20000))
@@ -763,7 +741,7 @@ run_http() {
     record fail "$suite" "$name" "httpd never listened: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"
     return 1
   fi
-  load=$(python3 -I "$TOOLS/lib/httpload.py" "$port" "$requests" 64 $mode 2>&1); local lrc=$?
+  load=$("$httpload" "$port" "$requests" 64 $mode 2>&1); local lrc=$?
   printf '%s\n' "$load" >"${serial%.log}.load"
   wait $qemu; rc=$?
   if [ $lrc != 0 ]; then record fail "$suite" "$name" "$(head -2 <<<"$load" | tr '\n' ' ' | cut -c1-200) (serial: $serial)"
@@ -776,17 +754,18 @@ run_http() {
 }
 
 # run_ntp <arch> <suite>: the wall clock set from a time server (M4: "syncs
-# time"). A server on the host's loopback (lib/sntpd.py), reached from the
+# time"). A server on the host's loopback (host-tools' sntpd), reached from the
 # guest as 10.0.2.2, answers with the host's time plus 1,000 s; the system
 # is booted with `netd.ntp=10.0.2.2:<port>`. The network stack must say it
 # set the clock, by about +1,000 s, to the server's time (within 3 s).
 run_ntp() {
-  local arch=$1 suite=$2 log img serial rc port server line at want moved
+  local arch=$1 suite=$2 log img serial rc port server line at want moved sntpd
   port=$((20000 + ($$ + RANDOM) % 20000))
   log=$(logfile "$suite" build.ntp)
   img=$(build_system_image "$arch" "$log" "checks= netd.ntp=10.0.2.2:$port") || { record fail "$suite" ntp "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  sntpd=$(host_tool sntpd "$log") || { record fail "$suite" ntp "sntpd did not build: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" ntp)
-  python3 -I "$TOOLS/lib/sntpd.py" "$port" 1000 >"${serial%.log}.sntpd" 2>&1 &
+  "$sntpd" "$port" 1000 >"${serial%.log}.sntpd" 2>&1 &
   server=$!
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
     --until "^netd: the wall clock is .* from 10\\.0\\.2\\.2:$port " >"$serial.qemu" 2>&1
@@ -876,38 +855,17 @@ run_console() {
   [ -n "$bad" ] || [ "$(grep -cE '^  fbdisplay: [0-9]+x[0-9]+, ' <<<"$text")" = 2 ] ||
     bad="the display drivers' log, read in the shell, does not hold both drivers' first line: $(grep -E 'fbdisplay: [0-9]+x' <<<"$text" | tr '\n' '|')"
   [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
-  # The picture: rows of 16 pixels; a row holds text if any pixel differs
-  # from the top-right corner's (the background). The screen holds the
-  # shell's lines from the banner to "back" (the serial line has the other
-  # programs' lines among them, and a prompt they cut short shown again
-  # after them, so the line it was cut from is one the screen lacks), maybe
-  # the next prompt.
+  # The picture (screen rows): the screen holds the shell's lines from the
+  # banner to "back" (the serial line has the other programs' lines among
+  # them, and a prompt they cut short shown again after them, so the line
+  # it was cut from is one the screen lacks), maybe the next prompt.
   lines=$(sed -n '/^Silica\. Type help/,/^back$/p' <<<"$text" | grep -cvE '^((devmgr|virtio-input|fbdisplay|console|kernel|init|partitions|logd): |silica> $)')
-  [ -n "$bad" ] || bad=$(python3 -I - "$shot" "$lines" <<'PY'
-import sys
-try:
-    d = open(sys.argv[1], 'rb').read()
-except OSError:
-    print("no picture of the screen was taken"); sys.exit()
-lines = int(sys.argv[2])
-head = d.split(b'\n', 3); w, h = map(int, head[1].split()); px = head[3]
-bg = px[(w - 1) * 3:w * 3]
-rows = []
-for r in range(h // 16):
-    xs = [x for y in range(r * 16, r * 16 + 16) for x in range(w) if px[(y * w + x) * 3:(y * w + x) * 3 + 3] != bg]
-    rows.append(max(xs) + 1 if xs else 0)
-text = [i for i, n in enumerate(rows) if n]
-if lines >= len(rows):
-    # Scrolled: every row holds text, the banner gone off the top.
-    if text != list(range(len(rows))):
-        print(f"the screen scrolled, but its rows of text are {text}, not all {len(rows)}")
-    sys.exit()
-if text[:lines] != list(range(lines)) or len(text) > lines + 1 or text[-1] != len(text) - 1:
-    print(f"the screen's rows of text are {text}, not the first {lines} or {lines + 1}"); sys.exit()
-if not 34 * 8 < rows[0] <= 35 * 8:
-    print(f"the first row of text ends at pixel {rows[0]}, not in the banner's 35th cell")
-PY
-)
+  local screen
+  if [ -z "$bad" ]; then
+    if ! screen=$(host_tool screen "$log"); then bad="the screen check did not build: $(first_error "$log") (log: $log)"
+    elif ! bad=$("$screen" rows "$shot" "$lines"); then bad=${bad:-the screen check failed with no reason}
+    fi
+  fi
   if [ -z "$bad" ]; then record pass "$suite" console
   else record fail "$suite" console "$bad (serial: $serial)"; fi
 }

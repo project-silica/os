@@ -120,6 +120,13 @@ build_image_tool() {
   echo "$(cache_of os)/target/release/silica-image"
 }
 
+# host_tool <name> <log>: the path of a program the tests run on the host
+# beside a guest (os/host-tools: httpload, sntpd, screen), built if needed.
+host_tool() {
+  cargo_run os "$2" build --release -q -p silica-host --bin "$1" || return 1
+  echo "$(cache_of os)/target/release/$1"
+}
+
 # run_pieces <kind> <arch> <log>: what a run's images are assembled from,
 # built once per run, architecture and kind and copied into the run: the
 # stripped kernel, the loader, the image tool, and the root task (kind

@@ -63,7 +63,7 @@ evidence_init
 # them that judge a time.
 SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http power recovery entropy console_port shutdown console typeahead nvme net net_recovery hotplug partitions
   recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces)
-QUIET_SYSTEM=" recovery recovery_nvme net_recovery svcload "
+QUIET_SYSTEM=" recovery recovery_nvme net_recovery svcload http_restart "
 # unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has
 # two phases: the units that judge a time, one after another with nothing
 # beside them; then all the others at once.
@@ -139,6 +139,38 @@ suite_unsafe() {
   done
   if [ -z "$bad" ]; then record pass "$s" modules
   else record fail "$s" modules "unsafe code outside spec/UNSAFE_MODULES.md:$bad"; fi
+}
+
+# The project is Rust, with shell for the tools that drive builds and
+# emulators: no Python anywhere in it, tests and tools included (a program
+# the tests run on the host is a Rust program of os/host-tools). Every file
+# of the workshop and of each repository, committed or not yet (vendored
+# crates left out), is checked: no Python source, compiled code or notebook
+# by its name, and no text that names the interpreter (a shebang, a
+# command, a package to install). Prose about the Python programs Silica
+# runs for its users says "Python", which is allowed.
+NO_PY_NAMES='\.(py|pyc|pyo|pyw|pyi|pyz|ipynb)$|(^|/)__pycache__/'
+NO_PY_TEXT='pyth[o]n[0-9.]*'
+own_files() { # own_files <dir>: what Git there tracks or would add, vendored crates left out
+  git -C "$1" ls-files --cached --others --exclude-standard 2>/dev/null | grep -vE '(^|/)vendor/'
+}
+ws_files() { # the workshop's own files (the repositories are checked out inside it)
+  local r skip=""
+  for r in $(all_repos); do skip="$skip|${r//./\\.}"; done
+  own_files "$WS" | grep -vE "^(${skip#|}|tools)(/|\$)"
+}
+suite_no_python() {
+  local s=no_python r dir f bad=""
+  for r in . $(all_repos); do
+    if [ "$r" = . ]; then dir=$WS; else dir=$(checkout_of "$r"); fi
+    [ -d "$dir" ] || continue
+    local -a files=()
+    if [ "$r" = . ]; then mapfile -t files < <(ws_files); else mapfile -t files < <(own_files "$dir"); fi
+    while IFS= read -r f; do [ -n "$f" ] && bad="$bad $r/$f"; done < <(printf '%s\n' "${files[@]}" | grep -E "$NO_PY_NAMES")
+    while IFS= read -r f; do bad="$bad $r/$f"; done < <(cd "$dir" && printf '%s\0' "${files[@]}" | xargs -0 -r grep -lIwE -e "$NO_PY_TEXT" -- 2>/dev/null)
+  done
+  if [ -z "$bad" ]; then record pass "$s" files
+  else record fail "$s" files "Python in the project (the tests' host programs are Rust, os/host-tools):$bad"; fi
 }
 
 suite_host() { # every host test of the repo's default members
@@ -243,7 +275,7 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
   done
   unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
   unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
-  unit any inos.x86_64/panic_screen "${GIN[@]}" -- run_panic_screen x86_64 inos.x86_64
+  unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64
   # Boots that cannot succeed say why.
   local e=inos.x86_64 boot='EFI/BOOT/BOOTX64.EFI=$L'
   boot_error() { local label=$1; shift; unit any "$e/$label" "${GIN[@]}" -- run_boot_error x86_64 $e "$label" "$@"; }
@@ -514,11 +546,15 @@ suite_bench() {
 # of one driver, "faults.<driver>"), a unit: each boots its own machine.
 system_test() {
   local t=$1 q=any
+  local -a host=()
   gin x86_64 system
   case "$QUIET_SYSTEM" in *" $t "*) q=quiet ;; esac
+  # The checks that run a program of os/host-tools beside the guest (theirs
+  # alone: GIN is shared by the units declared after this one).
+  case "$t" in http | http_load | http_restart | ntp | console) host=(crate:os:silica-host) ;; esac
   case "$t" in
     faults.*) unit any "system.x86_64/$t" "${GIN[@]}" -- run_faults x86_64 system.x86_64 "${t#faults.}" ;;
-    *) unit "$q" "system.x86_64/$t" "${GIN[@]}" -- "run_$t" x86_64 system.x86_64 ;;
+    *) unit "$q" "system.x86_64/$t" "${GIN[@]}" "${host[@]+"${host[@]}"}" -- "run_$t" x86_64 system.x86_64 ;;
   esac
 }
 FAULT_DRIVERS=(virtio-blk nvme nvme_one_vector nvme_4k nvme_namespaces virtio-net)
@@ -614,7 +650,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
             case "$guest" in
               panic_backtrace) unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64 ;;
               null_object_faults) unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null ;;
-              panic_screen) unit any inos.x86_64/panic_screen "${GIN[@]}" -- run_panic_screen x86_64 inos.x86_64 ;;
+              panic_screen) unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64 ;;
             esac
           fi
           continue ;;
@@ -637,6 +673,8 @@ else
   if [ -z "$repo" ]; then
     in=(); for r in $(all_repos); do in+=("repo:$r"); done
     held unsafe "${in[@]}" ws:spec/UNSAFE_MODULES.md -- suite_unsafe
+    while IFS= read -r f; do in+=("ws:$f"); done < <(ws_files)
+    held no_python "${in[@]}" -- suite_no_python
   fi
   if { in_scope kernel || in_scope os; } && [ -n "$have_kernel" ]; then
     held kernel.build repo+:kernel "${LIB[@]}" -- suite_builds
@@ -657,7 +695,7 @@ else
   guests
   # The hosted CI definitions test themselves (every workflow parses).
   if in_scope .github && [ -d "$(checkout_of .github)/tests" ]; then
-    for t in "$(checkout_of .github)"/tests/*.sh; do held ".github.tests/${t##*/}" repo:.github -- run_named .github "tests/${t##*/}" .github.tests; done
+    for t in "$(checkout_of .github)"/tests/*.sh; do held ".github.tests/${t##*/}" repo:.github host:actionlint -- run_named .github "tests/${t##*/}" .github.tests; done
   fi
   wait
   [ "$tier" != fast ] && in_scope os && suite_tools alone

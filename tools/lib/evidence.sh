@@ -32,8 +32,8 @@
 #                     calls, as bash holds them (so a comment is no change).
 #                     The unit's own command is always one of its inputs.
 #   host:<name>       qemu-<arch> (the emulator, its firmware, whether it
-#                     has KVM), kani, cpu (the processor model and microcode,
-#                     the host's kernel)
+#                     has KVM), kani, actionlint, cpu (the processor model
+#                     and microcode, the host's kernel)
 #   env:<NAME>        a variable that changes what the unit does
 #   anything else     itself (a machine's options, a duration, a milestone)
 #
@@ -198,6 +198,7 @@ host_hash() {
         [ "$a" = x86_64 ] && [ -w /dev/kvm ] && [ -z "${SILICA_NO_KVM:-}" ] && echo kvm
       } | sha256sum | cut -c1-40 ;;
     kani) { cargo kani --version 2>/dev/null || echo none; } | sha256sum | cut -c1-40 ;;
+    actionlint) { actionlint --version 2>/dev/null || echo none; } | sha256sum | cut -c1-40 ;;
     cpu) { LC_ALL=C lscpu 2>/dev/null | grep -E '^(Model name|Stepping)'; grep -m1 microcode /proc/cpuinfo 2>/dev/null; uname -r; } | sha256sum | cut -c1-40 ;;
     *) echo unknown ;;
   esac

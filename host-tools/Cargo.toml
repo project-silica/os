@@ -1,0 +1,22 @@
+[package]
+name = "silica-host"
+description = "Programs the tests run on the host beside a guest: HTTP load, a time server, screen checks."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "httpload"
+path = "src/httpload.rs"
+
+[[bin]]
+name = "sntpd"
+path = "src/sntpd.rs"
+
+[[bin]]
+name = "screen"
+path = "src/screen.rs"
+
+[lints]
+workspace = true
