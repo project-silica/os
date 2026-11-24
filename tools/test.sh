@@ -64,7 +64,7 @@ evidence_init
 SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http power recovery entropy console_port shutdown console typeahead nvme net net_e1000e
   dhcp_e1000e ntp_e1000e http_e1000e net_recovery net_recovery_e1000e hotplug partitions
   recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces
-  remote interop)
+  remote)
 QUIET_SYSTEM=" recovery recovery_nvme net_recovery net_recovery_e1000e svcload http_restart "
 # unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has
 # two phases: the units that judge a time, one after another with nothing
@@ -592,6 +592,9 @@ guests() {
       system_test svcload
       system_test http_load
       system_test http_load_e1000e
+      # TCP against the host's Linux stack, three paths of eight cases:
+      # some 40 s, most of it 16 MiB through loss.
+      system_test interop
       system_test idle
       system_test http_restart
       unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64
@@ -642,7 +645,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
         done
       fi
       # The system image's own tests, by name.
-      case " ${SYSTEM_TESTS[*]} faults systest svcload http_load http_load_e1000e http_restart idle " in
+      case " ${SYSTEM_TESTS[*]} faults systest svcload http_load http_load_e1000e http_restart idle interop " in
         *" $guest "*)
           if [ "$guest" = faults ]; then for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
           elif [ "$guest" = systest ]; then
