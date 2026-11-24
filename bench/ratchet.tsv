@@ -9,8 +9,8 @@ ipc_pairs1	0.210972	vs-linux	2568424	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 ipc_pairs8	0.208656	vs-linux	20513743	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 ipc_scaling	8.03	value
 ipc_cross_pairs1	0.398561	vs-linux	1036366	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-ipc_cross_pairs4	0.413279	vs-linux	4046050	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-ipc_cross_scaling	4.10	value
+ipc_cross_pairs4	0.413279	vs-linux	4053306	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+ipc_cross_scaling	4.21	value
 page_fault	0.70412	vs-linux	564	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 null_syscall	0.845361	vs-linux	82	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 ipc_roundtrip_p99	0.116482	vs-linux	434	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
@@ -35,6 +35,6 @@ net_tx_confined	0.0512922	vs-linux	2567233	12th_Gen_Intel(R)_Core(TM)_i9-12900K+
 sched_latency_p999	3400	value
 sched_latency_max	99783	value
 http_p50	0.579152	vs-linux	92523	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-http_p99	0.624619	vs-linux	399429	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-tcp_cpu_gb	3.855	vs-linux	3106.699	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
-boot_server	0.0562149	vs-linux	66.701	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+http_p99	0.535492	vs-linux	342434	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+tcp_cpu_gb	3.75318	vs-linux	3024.645	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+boot_server	0.0531623	vs-linux	63.079	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
