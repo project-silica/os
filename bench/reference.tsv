@@ -33,3 +33,12 @@ net_tx	2.16186e+06	frames/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 net_rtt_confined	22820	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 net_rtt_p99_confined	32725	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 net_tx_confined	131679	frames/s	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+# The server lines (M4's TCP gates), from the session of 2026-11-24 (bench.sh --now --linux --runs 3
+# --only http,tcp,boot_server, other programs 0.51 processors busy): bench/linux at that date with IPv4
+# and TCP, its server image (build_linux server), measured from the host by tcpbench as Silica's httpd
+# is, 8 processors; the median of 3 boots (http_p50 159615 159756 165800, http_p99 516757 639476
+# 718728, tcp_cpu_gb 778.8 805.9 808.2, boot_server 1183.0 1186.5 1214.5).
+http_p50	159756	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+http_p99	639476	ns	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+tcp_cpu_gb	805.888	ms	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
+boot_server	1186.537	ms	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned

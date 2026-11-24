@@ -19,10 +19,13 @@
 #   file.
 # - The instruction counts are a function of the kernel's source: counted
 #   when it changed, all eight boots at once.
-# - Silica's timings come in two groups with their own boots: the kernel
+# - Silica's timings come in three groups with their own boots: the kernel
 #   paths (the benchmark image: the kernel repository) and the devices
 #   (blk_*, net_*: the system image, plain and confined: the kernel and the
-#   system). A group whose sources did not change is not booted: its results
+#   system), and the server (http_*, tcp_*, boot_server: the system image's
+#   httpd on a tap, measured from the host by host-tools' tcpbench, the
+#   Linux baseline's server likewise: boot_server below). A group whose
+#   sources did not change is not booted: its results
 #   are kept under its inputs (lib/evidence.sh) and read back.
 # - --only blk,net (prefixes of metric names) measures and judges those
 #   metrics alone, booting only the images that report them.
@@ -132,7 +135,11 @@ net_tx_confined frames/s higher le 1 3
 spawn ns lower win 1 3
 spawn_p99 ns lower le 1 3
 sched_latency_p999 ns lower le 1 3 40
-sched_latency_max ns lower le 1 3 40'
+sched_latency_max ns lower le 1 3 40
+http_p50 ns lower le 1 4
+http_p99 ns lower le 1 4
+tcp_cpu_gb ms lower le 1 4
+boot_server ms lower win 1 4'
 
 runs=5 out="" update=0 compare="" sweep="" only="" relinux=0 aa=0 steps=0 now=0
 # How much better than Linux's locked number Silica's target is, in percent.
@@ -177,7 +184,7 @@ wanted() {
 # instruction counts (the kernel's source, emulated), the devices (the
 # system image, on the machines with and without an IOMMU), the kernel
 # paths (the benchmark image).
-group_of() { case "$1" in insns_*) echo counts ;; blk_*|net_*) echo io ;; *) echo kernel ;; esac; }
+group_of() { case "$1" in insns_*) echo counts ;; blk_*|net_*) echo io ;; http_*|tcp_*|boot_server) echo server ;; *) echo kernel ;; esac; }
 accel=tcg; [ -w /dev/kvm ] && [ -z "${SILICA_NO_KVM:-}" ] && accel=kvm
 SMP=${SILICA_BENCH_SMP:-8} MEM=${SILICA_BENCH_MEM:-512}
 
@@ -364,6 +371,47 @@ boot() {
   [ -n "$t0" ] && [ -n "$t1" ] && awk -v a="$t0" -v b="$t1" 'BEGIN { printf "boot_userspace %.3f ms\n", (b - a) * 1000 }' >>"$RUN/$vals.values"
   [ -n "$tq" ] && [ -n "$t0" ] && awk -v a="$tq" -v b="$t0" 'BEGIN { printf "firmware %.3f ms\n", (b - a) * 1000 }' >>"$RUN/$vals.values"
 }
+# boot_server <system> <image> <run> <values>: one boot of a server image
+# (Silica's system image with httpd, or the Linux baseline's server:
+# build_linux server) on a tap of its own, measured from the host by
+# host-tools' tcpbench, the same for both (spec/TESTING.md 4.2, M4):
+# boot_server, the first HTTP answer from the firmware starting the boot
+# option (as boot_userspace is taken); http_p50 and http_p99, 64 kept-alive
+# connections asking 1 KiB at 5,000 a second for 10 s, open loop; tcp_cpu_gb,
+# the guest's processors per GiB read at a fixed 200 MB/s, KVM's halt polling
+# off meanwhile so that only the guest's own time is counted. The host's end
+# runs on a processor of its own ($srv_cpu).
+srvtap=silica-srv0 srvhost=10.214.15.1 srvguest=10.214.15.2
+srv_cpu=$(fastest_cpus "$((SMP + 2))" | tr , '\n' | grep -vxF -f <(printf '%s\n' $pins "$echo_cpu") | head -n 1)
+boot_server() {
+  local sys=$1 img=$2 i=$3 vals=$4 ser=$RUN/$1.$3.serial st=$RUN/$1.$3.stamp qlog=$LOGS/bench/$1.$3.log q qpid out t0 poll
+  if ! ip link show "$srvtap" >/dev/null 2>&1; then
+    sudo -n ip tuntap add dev "$srvtap" mode tap user "$(id -un)" && sudo -n ip addr add "$srvhost/24" dev "$srvtap" \
+      && sudo -n sysctl -q -w "net.ipv6.conf.$srvtap.disable_ipv6=1" || { err "cannot make the server benchmarks' tap $srvtap"; quit 2; }
+  fi
+  sudo -n ip link set "$srvtap" up
+  "$TOOLS/qemu.sh" --image "$img" --serial "$ser" --stamp "$st" --timeout "${SILICA_BENCH_TIMEOUT:-300}" \
+    --smp "$SMP" --mem "$MEM" ${pin:+--pin "$pin"} ${pin:+${emu:+--emulator "$emu"}} --disk-props "$disk_props" \
+    --net "tap:$srvtap" ${SILICA_BENCH_MACHINE:-} >"$qlog" 2>&1 &
+  q=$!
+  tb() { ${srv_cpu:+taskset -c "$srv_cpu"} "$tcpbench" "$srvguest:80" "$@"; }
+  fail_run() { kill "$q" 2>/dev/null; wait "$q" 2>/dev/null; echo "ERROR: bench::$sys: run $i: $1 (serial $ser)"; quit 1; }
+  out=$(tb ready 60) || fail_run "no first answer: $out"
+  t0=$(tr -d '\r' <"$st" | awk '/BdsDxe: starting/ { print $1; exit }')
+  [ -n "$t0" ] && awk -v a="$t0" -v b="${out#ready }" 'BEGIN { printf "boot_server %.3f ms\n", (b - a) * 1000 }' >>"$RUN/$vals.values"
+  qpid=$(pgrep -f "qemu-system-x86_64.*$srvtap" | head -n 1)
+  out=$(tb http 64 5000 10) || fail_run "$(grep -m1 ERROR <<<"$out")"
+  awk '$1 == "BENCH" { print $2, $3, $4 }' <<<"$out" >>"$RUN/$vals.values"
+  poll=$(cat /sys/module/kvm/parameters/halt_poll_ns)
+  echo 0 | sudo -n tee /sys/module/kvm/parameters/halt_poll_ns >/dev/null
+  out=$(tb bulk 1024 200 "$qpid"); rc=$?
+  echo "$poll" | sudo -n tee /sys/module/kvm/parameters/halt_poll_ns >/dev/null
+  [ $rc = 0 ] || fail_run "$(grep -m1 ERROR <<<"$out")"
+  awk '$1 == "BENCH" { print $2, $3, $4 }' <<<"$out" >>"$RUN/$vals.values"
+  # Asked to end: its answer, then the machine turns off.
+  { exec 3<>"/dev/tcp/$srvguest/80" && printf 'GET /quit HTTP/1.1\r\nHost: guest\r\n\r\n' >&3 && timeout 5 cat <&3 >/dev/null; exec 3>&-; } 2>/dev/null
+  wait "$q"
+}
 # Kernel instructions per operation of the fixed paths (spec/TESTING.md
 # 4.1), counted under TCG with icount by tools/profile.sh: a boot running
 # the benchmark twice minus one running it once is exactly one benchmark.
@@ -428,22 +476,24 @@ IN_COUNTS=(repo+:kernel crate:os:silica-image "${LIB[@]}" path:os:tools/profile.
 # boots it) is one of its inputs.
 if [ -z "$compare$sweep" ]; then
   stubbed=${SILICA_BENCH_IMG:+1}
-  need_kernel=0 need_io=0 need_counts=0
+  need_kernel=0 need_io=0 need_counts=0 need_server=0
   while read -r name _; do
     wanted "$name" || continue
     eval "need_$(group_of "$name")=1"
   done <<<"$METRICS"
-  [ -z "$stubbed" ] || need_io=0   # the tool's own test has no system image
-  [ $((need_kernel + need_io + need_counts)) -gt 0 ] || die "--only $only names no metric"
+  [ -z "$stubbed" ] || { need_io=0; need_server=0; }   # the tool's own test has no system image
+  [ $((need_kernel + need_io + need_counts + need_server)) -gt 0 ] || die "--only $only names no metric"
   MACHINE=("${LIB[@]}" path:os:tools/qemu.sh host:qemu-x86_64 host:cpu fn:boot env:SILICA_BENCH_MACHINE
     "machine:accel=$accel smp=$SMP mem=$MEM pin=$pin tuned=$tuned net=$net_ok")
   IN_KERNEL=(repo+:kernel crate:os:silica-image "${MACHINE[@]}" "runs:$runs" "file:${SILICA_BENCH_IMG:-}")
   IN_IO=(repo+:system repo+:kernel path:os:bench/net crate:os:silica-image "${MACHINE[@]}" "runs:$runs")
-  do_linux=0 do_kernel=0 do_io=0 do_counts=0
+  do_linux=0 do_kernel=0 do_io=0 do_counts=0 do_server=0
   # The baseline image is built for the owner's --linux alone.
   do_linux=$relinux
   kept bench.kernel "${IN_KERNEL[@]}" || do_kernel=$need_kernel; f_kernel=$EV_FILE k_kernel=$EV_KEY t_kernel=$EV_TEXT
   kept bench.io "${IN_IO[@]}" || do_io=$need_io; f_io=$EV_FILE k_io=$EV_KEY t_io=$EV_TEXT
+  IN_SERVER=(repo+:system repo+:kernel crate:os:silica-image crate:os:silica-host fn:boot_server "${MACHINE[@]}" "runs:$runs")
+  kept bench.server "${IN_SERVER[@]}" || do_server=$need_server; f_server=$EV_FILE k_server=$EV_KEY t_server=$EV_TEXT
   kept bench.counts "${IN_COUNTS[@]}" tune: || do_counts=$need_counts; f_counts=$EV_FILE k_counts=$EV_KEY t_counts=$EV_TEXT
 
   silica="" silica_sys="" linux=""
@@ -458,6 +508,18 @@ if [ -z "$compare$sweep" ]; then
     log=$LOGS/bench/build.silica-system.log
     silica_sys=$(build_system_image x86_64 "$log" "checks=spawn,block,net off=netd bench") && [ -f "$silica_sys" ] || { err "cannot build the Silica system image (log: $log)"; quit 2; }
   fi
+  if [ $do_server = 1 ] || { [ $do_linux = 1 ] && [ $need_server = 1 ]; }; then
+    # The server benchmarks: httpd on the stack at the address the Linux
+    # baseline's server takes, and the host's end.
+    log=$LOGS/bench/build.silica-server.log
+    silica_srv=$(build_system_image x86_64 "$log" "checks=http netd.address=$srvguest/24 netd.router=$srvhost") && [ -f "$silica_srv" ] \
+      || { err "cannot build the Silica server image (log: $log)"; quit 2; }
+    tcpbench=$(host_tool tcpbench "$log") || { err "cannot build tcpbench (log: $log)"; quit 2; }
+  fi
+  if [ $do_linux = 1 ] && [ $need_server = 1 ]; then
+    log=$LOGS/bench/build.linux-server.log
+    linux_srv=$(build_linux "$log" server) || { err "cannot build the Linux server image (log: $log)"; quit 2; }
+  fi
   if [ $do_linux = 1 ]; then
     log=$LOGS/bench/build.linux.log
     linux=$(build_linux "$log"); rc=$?
@@ -470,7 +532,7 @@ if [ -z "$compare$sweep" ]; then
   fi
   # The counts first: they are not timings, and use every processor.
   [ $do_counts = 0 ] || { count_start silica; wait; count_finish silica "$RUN/counts.values"; [ -s "$RUN/counts.values" ] && keep bench.counts "$k_counts" "$t_counts" "$RUN/counts.values"; }
-  if [ $((do_kernel + do_io + do_linux)) -gt 0 ]; then
+  if [ $((do_kernel + do_io + do_linux + do_server)) -gt 0 ]; then
     hold_host
     [ -n "$stubbed" ] || net_up || echo "bench: no network benchmarks (the tap and the host's echo need passwordless sudo and a spare processor)"
     watch_start
@@ -481,20 +543,23 @@ if [ -z "$compare$sweep" ]; then
         boot silica-system "$silica_sys" "$i" io plain blk
         boot silica-system-confined "$silica_sys" "$i" io iommu confined
       fi
+      [ $do_server = 0 ] || boot_server silica-server "$silica_srv" "$i" server
       if [ $do_linux = 1 ]; then
         [ -n "$stubbed" ] || boot linux-confined "$linux" "$i" linuxnow iommu confined
         boot linux "$linux" "$i" linuxnow plain
+        [ -z "${linux_srv:-}" ] || boot_server linux-server "$linux_srv" "$i" linuxnow
       fi
     done
     watch_end
     echo "bench: other programs kept $host_other of the host's processors busy during the timed boots"
-    for part in kernel io; do [ ! -s "$RUN/$part.values" ] || echo "host_other $host_other cpus" >>"$RUN/$part.values"; done
+    for part in kernel io server; do [ ! -s "$RUN/$part.values" ] || echo "host_other $host_other cpus" >>"$RUN/$part.values"; done
     [ $do_kernel = 0 ] || keep bench.kernel "$k_kernel" "$t_kernel" "$RUN/kernel.values"
     [ $do_io = 0 ] || keep bench.io "$k_io" "$t_io" "$RUN/io.values"
+    [ $do_server = 0 ] || keep bench.server "$k_server" "$t_server" "$RUN/server.values"
   fi
   # What was not measured is read back; the run says which, and from when.
   : >"$RUN/silica.values"; note=""
-  for part in kernel io counts; do
+  for part in kernel io counts server; do
     eval "f=\$f_$part do=\$do_$part need=\$need_$part"
     [ "$need" = 1 ] || continue
     [ "$do" = 1 ] || { [ -f "$f" ] && grep -v '^#' "$f" >"$RUN/$part.values" && note="$note $part ($(kept_at "$f"))"; }
