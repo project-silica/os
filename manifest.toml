@@ -3,7 +3,7 @@
 [repos.idl]
 url = "https://github.com/project-silica/idl"
 milestone = 0
-commit = "ea01797582cd19febc98680b938487ed0aa33495"
+commit = "3cbd64f3c57e300a59c200cb5b002cef0a541b54"
 
 [repos.kernel]
 url = "https://github.com/project-silica/kernel"
@@ -13,7 +13,7 @@ commit = "1f7456d96b0aff0ab09f224026fdb603293affdb"
 [repos.system]
 url = "https://github.com/project-silica/system"
 milestone = 0
-commit = "69d58038aaddf77a57e9e2d3f2d4f51cb10c6f15"
+commit = "842dc412c410e2f51ea69457766b4f8c9978a450"
 
 [repos.".github"]
 url = "https://github.com/project-silica/.github"
