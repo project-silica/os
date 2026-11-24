@@ -438,12 +438,13 @@ run_nvme_namespaces() { run_nvme "$1" "$2" namespaces; }
 run_net() {
   local arch=$1 suite=$2 log img serial rc text name
   log=$(logfile "$suite" build.net)
-  img=$(build_system_image "$arch" "$log" "checks=net off=netd") || { record fail "$suite" net "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.link=cycle") || { record fail "$suite" net "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" net)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user >"$serial.qemu" 2>&1
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
+    --on '^netcheck: ready for link down$=set_link net0 off' --on '^netcheck: confirmed link down$=set_link net0 on' >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in virtio-net.arp virtio-net.ping; do
+  for name in virtio-net.link_cycle virtio-net.arp virtio-net.ping; do
     if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name"
     else record fail "$suite" "$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
