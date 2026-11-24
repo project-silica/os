@@ -724,15 +724,24 @@ run_console_port() {
 # run_http_load: the same with M4's exit test's 10,000 requests (2.3 GB:
 # seconds under KVM, minutes emulated, so not in the fast tier).
 run_http_load() { run_http "$1" "$2" http_load 10000; }
+# run_http_restart: M4's "killing the network stack under load": once httpd
+# has answered 2,000 of 6,000 requests the host types `restart netd` at the
+# shell (a keyboard, the console's); the connections then open are reset,
+# the program's listener is set up again on the new stack (its events), and
+# the load goes on. Judged: no answer ever wrong, every failure a
+# connection's, at most 1 s without an answer, httpd ends in order.
+run_http_restart() { run_http "$1" "$2" http_restart 6000 restart; }
 run_http() {
-  local arch=$1 suite=$2 name=${3:-http} requests=${4:-640} log img serial rc port qemu load i
+  local arch=$1 suite=$2 name=${3:-http} requests=${4:-640} mode=${5:-} log img serial rc port qemu load i
+  local -a extra=()
+  [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^httpd: 2000 answers$=restart netd\n')
   log=$(logfile "$suite" "build.$name")
   img=$(build_system_image "$arch" "$log" "checks=http") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   # A host port of this run's own (runs in parallel must not share one).
   port=$((20000 + ($$ + RANDOM) % 20000))
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
-    --net "user:$port-80" ${SILICA_HTTP_CAPTURE:+--capture "$SILICA_HTTP_CAPTURE"} >"$serial.qemu" 2>&1 &
+    --net "user:$port-80" ${SILICA_HTTP_CAPTURE:+--capture "$SILICA_HTTP_CAPTURE"} "${extra[@]+"${extra[@]}"}" >"$serial.qemu" 2>&1 &
   qemu=$!
   for i in $(seq 600); do
     serial_has "$serial" '^httpd: listening on port 80' && break
@@ -744,12 +753,14 @@ run_http() {
     record fail "$suite" "$name" "httpd never listened: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"
     return 1
   fi
-  load=$(python3 -I "$TOOLS/lib/httpload.py" "$port" "$requests" 64 2>&1); local lrc=$?
+  load=$(python3 -I "$TOOLS/lib/httpload.py" "$port" "$requests" 64 $mode 2>&1); local lrc=$?
   printf '%s\n' "$load" >"${serial%.log}.load"
   wait $qemu; rc=$?
   if [ $lrc != 0 ]; then record fail "$suite" "$name" "$(head -2 <<<"$load" | tr '\n' ' ' | cut -c1-200) (serial: $serial)"
   elif [ $rc != 0 ] || ! serial_has "$serial" '^init: httpd passed'; then
     record fail "$suite" "$name" "httpd did not end in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC|httpd)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif [ "$mode" = restart ] && ! serial_has "$serial" '^init: netd restarted, as asked'; then
+    record fail "$suite" "$name" "netd was never restarted (serial: $serial)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" "$name" "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
   else record pass "$suite" "$name"; fi
 }
