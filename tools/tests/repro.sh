@@ -29,7 +29,9 @@ echo "fn main() {}" >"$K/kernel/src/main.rs"; echo "target/" >"$K/.gitignore"
 echo "ignored build output" >"$K/target/junk.bin"
 echo "fn tool() {}" >"$OS/tool.rs"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t.invalid
-for r in "$K" "$OS"; do
+# idl and system: every build copies them (the os workspace names their crates).
+mkdir -p "$WS/idl" "$WS/system"; echo service >"$WS/system/input"; echo protocol >"$WS/idl/input"
+for r in "$K" "$OS" "$WS/idl" "$WS/system"; do
   (cd "$r" && git init -q . && git add -A && git commit -qm fake) || { echo "ERROR: repro-test: cannot create the fake repositories"; exit 2; }
 done
 printf '#!/bin/sh\necho /fake/sysroot\n' >"$FX/bin/rustc"; chmod +x "$FX/bin/rustc"
@@ -159,12 +161,11 @@ expect_diff "loader-differs" "loader" "BOOTX64.EFI" "kernel.elf disk.img"
 expect_diff "image-differs" "image" "disk.img" "kernel.elf BOOTX64.EFI"
 expect_diff "all-differ-first-named" "image loader kernel" "kernel.elf" "BOOTX64.EFI disk.img"
 expect_diff "loader-and-image-differ" "image loader" "BOOTX64.EFI" "kernel.elf disk.img"
+mv "$WS/system" "$FX/system.away" || exit 2
+: >"$CALLS"
 run --system
-[ $RC = 2 ] && [ ! -s "$CALLS" ] || bad "a missing checkout did not stop the system check before building"
-for r in idl system; do
-  git init -q "$WS/$r" || exit 2
-done
-echo service >"$WS/system/input"; echo protocol >"$WS/idl/input"
+[ $RC = 2 ] && [ ! -s "$CALLS" ] || bad "a missing checkout did not stop the check before building"
+mv "$FX/system.away" "$WS/system" || exit 2
 expect_diff "only-system-differs" "system" "system.img" "kernel.elf BOOTX64.EFI disk.img" --system
 # The pass and the failure leave no stale copies of an earlier failure.
 run

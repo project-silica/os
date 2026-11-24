@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Dependency direction (spec/REPOSITORIES.md, Dependencies).
 #   check-deps.sh
-# idl depends on nothing; kernel only on idl; every other repository only on
-# idl and the kernel's interface crates (libsys, silica-formats); nothing
-# depends on os or workshop. Code of another repository is named by a path
+# idl depends on nothing; kernel only on idl; os (the integration repository)
+# on any; every other repository only on idl and the kernel's interface
+# crates (libsys, silica-formats); nothing depends on os or workshop. Code of another repository is named by a path
 # into its checkout beside this one (the workshop layout is the build
 # layout: a git URL cannot be resolved offline even when it is overridden),
 # or by the git URL of the published repository; either way the direction
@@ -42,6 +42,10 @@ allowed() { # allowed <from repo> <to repo> <crate>
     *:os | *:workshop) return 1 ;;
     kernel:idl) return 0 ;;
     kernel:*) return 1 ;;
+    # The integration repository builds and tests what every other one
+    # makes; its host tools (the owner's remote client) speak the system's
+    # protocols with the system's own crates.
+    os:*) return 0 ;;
     *:idl) return 0 ;;
     *:kernel) [ "$3" = libsys ] || [ "$3" = silica-formats ] ;;
     *) return 1 ;;

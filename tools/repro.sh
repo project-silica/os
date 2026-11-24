@@ -3,7 +3,7 @@
 # reproducible"; component A10).
 #   repro.sh [--system]
 # With --system, also build and compare the bootable image containing init,
-# the services, their drivers and the manifests, from copies of system and idl.
+# the services, their drivers and the manifests (from the same copies).
 # Builds the x86_64 kernel, the UEFI loader and the disk image twice, each time
 # from its own copy of the kernel and os checkouts (tracked files and files not
 # ignored, so uncommitted work is checked too) in a different directory with its
@@ -18,11 +18,13 @@
 # Exit 0 reproducible, 1 not reproducible or a build failed, 2 usage error.
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
-repos=(kernel os)
+# The os workspace names idl and system crates (its host tools), so cargo
+# loads it only with them beside it: every build copies all four.
+repos=(kernel os idl system)
 artifacts=(kernel.elf BOOTX64.EFI disk.img)
 case "$#:${1:-}" in
   0:) ;;
-  1:--system) repos+=(idl system); artifacts+=(system.img) ;;
+  1:--system) artifacts+=(system.img) ;;
   *) die "unknown argument $1 (usage: repro.sh [--system])" ;;
 esac
 for r in "${repos[@]}"; do [ -d "$(checkout_of "$r")" ] || die "no checkout of $r"; done

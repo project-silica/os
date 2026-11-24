@@ -46,6 +46,11 @@ copy_repo() { # copy_repo <source checkout> <dest>: tracked and not ignored file
 W=$FX/ws; mkdir -p "$W"; touch "$W/bootstrap.pins"
 copy_repo "$SRC_OS" "$W/os"
 copy_repo "$SRC_KERNEL" "$W/kernel"
+# The os workspace names idl and system crates (its host tools): cargo loads it
+# only with them beside it.
+for r in idl system; do
+  copy_repo "$REAL_WS/$r" "$W/$r" || { echo "ERROR: repro-real: cannot copy the $r checkout"; exit 2; }
+done
 { [ -f "$W/os/tools/repro.sh" ] && [ -f "$W/os/image-builder/src/lib.rs" ] && [ -f "$W/kernel/Cargo.toml" ]; } ||
   { echo "ERROR: repro-real: cannot create the disposable workshop"; exit 2; }
 
@@ -65,9 +70,6 @@ repro "$FX/planted.out"
 cp -r "$W/target/logs/repro" "$FX/planted-logs" 2>/dev/null
 gx -C "$W/os" checkout -q -- image-builder/src/lib.rs
 [ -z "$(gx -C "$W/os" status --porcelain)" ] || bad "the plant was not removed from the os checkout"
-for r in idl system; do
-  copy_repo "$REAL_WS/$r" "$W/$r" || { bad "cannot copy the $r checkout"; exit 2; }
-done
 repro "$FX/clean.out" --system
 if [ "$(cat "$FX/clean.out.rc")" != 0 ]; then
   saved=$(mktemp -d "$BASE/repro-failure.XXXX") || exit 2

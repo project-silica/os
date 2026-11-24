@@ -197,8 +197,67 @@ const CASES: [&str; 8] = [
     "many",
 ];
 
+/// `tcpinterop serve <port>`: the same `GET /<n>` answers httpd gives, from the
+/// host's stack, so the cases can run between two Linux stacks: the
+/// yardstick for the guest's numbers on the same path.
+fn serve(port: u16) -> ! {
+    let l = std::net::TcpListener::bind(("0.0.0.0", port)).unwrap_or_else(|e| {
+        eprintln!("tcpinterop: cannot listen on {port}: {e}");
+        exit(1)
+    });
+    for s in l.incoming().flatten() {
+        std::thread::spawn(move || serve_one(s));
+    }
+    exit(0)
+}
+
+fn serve_one(mut s: TcpStream) {
+    let mut input = Vec::new();
+    let mut buf = vec![0u8; 65536];
+    loop {
+        while let Some(end) = input.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head: Vec<u8> = input.drain(..end + 4).collect();
+            let head = String::from_utf8_lossy(&head);
+            let path = head.split(' ').nth(1).unwrap_or("");
+            let close = head.contains("Connection: close");
+            if path == "/quit" {
+                exit(0);
+            }
+            let n: u64 = path.trim_start_matches('/').parse().unwrap_or(0);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {n}\r\nConnection: {}\r\n\r\n",
+                if close { "close" } else { "keep-alive" }
+            );
+            if s.write_all(head.as_bytes()).is_err() {
+                return;
+            }
+            let mut at = 0u64;
+            while at < n {
+                let k = ((n - at) as usize).min(buf.len());
+                for (j, b) in buf[..k].iter_mut().enumerate() {
+                    *b = ((at + j as u64) % 251) as u8;
+                }
+                if s.write_all(&buf[..k]).is_err() {
+                    return;
+                }
+                at += k as u64;
+            }
+            if close {
+                return;
+            }
+        }
+        match s.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(k) => input.extend_from_slice(&buf[..k]),
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("serve") {
+        serve(args.get(1).and_then(|p| p.parse().ok()).unwrap_or(PORT));
+    }
     let (Some(guest), Some(phase)) = (
         args.first().and_then(|a| a.parse::<std::net::Ipv4Addr>().ok()),
         args.get(1),
