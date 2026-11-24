@@ -735,6 +735,23 @@ run_http_load_e1000e() { NIC=e1000e run_http "$1" "$2" http_load_e1000e 10000; }
 # connection whose peer still waited in SYN-SENT, which the peer rightly
 # dropped, 2026-11-24.)
 run_http_restart() { run_http "$1" "$2" http_restart 6000 restart; }
+# host_ports <n>: the first of <n> consecutive host ports that no TCP or UDP
+# socket holds now, below the kernel's ephemeral range, so that no outbound
+# connection of the host's can take one before QEMU or a host tool binds it
+# (drawn from 20000-39999, a run once failed with QEMU unable to forward a
+# port inside that range, 2026-11-24). Random, so that runs in parallel
+# rarely draw the same ones.
+host_ports() {
+  local n=$1 low used p i k
+  read -r low _ </proc/sys/net/ipv4/ip_local_port_range
+  used=" $(ss -Htanu 2>/dev/null | awk '{k=split($5,a,":"); printf "%s ", a[k]}') "
+  for i in $(seq 100); do
+    p=$((10000 + (RANDOM * 32768 + RANDOM) % (low - 10000 - n)))
+    for ((k = 0; k < n; k++)); do [[ $used == *" $((p + k)) "* ]] && continue 2; done
+    echo "$p"; return 0
+  done
+  return 1
+}
 run_http() {
   local arch=$1 suite=$2 name=${3:-http} requests=${4:-640} mode=${5:-} log img serial rc port qemu load i httpload
   local -a extra=()
@@ -744,7 +761,7 @@ run_http() {
   httpload=$(host_tool httpload "$log") || { record fail "$suite" "$name" "httpload did not build: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   # A host port of this run's own (runs in parallel must not share one).
-  port=$((20000 + ($$ + RANDOM) % 20000))
+  port=$(host_ports 1) || { record fail "$suite" "$name" "no free host port below the ephemeral range"; return 1; }
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
     --net "user:$port-80" --nic "${NIC:-virtio}" ${SILICA_HTTP_CAPTURE:+--capture "$SILICA_HTTP_CAPTURE"} "${extra[@]+"${extra[@]}"}" >"$serial.qemu" 2>&1 &
   qemu=$!
@@ -799,7 +816,8 @@ run_remote() {
   cp "$httpd" "$dir/httpd-faults.elf" && printf '\000\020\000\000\000\000\000\000' | dd of="$dir/httpd-faults.elf" bs=1 seek=24 conv=notrunc status=none
   printf 'not a program\n' >"$dir/notes.txt"
   serial=$(logfile "$suite" remote)
-  port=$((20000 + ($$ + RANDOM) % 20000)); web=$((port + 1))
+  port=$(host_ports 2) || { record fail "$suite" remote "no free host ports below the ephemeral range"; return 1; }
+  web=$((port + 1))
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
     --net "user:$port-22,$web-80" --nic "${NIC:-virtio}" >"$serial.qemu" 2>&1 &
   qemu=$!
@@ -984,7 +1002,7 @@ run_ntp_e1000e() { NIC=e1000e run_ntp "$@"; }
 run_ntp() {
   local arch=$1 suite=$2 log img serial rc port server line at want moved sntpd nic=${NIC:-virtio} name=ntp
   [ "$nic" = virtio ] || name=ntp_$nic
-  port=$((20000 + ($$ + RANDOM) % 20000))
+  port=$(host_ports 1) || { record fail "$suite" "$name" "no free host port below the ephemeral range"; return 1; }
   log=$(logfile "$suite" "build.$name")
   img=$(build_system_image "$arch" "$log" "checks= netd.ntp=10.0.2.2:$port") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   sntpd=$(host_tool sntpd "$log") || { record fail "$suite" "$name" "sntpd did not build: $(first_error "$log") (log: $log)"; return 1; }
