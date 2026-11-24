@@ -206,6 +206,16 @@ run --target ok_parse --time 5
 expect "coverage drop" 1 1
 has "^ERROR: fuzz: $OKID: coverage dropped: the committed seeds reach 5 edges, the floor is 50" || bad "coverage drop: wrong ERROR line: $OUT"
 grep -q -- '-max_total_time' "$RUNS" && bad "coverage drop: the fuzzer ran anyway: $(cat "$RUNS")"
+# --save under the floor fuzzes to win it back, keeps what it found, and fails
+# without lowering the floor when the seeds still fall short
+: >"$RUNS"
+run --target ok_parse --time 5 --save
+expect "save under the floor" 1 1
+grep -q -- '-max_total_time' "$RUNS" || bad "save under the floor: the fuzzer did not run: $(cat "$RUNS")"
+has "^ERROR: fuzz: $OKID: coverage dropped: after this run the committed seeds reach [0-9]* edges, still under the floor 50" || bad "save under the floor: wrong ERROR line: $OUT"
+grep -qP '^ok_parse\t50$' "$FL" || bad "save under the floor: the floor was lowered: $(cat "$FL")"
+ls "$K/kernel-core/fuzz/corpus/ok_parse" | grep -q '^new-' || bad "save under the floor: what the run found was not kept"
+rm -f "$K"/kernel-core/fuzz/corpus/ok_parse/new-*
 for f in "/^ok_parse\t/d" 's/^ok_parse\t50$/ok_parse\t0/'; do
   cp "$FX/floor.orig" "$FL"; sed -i 's/^ok_parse\t5$/ok_parse\t50/' "$FL"; sed -i "$f" "$FL"
   run --target ok_parse --time 5

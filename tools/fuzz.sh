@@ -26,8 +26,10 @@
 # so every run checks it before fuzzing: fewer edges than the floor, or a
 # target with no floor, is an ERROR. --save merges what a clean run found into
 # the committed corpus (minimized) and records its coverage as the new floor;
-# commit both with the change that earned them. A floor only goes down in a
-# commit that says why.
+# commit both with the change that earned them. Under --save a corpus below
+# its floor is fuzzed anyway, to win the coverage back, and the run fails if
+# the merged seeds still fall short: --save never lowers a floor. A floor only
+# goes down by hand, in a commit that says why.
 # target/fuzz/coverage.tsv has one row per target of the last run that
 # included it: id, edges covered, features, corpus size, executions, status.
 # --report prints it.
@@ -220,10 +222,12 @@ run_target() { # run_target <id> <repo> <fuzz dir> <name>
     fail_line "$id" "a committed seed fails: $why (log: $out/seed.log)"
     coverage_row "$id" "$seeded" 0 0 0 seed-crash; return
   fi
-  if [ -n "$floor" ] && [ "$seeded" -lt "$floor" ]; then
+  if [ -n "$floor" ] && [ "$seeded" -lt "$floor" ] && [ "$save" = 0 ]; then
     fail_line "$id" "coverage dropped: the committed seeds reach $seeded edges, the floor is $floor (log: $out/seed.log)"
     coverage_row "$id" "$seeded" 0 0 0 coverage-drop; return
   fi
+  # (Under --save a drop does not stop the run: fuzzing is how the corpus
+  # wins it back, and step 5 accepts nothing under the floor.)
   # 4. the time-boxed run
   before=$(ls "$out/crashes")
   local seed=(); [ -d "$fd/corpus/$name" ] && seed=("$fd/corpus/$name")
@@ -257,6 +261,12 @@ run_target() { # run_target <id> <repo> <fuzz dir> <name>
       fail_line "$id" "merge into $seeds failed (log: $out/merge.log)"; coverage_row "$id" "$cov" "$ft" "$corp" "$execs" failed; return
     fi
     seeded=$(seed_cov "$out" "$fd" "$name")
+    # The floor never goes down here: that is a hand edit in a commit that
+    # says why. The merged corpus stays (it only adds inputs).
+    if [ -n "$floor" ] && [ "$seeded" -lt "$floor" ]; then
+      fail_line "$id" "coverage dropped: after this run the committed seeds reach $seeded edges, still under the floor $floor (the corpus keeps what was found: fuzz longer; log: $out/seed.log)"
+      coverage_row "$id" "$seeded" "$ft" "$corp" "$execs" coverage-drop; return
+    fi
     # Targets of one crate share its floor file: one writer at a time.
     local lock; exec {lock}>>"$FUZZ_OUT/.lock"; flock "$lock"
     { [ -f "$fd/coverage-floor.tsv" ] && awk -F'\t' -v n="$name" '$1 != n && $1 != "target"' "$fd/coverage-floor.tsv"
