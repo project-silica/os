@@ -483,8 +483,12 @@ if [ -z "$compare$sweep" ]; then
   done <<<"$METRICS"
   [ -z "$stubbed" ] || { need_io=0; need_server=0; }   # the tool's own test has no system image
   [ $((need_kernel + need_io + need_counts + need_server)) -gt 0 ] || die "--only $only names no metric"
+  # The build-time constants set in the environment (SILICA_TUNE_*) are an
+  # input of every group: a tuned kernel's results once stood in, read
+  # back, for the untuned kernel's (2026-11-24).
   MACHINE=("${LIB[@]}" path:os:tools/qemu.sh host:qemu-x86_64 host:cpu fn:boot env:SILICA_BENCH_MACHINE
-    "machine:accel=$accel smp=$SMP mem=$MEM pin=$pin tuned=$tuned net=$net_ok")
+    "machine:accel=$accel smp=$SMP mem=$MEM pin=$pin tuned=$tuned net=$net_ok"
+    "tune:$(env | grep '^SILICA_TUNE_' | sort | paste -sd, -)")
   IN_KERNEL=(repo+:kernel crate:os:silica-image "${MACHINE[@]}" "runs:$runs" "file:${SILICA_BENCH_IMG:-}")
   IN_IO=(repo+:system repo+:kernel path:os:bench/net crate:os:silica-image "${MACHINE[@]}" "runs:$runs")
   do_linux=0 do_kernel=0 do_io=0 do_counts=0 do_server=0
