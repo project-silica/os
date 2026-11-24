@@ -271,6 +271,25 @@ suite_inos() { # in-OS tests on one architecture, each a unit; --fast boots boot
   fi
 }
 
+# suite_cpu_models [name]: the processors Silica must refuse, each by
+# name, and the baseline it must run on (kernel_core::x86): emulated, the
+# host being neither (and an Armv8.0 core, without PAN, which the aarch64
+# user programs are built for). With a name (cpu.no_avx), that one alone.
+suite_cpu_models() {
+  local only=${1:-} base=Haswell-noTSX,+x2apic,+tsc-deadline,+invtsc,+xsave,+xgetbv1 label a model want
+  while IFS='|' read -r label a model want; do
+    [ -z "$only" ] || [ "$only" = "$label" ] || continue
+    [ "$a" = x86_64 ] || command -v qemu-system-aarch64 >/dev/null || continue
+    gin "$a"
+    unit any "inos.$a/$label" "${GIN[@]}" -- run_cpu "$a" "inos.$a" "$label" "$model" "$want"
+  done <<EOF
+cpu.baseline|x86_64|$base|
+cpu.armv8_0|aarch64|cortex-a72|
+cpu.no_avx|x86_64|$base,-avx,-avx2,-fma,-f16c|ERROR: loader: this processor lacks AVX (x86-64-v3), which Silica requires
+cpu.no_nx|x86_64|$base,-nx|ERROR: loader: this processor lacks NX (no-execute pages), which Silica requires
+EOF
+}
+
 suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
   local c m
   gin x86_64
@@ -279,6 +298,7 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
       unit any "inos.x86_64/boot_ok.smp$c.mem$m" "${GIN[@]}" -- inos_on x86_64 inos.x86_64 boot_ok "boot_ok.smp$c.mem$m" --smp "$c" --mem "$m"
     done
   done
+  suite_cpu_models
   unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
   unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
   unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64
@@ -651,6 +671,15 @@ if [ "${#guests[@]}" -gt 0 ]; then
           elif [ "$guest" = systest ]; then
             [ "$PHASE" = rest ] && { gin x86_64 system; unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64; }
           else system_test "$guest"; fi
+          continue ;;
+      esac
+      # The processor models, by name (cpu.baseline, cpu.no_avx, ...).
+      case "$guest" in
+        cpu.*)
+          if [ "$PHASE" = rest ]; then
+            gin x86_64
+            suite_cpu_models "$guest"
+          fi
           continue ;;
       esac
       # The kernel's panic tests, by name.
