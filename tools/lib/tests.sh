@@ -286,12 +286,21 @@ run_boot_error() {
 # repository's init) boots on two processors, starts its programs and
 # reports BOOT OK through the debug-exit device.
 run_system() {
-  local arch=$1 suite=$2 log img serial rc
+  local arch=$1 suite=$2 log img serial rc t0 t1 wall at
   log=$(logfile "$suite" build.boot)
   img=$(build_system_image "$arch" "$log") || { record fail "$suite" boot "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" boot)
+  t0=$(date -u +%s)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
+  t1=$(date -u +%s)
+  # The wall clock from the hardware clock, before any network (M4): the
+  # emulator's clock is the host's, so the system's must fall within the
+  # boot (2 s either way: the firmware's clock counts whole seconds).
+  wall=$(tr -d '\r' <"$serial" | sed -n "s/^init: the wall clock is \([0-9T:-]*Z\) (the firmware's)$/\1/p" | head -1)
+  at=$( [ -n "$wall" ] && date -u -d "$wall" +%s 2>/dev/null)
+  if [ -n "$at" ] && [ "$at" -ge $((t0 - 2)) ] && [ "$at" -le $((t1 + 2)) ]; then record pass "$suite" wall_clock
+  else record fail "$suite" wall_clock "the wall clock at boot was '${wall:-not said}', the host's between $(date -u -d @$t0 +%H:%M:%S) and $(date -u -d @$t1 +%H:%M:%S) (serial: $serial)"; fi
   if [ $rc = 0 ] && serial_has "$serial" -x 'BOOT OK'; then
     # The x86_64 machine has an IOMMU: the system must not call itself unconfined there.
     if [ "$arch" = x86_64 ] && grep -aq '^devmgr: this machine cannot confine DMA' "$serial"; then
