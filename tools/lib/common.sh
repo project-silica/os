@@ -255,11 +255,73 @@ host_tune() {
   done <"$2"
 }
 
+# host_shield <cpu list> <state file>: keep every other program on the host
+# off the timed processors (and their SMT siblings) while the benchmark
+# runs, cset-shield fashion: each cgroup not on this program's own path is
+# confined to the other processors (cpuset.cpus), the cpuset controller
+# enabled down that path as needed. Recorded in the state file for
+# host_restore (on every exit, a killed run's included). Without it a
+# browser on the host made the network round trip's slow tail vary
+# twentyfold between runs of one tree (2026-11-24).
+# cpu_list <list>: the processors of a kernel CPU list ("0-3,8,10-11"), one
+# per word.
+cpu_list() {
+  local part
+  for part in ${1//,/ }; do
+    if [[ $part =~ ^([0-9]+)-([0-9]+)$ ]]; then seq "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    elif [[ $part =~ ^[0-9]+$ ]]; then echo "$part"
+    else return 1; fi
+  done
+}
+
+host_shield() {
+  local root=/sys/fs/cgroup self keep others d cpu sib path child
+  [ -f $root/cgroup.controllers ] && grep -qw cpuset $root/cgroup.controllers || return 0
+  self=$(sed -n 's/^0:://p' /proc/self/cgroup)
+  keep=" "
+  for cpu in $(cpu_list "$1"); do
+    for sib in $(cpu_list "$(cat "/sys/devices/system/cpu/cpu$cpu/topology/thread_siblings_list")"); do keep="$keep$sib "; done
+  done
+  others=""
+  for cpu in $(cpu_list "$(cat /sys/devices/system/cpu/online)"); do
+    [[ $keep == *" $cpu "* ]] || others="${others:+$others,}$cpu"
+  done
+  [ -n "$others" ] || return 0
+  # Down this program's path: the controller on, and every sibling off the
+  # timed processors.
+  path=$root
+  for d in $(echo "${self#/}" | tr / ' '); do
+    if ! grep -qw cpuset "$path/cgroup.subtree_control"; then
+      # Off again from here down (host_restore): the kernel and systemd
+      # carry an enabled controller into subtrees that delegate, so undoing
+      # only these writes would leave it on below.
+      grep -q "^#cpuset-off " "$2" || printf '#cpuset-off %s\n' "$path" >>"$2"
+      echo +cpuset | sudo -n tee "$path/cgroup.subtree_control" >/dev/null || return 1
+    fi
+    for child in "$path"/*/; do
+      child=${child%/}
+      [ "$(basename "$child")" = "$d" ] && continue
+      [ -f "$child/cpuset.cpus" ] || continue
+      printf '%s %s\n' "$child/cpuset.cpus" "$(cat "$child/cpuset.cpus")" >>"$2"
+      echo "$others" | sudo -n tee "$child/cpuset.cpus" >/dev/null || true
+    done
+    path=$path/$d
+  done
+}
+
 # host_restore <state file>: put back what host_tune recorded (the governor
 # first: the preference cannot be written under "performance").
 host_restore() {
   local f v
   [ -s "$1" ] || return 0
-  { grep scaling_governor "$1"; grep -v scaling_governor "$1"; } | while read -r f v; do echo "$v" | sudo -n tee "$f" >/dev/null; done
+  # The rest undone last change first: the shield turned the cpuset
+  # controller on from the root down, and it goes off from the bottom up.
+  { grep scaling_governor "$1"; grep -v -e scaling_governor -e '^#cpuset-off ' "$1" | tac; } | while read -r f v; do echo "$v" | sudo -n tee "$f" >/dev/null 2>&1; done
+  # The shield's controller, off in every cgroup below where it was turned
+  # on, the deepest first (a parent cannot drop it while a child uses it).
+  sed -n 's/^#cpuset-off //p' "$1" | while read -r top; do
+    find "$top" -name cgroup.subtree_control 2>/dev/null | awk -F/ '{ print NF "\t" $0 }' | sort -rn | cut -f2- |
+      while read -r f; do grep -qw cpuset "$f" && echo -cpuset | sudo -n tee "$f" >/dev/null 2>&1; done
+  done
   rm -f "$1"
 }

@@ -273,6 +273,8 @@ hold_host() { # hold the host still, once, before the first timed boot
   trap 'host_restore "$policy"; net_down' EXIT
   trap 'exit 130' INT TERM
   host_tune "$pin${echo_cpu:+,$echo_cpu}" "$policy" || { host_restore "$policy"; err "cannot hold the host still (host_tune failed)"; exit 2; }
+  # Nothing else on the host runs where the benchmark does (host_shield).
+  host_shield "$pin${echo_cpu:+,$echo_cpu}" "$policy" || { host_restore "$policy"; err "cannot keep the host's other programs off the timed processors (host_shield failed)"; exit 2; }
 }
 
 # net_up: the tap and the echo, or return 1 (no sudo, no spare processor).
