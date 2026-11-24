@@ -408,21 +408,25 @@ run_nvme_namespaces() { run_nvme "$1" "$2" namespaces; }
 # an ARP request for the gateway must be answered, then 200 pings, with
 # frames built by hand and sent from, and received into, the program's own
 # memory. The system must come up and nothing may report an error.
+# run_net_e1000e: the same over an Intel 82574 (M4: "runs the same tests
+# over an e1000e interface"), its driver e1000e.
+run_net_e1000e() { run_net "$1" "$2" e1000e; }
 run_net() {
-  local arch=$1 suite=$2 log img serial rc text name
-  log=$(logfile "$suite" build.net)
-  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.link=cycle") || { record fail "$suite" net "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" net)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
+  local arch=$1 suite=$2 nic=${3:-virtio} log img serial rc text name driver=virtio-net test=net
+  [ "$nic" = e1000e ] && driver=e1000e test=net_e1000e
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.link=cycle") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" \
     --on '^netcheck: ready for link down$=set_link net0 off' --on '^netcheck: confirmed link down$=set_link net0 on' >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in virtio-net.link_cycle virtio-net.arp virtio-net.ping; do
+  for name in "$driver.link_cycle" "$driver.arp" "$driver.ping"; do
     if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name"
     else record fail "$suite" "$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
-  if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" net
-  else record fail "$suite" net "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+  if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" "$test"
+  else record fail "$suite" "$test" "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
 # run_net_recovery <arch> <suite>: the network interface's driver
@@ -430,16 +434,19 @@ run_net() {
 # gateway with eight requests in flight while the device manager restarts
 # virtio-net every 200 ms for 3 s: no transmit may fail, no recovery may
 # take over 250 ms, and once the restarts stop every ping must be answered.
+# net_recovery_e1000e: the same with an Intel 82574 and its driver.
+run_net_recovery_e1000e() { NIC=e1000e run_net_recovery "$@"; }
 run_net_recovery() {
-  local arch=$1 suite=$2 log img serial rc text
-  log=$(logfile "$suite" build.net_recovery)
-  img=$(build_system_image "$arch" "$log" "checks=netload off=netd") || { record fail "$suite" net_recovery "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" net_recovery)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user >"$serial.qemu" 2>&1
+  local arch=$1 suite=$2 log img serial rc text nic=${NIC:-virtio} name=net_recovery
+  [ "$nic" = virtio ] || name=net_recovery_$nic
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=netload off=netd") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  if [ $rc = 0 ] && grep -qx 'NETLOAD OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" net_recovery
-  else record fail "$suite" net_recovery "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+  if [ $rc = 0 ] && grep -qx 'NETLOAD OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" "$name"
+  else record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
 # run_hotplug <arch> <suite> [nvme[_config]]: a disk put in while the
@@ -707,6 +714,9 @@ run_console_port() {
 # run_http_load: the same with M4's exit test's 10,000 requests (2.3 GB:
 # seconds under KVM, minutes emulated, so not in the fast tier).
 run_http_load() { run_http "$1" "$2" http_load 10000; }
+# The same two over an Intel 82574 (M4).
+run_http_e1000e() { NIC=e1000e run_http "$1" "$2" http_e1000e; }
+run_http_load_e1000e() { NIC=e1000e run_http "$1" "$2" http_load_e1000e 10000; }
 # run_http_restart: M4's "killing the network stack under load": once httpd
 # has answered 2,000 of 6,000 requests the host types `restart netd` at the
 # shell (a keyboard, the console's); the connections then open are reset,
@@ -729,7 +739,7 @@ run_http() {
   # A host port of this run's own (runs in parallel must not share one).
   port=$((20000 + ($$ + RANDOM) % 20000))
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
-    --net "user:$port-80" ${SILICA_HTTP_CAPTURE:+--capture "$SILICA_HTTP_CAPTURE"} "${extra[@]+"${extra[@]}"}" >"$serial.qemu" 2>&1 &
+    --net "user:$port-80" --nic "${NIC:-virtio}" ${SILICA_HTTP_CAPTURE:+--capture "$SILICA_HTTP_CAPTURE"} "${extra[@]+"${extra[@]}"}" >"$serial.qemu" 2>&1 &
   qemu=$!
   for i in $(seq 600); do
     serial_has "$serial" '^httpd: listening on port 80' && break
@@ -758,16 +768,18 @@ run_http() {
 # guest as 10.0.2.2, answers with the host's time plus 1,000 s; the system
 # is booted with `netd.ntp=10.0.2.2:<port>`. The network stack must say it
 # set the clock, by about +1,000 s, to the server's time (within 3 s).
+run_ntp_e1000e() { NIC=e1000e run_ntp "$@"; }
 run_ntp() {
-  local arch=$1 suite=$2 log img serial rc port server line at want moved sntpd
+  local arch=$1 suite=$2 log img serial rc port server line at want moved sntpd nic=${NIC:-virtio} name=ntp
+  [ "$nic" = virtio ] || name=ntp_$nic
   port=$((20000 + ($$ + RANDOM) % 20000))
-  log=$(logfile "$suite" build.ntp)
-  img=$(build_system_image "$arch" "$log" "checks= netd.ntp=10.0.2.2:$port") || { record fail "$suite" ntp "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  sntpd=$(host_tool sntpd "$log") || { record fail "$suite" ntp "sntpd did not build: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" ntp)
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks= netd.ntp=10.0.2.2:$port") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  sntpd=$(host_tool sntpd "$log") || { record fail "$suite" "$name" "sntpd did not build: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
   "$sntpd" "$port" 1000 >"${serial%.log}.sntpd" 2>&1 &
   server=$!
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" \
     --until "^netd: the wall clock is .* from 10\\.0\\.2\\.2:$port " >"$serial.qemu" 2>&1
   rc=$?
   kill $server 2>/dev/null; wait $server 2>/dev/null
@@ -775,11 +787,11 @@ run_ntp() {
   line=$(tr -d '\r' <"$serial" | grep -m1 -a "^netd: the wall clock is .* from 10\\.0\\.2\\.2:$port ")
   at=$(sed -n 's/^netd: the wall clock is \([0-9T:-]*Z\) from .*/\1/p' <<<"$line"); at=$( [ -n "$at" ] && date -u -d "$at" +%s 2>/dev/null)
   moved=$(sed -n 's/.*(moved \([-+][0-9]*\) ms.*/\1/p' <<<"$line")
-  if [ $rc != 0 ] || [ -z "$at" ]; then record fail "$suite" ntp "the clock was never set from the server: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|netd: )' | cut -c1-120) (exit status $rc; serial: $serial)"
+  if [ $rc != 0 ] || [ -z "$at" ]; then record fail "$suite" "$name" "the clock was never set from the server: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|netd: )' | cut -c1-120) (exit status $rc; serial: $serial)"
   elif [ $((at - want)) -gt 3 ] || [ $((want - at)) -gt 3 ] || [ "${moved#+}" -lt 997000 ] || [ "${moved#+}" -gt 1003000 ]; then
-    record fail "$suite" ntp "set to $at, moved ${moved} ms, against the server's $want and +1000000 ms (serial: $serial)"
-  elif serial_has "$serial" '^ERROR'; then record fail "$suite" ntp "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
-  else record pass "$suite" ntp; fi
+    record fail "$suite" "$name" "set to $at, moved ${moved} ms, against the server's $want and +1000000 ms (serial: $serial)"
+  elif serial_has "$serial" '^ERROR'; then record fail "$suite" "$name" "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
+  else record pass "$suite" "$name"; fi
 }
 
 # run_shutdown <arch> <suite>: the power button shuts the system down in
@@ -953,12 +965,17 @@ run_rogue_tcg() {
 # on QEMU's user-mode network with no checks; the network stack (netd)
 # must take the interface, get 10.0.2.15/24 from the user-mode DHCP server
 # with its router and DNS server, and find the router answering a ping.
+# NIC=e1000e: the same over an Intel 82574 (recorded as dhcp_e1000e), as
+# for the time server and HTTP checks below (M4: "runs the same tests over
+# an e1000e interface").
+run_dhcp_e1000e() { NIC=e1000e run_dhcp "$@"; }
 run_dhcp() {
-  local arch=$1 suite=$2 log img serial rc text bad=""
-  log=$(logfile "$suite" build.dhcp)
-  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" dhcp "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" dhcp)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
+  local arch=$1 suite=$2 log img serial rc text bad="" nic=${NIC:-virtio} name=dhcp
+  [ "$nic" = virtio ] || name=dhcp_$nic
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" \
     --until '^netd: the router 10\.0\.2\.2 answers a ping in [0-9]+ us$' >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r' <"$serial")
@@ -966,8 +983,8 @@ run_dhcp() {
   [ -n "$bad" ] || grep -qx 'netd: 10\.0\.2\.15/24 from DHCP server 10\.0\.2\.2, router 10\.0\.2\.2, DNS 10\.0\.2\.3, lease 86400 s' <<<"$text" ||
     bad="no lease of 10.0.2.15/24 with router 10.0.2.2 and DNS 10.0.2.3: $(grep -m1 '^netd: .* from DHCP' <<<"$text")"
   [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
-  if [ -z "$bad" ]; then record pass "$suite" dhcp
-  else record fail "$suite" dhcp "$bad (serial: $serial)"; fi
+  if [ -z "$bad" ]; then record pass "$suite" "$name"
+  else record fail "$suite" "$name" "$bad (serial: $serial)"; fi
 }
 
 # run_rogue_net <arch> <suite>: the same hostile driver in the network

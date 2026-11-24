@@ -61,9 +61,10 @@ evidence_init
 
 # The system image's guest tests (run_<name> in lib/tests.sh), and those of
 # them that judge a time.
-SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http power recovery entropy console_port shutdown console typeahead nvme net net_recovery hotplug partitions
+SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http power recovery entropy console_port shutdown console typeahead nvme net net_e1000e
+  dhcp_e1000e ntp_e1000e http_e1000e net_recovery net_recovery_e1000e hotplug partitions
   recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces)
-QUIET_SYSTEM=" recovery recovery_nvme net_recovery svcload http_restart "
+QUIET_SYSTEM=" recovery recovery_nvme net_recovery net_recovery_e1000e svcload http_restart "
 # unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has
 # two phases: the units that judge a time, one after another with nothing
 # beside them; then all the others at once.
@@ -555,7 +556,7 @@ system_test() {
   case "$QUIET_SYSTEM" in *" $t "*) q=quiet ;; esac
   # The checks that run a program of os/host-tools beside the guest (theirs
   # alone: GIN is shared by the units declared after this one).
-  case "$t" in http | http_load | http_restart | ntp | console) host=(crate:os:silica-host) ;; esac
+  case "$t" in http | http_load | http_restart | ntp | console | http_e1000e | http_load_e1000e | ntp_e1000e) host=(crate:os:silica-host) ;; esac
   case "$t" in
     faults.*) unit any "system.x86_64/$t" "${GIN[@]}" -- run_faults x86_64 system.x86_64 "${t#faults.}" ;;
     *) unit "$q" "system.x86_64/$t" "${GIN[@]}" "${host[@]+"${host[@]}"}" -- "run_$t" x86_64 system.x86_64 ;;
@@ -589,6 +590,7 @@ guests() {
       for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
       system_test svcload
       system_test http_load
+      system_test http_load_e1000e
       system_test http_restart
       unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64
       # The same system and the same tests on aarch64 (spec/MILESTONES.md M2:
@@ -638,7 +640,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
         done
       fi
       # The system image's own tests, by name.
-      case " ${SYSTEM_TESTS[*]} faults systest svcload http_load http_restart " in
+      case " ${SYSTEM_TESTS[*]} faults systest svcload http_load http_load_e1000e http_restart " in
         *" $guest "*)
           if [ "$guest" = faults ]; then for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
           elif [ "$guest" = systest ]; then
