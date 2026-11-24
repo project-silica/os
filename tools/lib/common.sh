@@ -29,7 +29,8 @@ realdir() { (cd "$1" 2>/dev/null && pwd -P); }
 # a writer piped into it then fails with a broken pipe, and under pipefail a
 # check whose line is there fails (seen on CI, where SIGPIPE is ignored and
 # uutils' tr writes a log in pieces).
-serial_has() { local text; text=$(tr -d '\r' <"$1" 2>/dev/null); shift; grep -aq "$@" <<<"$text"; }
+# A log not written yet (a guest still starting) has no line.
+serial_has() { local text; [ -e "$1" ] || return 1; text=$(tr -d '\r\0' <"$1"); shift; grep -aq "$@" <<<"$text"; }
 
 # Every tool runs in a memory cgroup of its own, at most half the host's
 # memory and none of its swap, so that a test which allocates without end
