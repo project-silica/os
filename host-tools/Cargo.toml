@@ -26,6 +26,10 @@ path = "src/remote.rs"
 name = "tcpinterop"
 path = "src/tcpinterop.rs"
 
+[[bin]]
+name = "tcpbench"
+path = "src/tcpbench.rs"
+
 # The remote session's client is written on the machine's own crates: the
 # framing and the cryptography it shares with the machine's service, and
 # the generated bindings of the protocols it calls (the workshop layout is
