@@ -850,7 +850,7 @@ run_remote() {
   owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") \
     || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
   printf '# who may manage this machine\n%s test-owner\n' "$owner" >"$dir/owners"
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=") \
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed") \
     && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   # Two new programs for httpd: the same code with bytes after it (an ELF
   # file's loader reads only what its headers name), and one whose entry
