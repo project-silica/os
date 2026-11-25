@@ -779,6 +779,7 @@ host_ports() {
 run_http() {
   local arch=$1 suite=$2 name=${3:-http} requests=${4:-640} mode=${5:-} log img serial rc port qemu load i httpload
   local -a extra=()
+  [ "$name" = http ] && mode=pipeline
   [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^httpd: 2000 answers$=restart netd\n')
   log=$(logfile "$suite" "build.$name")
   img=$(build_system_image "$arch" "$log" "checks=http") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
