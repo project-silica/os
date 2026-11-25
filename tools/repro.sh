@@ -22,9 +22,10 @@
 # loads it only with them beside it: every build copies all four.
 repos=(kernel os idl system)
 artifacts=(kernel.elf BOOTX64.EFI disk.img)
+include_system=no
 case "$#:${1:-}" in
   0:) ;;
-  1:--system) artifacts+=(system.img) ;;
+  1:--system) include_system=yes; artifacts+=(system.img) ;;
   *) die "unknown argument $1 (usage: repro.sh [--system])" ;;
 esac
 for r in "${repos[@]}"; do [ -d "$(checkout_of "$r")" ] || die "no checkout of $r"; done
@@ -76,7 +77,7 @@ build() (
   p=$(build_image x86_64 "$OUT/build$n.image.log") || fail "build $n: disk image: $(first_error "$OUT/build$n.image.log")"
   [ -f "$p" ] || fail "build $n: disk.img was not produced"
   cp "$p" "$RUN/out$n/disk.img" || fail "build $n: cannot keep disk.img"
-  if [ -n "${SRC[system]:-}" ]; then
+  if [[ $include_system == yes ]]; then
     p=$(build_system_image x86_64 "$OUT/build$n.system.log") || fail "build $n: system image: $(first_error "$OUT/build$n.system.log")"
     cp "$p" "$RUN/out$n/system.img" || fail "build $n: cannot keep system.img"
   fi

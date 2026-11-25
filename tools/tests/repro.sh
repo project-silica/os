@@ -92,6 +92,7 @@ for a in kernel.elf BOOTX64.EFI disk.img; do
   printf '%s\n' "$OUT" | grep -q "$a identical" || bad "reproducible: no line saying $a is identical: $OUT"
 done
 [ "$(wc -l <<<"$OUT")" -le 8 ] || bad "reproducible: output is long ($(wc -l <<<"$OUT") lines)"
+if grep -q '^system ' "$CALLS"; then bad "default check built an unrequested system image"; fi
 for s in kernel loader image; do
   [ "$(grep -c "^$s " "$CALLS")" = 2 ] || bad "reproducible: $s built $(grep -c "^$s " "$CALLS") times, want 2"
 done
