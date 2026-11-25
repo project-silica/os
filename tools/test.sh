@@ -303,6 +303,7 @@ cpu.armv8_0|aarch64|cortex-a72|
 cpu.no_avx|x86_64|$base,-avx,-avx2,-fma,-f16c|ERROR: loader: this processor lacks AVX (x86-64-v3), which Silica requires
 cpu.no_nx|x86_64|$base,-nx|ERROR: loader: this processor lacks NX (no-execute pages), which Silica requires
 cpu.meltdown|x86_64|$intel|ERROR: kernel: this processor is affected by Meltdown
+cpu.no_rng|x86_64|$base,-rdrand,-rdseed|ERROR: kernel: the loader found no source of randomness it trusts
 EOF
   # A firmware that lists more processors than are there (hot-plug slots,
   # online-capable but not enabled): only those present are counted, so a

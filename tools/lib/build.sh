@@ -202,8 +202,10 @@ build_system_image_locked() {
   # The glob below determines archive offsets and the checksum of the image.
   local LC_ALL=C GLOBSORT=name
   lp=$(loader_path "$arch") || { echo "no image layout for $arch (no UEFI loader)" >"$log"; return 1; }
-  # As for build_image: on aarch64 the harness hears the status through semihosting.
+  # As for build_image: the harness hears the status through semihosting on
+  # aarch64, through QEMU's debug-exit port on x86_64.
   [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
+  [ "$arch" = x86_64 ] && cmdline="exit=port${cmdline:+ $cmdline}"
   out=$(art_dir "$arch")
   if [ -n "${PIECES_ONCE:-}" ]; then
     p=$(run_pieces system "$arch" "$log") || return 1
@@ -259,10 +261,12 @@ loader_path() {
 build_image() {
   local arch=$1 log=$2 cmdline=${3:-} k l t r out lp p
   lp=$(loader_path "$arch") || { echo "no image layout for $arch (no UEFI loader)" >"$log"; return 1; }
-  # On aarch64 the test harness hears the exit status through semihosting,
-  # which the loader and kernel use only when told to (on hardware without
-  # a debugger the call is an exception).
+  # The test harness hears the exit status through semihosting on aarch64
+  # and QEMU's debug-exit port on x86_64, which the loader and kernel use
+  # only when told to (on hardware without a debugger the semihosting call
+  # is an exception, and port 0xF4 is nobody's to write).
   [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
+  [ "$arch" = x86_64 ] && cmdline="exit=port${cmdline:+ $cmdline}"
   out=$(art_dir "$arch")
   local -a root=() extra=()
   if [ -n "${PIECES_ONCE:-}" ]; then
