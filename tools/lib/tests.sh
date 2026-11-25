@@ -543,6 +543,24 @@ run_partitions() {
   done
 }
 
+# The system image has a 16 KiB GPT entry array. MDTS=1 on this NVMe
+# controller permits 8 KiB per transfer. Give it a fixed PCI slot so
+# finding the same partition on the virtio boot disk cannot pass the test.
+run_partitions_small_transfer() {
+  local arch=$1 suite=$2 name=partitions_small_transfer log img serial
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log")"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  if "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+      --nvme "$img" --nvme-props mdts=1,addr=0x4 --until '^partitions: disk 0x20:' >"$serial.qemu" 2>&1 \
+      && serial_has "$serial" '^nvme: .* blocks of 512 bytes, .*max 16 blocks per request$' \
+      && serial_has "$serial" '^partitions: disk 0x20: 1 partitions$'; then
+    record pass "$suite" "$name"
+  else
+    record fail "$suite" "$name" "the partition on the transfer-limited NVMe namespace was not found (serial: $serial)"
+  fi
+}
+
 # run_faults <arch> <suite>: a device that misbehaves (spec/MILESTONES.md
 # M3, fault injection). One boot per fault and block driver, the driver
 # committing the fault at its 50th request (inject=<driver>:<fault>@50,
