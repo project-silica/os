@@ -199,6 +199,8 @@ build_system_image() {
 
 build_system_image_locked() {
   local arch=$1 log=$2 cmdline=${3:-} root=${4:-init} k l t sys out f n lp tag p
+  # The glob below determines archive offsets and the checksum of the image.
+  local LC_ALL=C GLOBSORT=name
   lp=$(loader_path "$arch") || { echo "no image layout for $arch (no UEFI loader)" >"$log"; return 1; }
   # As for build_image: on aarch64 the harness hears the status through semihosting.
   [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"

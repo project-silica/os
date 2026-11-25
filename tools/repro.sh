@@ -82,9 +82,12 @@ build() (
   fi
 )
 
-# The two builds run in directories that differ in name and in length.
-build 1 build-one || exit 1
-build 2 build-two-in-another-directory || exit 1
+# Vary collation as well as the source path. In a language locale a glob
+# can put entropycheck.elf before entropy.elf, changing the system archive.
+# Minimal build hosts may have only the C locale.
+other_locale=$(locale -a | awk '!/^(C([.].*)?|POSIX)$/ && !found { print; found=1 }')
+LC_ALL=C build 1 build-one || exit 1
+LC_ALL=${other_locale:-C} build 2 build-two-in-another-directory || exit 1
 
 for name in "${artifacts[@]}"; do
   a=$RUN/out1/$name; b=$RUN/out2/$name
