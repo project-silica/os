@@ -742,13 +742,13 @@ run_console_port() {
   serial=$(logfile "$suite" console_port)
   port=${serial%.log}.port
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --console-port "$port" \
-    --port-type '^console: .* and the console port=echo through the port\rshu' \
+    --port-type '^console: .* and the console port=\recho through the port\rshu' \
     --port-type '^through the port$=tdown\r' >"$serial.qemu" 2>&1
   rc=$?
   out=$(tr -d '\0' <"$port")
   if [ $rc != 0 ]; then record fail "$suite" console_port "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   elif ! grep -q '^virtio-console: port 0, DMA confined by the IOMMU' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "the driver did not say it runs confined (serial: $serial)"
-  elif [[ "$out" != *$'silica> echo through the port\r\nthrough the port\r\nsilica> shutdown\r\n'* ]]; then record fail "$suite" console_port "queued input did not follow its prompt (port output: $port)"
+  elif [[ "$out" != *$'silica> \r\nsilica> echo through the port\r\nthrough the port\r\nsilica> shutdown\r\n'* ]]; then record fail "$suite" console_port "the empty line or queued command did not follow its prompt (port output: $port)"
   elif ! grep -q '^init: shutting down' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "shutdown typed at the port did not shut down (serial: $serial)"
   else record pass "$suite" console_port; fi
 }
