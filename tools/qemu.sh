@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Headless QEMU boot (component A04).
-#   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--serial <file>] [--timeout <s>] [--quiet <s>]
+#   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--cpu <model>] [--serial <file>] [--timeout <s>] [--quiet <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
@@ -11,6 +11,11 @@
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
+# --maxcpus <n> has the firmware describe n processors, --smp of them present
+# (the rest hot-plug slots, listed but not enabled).
+# --cpu <model> boots an emulated processor of that model (TCG) instead of
+# the host's or QEMU's most capable one: the CPUs the kernel must run on
+# that this host is not (x86_64 without AVX; Armv8.0 cores without PAN).
 # --nvme adds an NVMe controller (QEMU's model, id nvme0) whose namespace 1
 # is a snapshot of the given disk image (--nvme-disk: the image itself,
 # written for real, for the host to read afterwards); --nvme-props gives it properties
@@ -81,15 +86,17 @@ user_forwards() {
 
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
-cport="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
+cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type)
+    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu|--maxcpus)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
     --arch) arch=$2; shift 2 ;;
     --el2) el2=1; shift ;;
+    --cpu) cpu_model=$2; shift 2 ;;
+    --maxcpus) maxcpus=$2; shift 2 ;;
     --image) image=$2; shift 2 ;;
     --serial) serial=$2; shift 2 ;;
     --timeout) timeout=$2; shift 2 ;;
@@ -158,6 +165,9 @@ case "$arch" in
     bin=qemu-system-x86_64
     # TCG needs -cpu max: the kernel requires x2APIC, the TSC-deadline timer and XSAVE.
     accel=(-machine q35 -cpu max); [ -w /dev/kvm ] && [ -z "${SILICA_NO_KVM:-}" ] && accel=(-machine q35,accel=kvm -cpu host)
+    # --cpu: an emulated processor of that model (TCG), to boot on what
+    # the host is not: one without AVX, without NX, without PCID.
+    [ -z "$cpu_model" ] || accel=(-machine q35 -cpu "$cpu_model")
     extra=(); [ -z "$exitdev" ] || extra=(-device isa-debug-exit,iobase=0xf4,iosize=0x04)
     # The boot disk is a virtio 1.0 device; with the IOMMU it is told to do
     # its DMA through it (without that, QEMU's virtio devices bypass it).
@@ -201,6 +211,7 @@ case "$arch" in
     bin=qemu-system-aarch64
     # --el2: the firmware runs at EL2, as on most servers; the loader drops to EL1.
     accel=(-machine "virt,gic-version=3${el2:+,virtualization=on}" -cpu max)
+    [ -z "$cpu_model" ] || accel=(-machine "virt,gic-version=3${el2:+,virtualization=on}" -cpu "$cpu_model")
     # Test images report their status through semihosting, from the kernel
     # (EL1) or the root task (EL0).
     extra=(-semihosting-config enable=on,target=native,userspace=on,chardev=con)
@@ -254,8 +265,14 @@ if [ -n "$cport" ]; then
   cport_copy=$!
 fi
 why_stopped=(-trace enable=qemu_system_shutdown_request -trace enable=runstate_set -trace enable=watchdog_perform_action -trace enable=tco_timer_expired)
+# The guest dies with this script, however it ends: the timeout below is
+# this script's to enforce, and a harness killed mid-run (an interrupted
+# test, a lost terminal) once left a guest running for nine hours, taking
+# host processors from every measurement made after it. The kernel kills
+# the emulator when its parent (this script) exits, by any signal.
+command -v setpriv >/dev/null || die "setpriv (util-linux) is needed: the guest must die with its harness"
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
-  cd "$RUN" && TMPDIR=$RUN exec "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp" -m "$mem" \
+  cd "$RUN" && TMPDIR=$RUN exec setpriv --pdeathsig KILL "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp${maxcpus:+,maxcpus=$maxcpus}" -m "$mem" \
   "${serial_dev[@]}" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
   -drive "format=raw,file=$image,if=none,id=boot,snapshot=on,aio=io_uring" "${disk[@]}" "${vga[@]}" "${extra[@]}" "${devices[@]+"${devices[@]}"}" ) 2>"$RUN/qemu.out" &

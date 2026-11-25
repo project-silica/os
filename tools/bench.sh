@@ -448,19 +448,25 @@ count_start() {
   done
 }
 count_finish() {
-  local label=$1 to=$2 spec b name per more one two n
-  if [ -n "${SILICA_BENCH_COUNTS:-}" ]; then cat "$SILICA_BENCH_COUNTS" >"$to"; return; fi
+  local label=$1 to=$2 spec b name per more one two n failed=0
   : >"$to"
   for spec in "${COUNT_SPECS[@]}"; do
     read -r b name per more <<<"$spec"
+    if [ -n "${SILICA_BENCH_COUNTS:-}" ]; then
+      if ! awk -v key="insns_$name" '$1 == key && $2 ~ /^[0-9]+([.][0-9]+)?$/ && $3 == "insns" { print; found++ } END { exit found != 1 }' "$SILICA_BENCH_COUNTS" >>"$to"; then
+        err "missing or invalid insns_$name for $label"; failed=1
+      fi
+      continue
+    fi
     one=$(awk '$1 == "COUNT" { print $2 }' "$RUN/count.$label.$b.1.out" 2>/dev/null)
     two=$(awk '$1 == "COUNT" { print $2 }' "$RUN/count.$label.$b.$((1 + more)).out" 2>/dev/null)
     if [ -z "$one" ] || [ -z "$two" ]; then
       for n in 1 $((1 + more)); do cp "$RUN/count.$label.$b.$n.out" "$LOGS/bench/count.$label.$b.$n.log"; done
-      echo "bench: no instruction count for $name of $label (logs $LOGS/bench/count.$label.$b.*.log)"; continue
+      err "no insns_$name for $label (logs $LOGS/bench/count.$label.$b.*.log)"; failed=1; continue
     fi
     awk -v a="$one" -v b="$two" -v p="$((per * more))" -v n="$name" 'BEGIN { printf "insns_%s %.1f insns\n", n, (b - a) / p }' >>"$to"
   done
+  return "$failed"
 }
 LIB=(path:os:tools/lib/common.sh path:os:tools/lib/build.sh)
 # What a count is a function of: the kernel's source (and a constant it was
@@ -535,7 +541,7 @@ if [ -z "$compare$sweep" ]; then
     fi
   fi
   # The counts first: they are not timings, and use every processor.
-  [ $do_counts = 0 ] || { count_start silica; wait; count_finish silica "$RUN/counts.values"; [ -s "$RUN/counts.values" ] && keep bench.counts "$k_counts" "$t_counts" "$RUN/counts.values"; }
+  [ $do_counts = 0 ] || { count_start silica; wait; count_finish silica "$RUN/counts.values" || quit 1; keep bench.counts "$k_counts" "$t_counts" "$RUN/counts.values"; }
   if [ $((do_kernel + do_io + do_linux + do_server)) -gt 0 ]; then
     hold_host
     [ -n "$stubbed" ] || net_up || echo "bench: no network benchmarks (the tap and the host's echo need passwordless sudo and a spare processor)"
@@ -676,8 +682,8 @@ if [ -n "$compare$sweep" ]; then
     wait
     for n in "${counting[@]+"${counting[@]}"}"; do
       v=${labels[$n]}
-      count_finish "$v" "$RUN/$v.values"
-      [ -s "$RUN/$v.values" ] && keep bench.counts "${ckey[$n]}" "${ctext[$n]}" "$RUN/$v.values"
+      count_finish "$v" "$RUN/$v.values" || quit 1
+      keep bench.counts "${ckey[$n]}" "${ctext[$n]}" "$RUN/$v.values"
     done
     for n in "${!labels[@]}"; do
       case "${ckey[$n]:-}" in "same as "*) cp "$RUN/${ckey[$n]#same as }.values" "$RUN/${labels[$n]}.values" ;; esac

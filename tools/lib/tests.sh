@@ -255,6 +255,30 @@ run_boot_error() {
   record pass "$suite" "$label"
 }
 
+# run_cpu <arch> <suite> <label> <cpu model> [<refusal message>]: the test
+# image on two emulated processors of that model (TCG). With a message, a
+# processor Silica must refuse: the boot leaves with the failure code and
+# says why. Without, one it must run on: the in-OS `fpu` test passes there
+# (system calls, switches and the vector state, through a user program
+# built for the baseline).
+run_cpu() {
+  local arch=$1 suite=$2 label=$3 model=$4 want=${5:-} log img serial rc
+  log=$(logfile "$suite" "build.$label")
+  img=$(build_image "$arch" "$log" "$([ -n "$want" ] || echo test=fpu)") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$label")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --cpu "$model" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-120}" >"$serial.qemu" 2>&1
+  rc=$?
+  if [ -n "$want" ]; then
+    if [ $rc != 1 ] || ! grep -q 'guest exit code 17' "$serial.qemu"; then
+      record fail "$suite" "$label" "a processor Silica cannot run on was not refused with the failure code (exit status $rc; serial: $serial)"; return 1
+    fi
+    grep -aqF -- "$want" "$serial" || { record fail "$suite" "$label" "the serial log does not say: $want (serial: $serial)"; return 1; }
+  elif [ $rc != 0 ] || ! grep -aqx 'TEST fpu PASS' <(tr -d '\r' <"$serial"); then
+    record fail "$suite" "$label" "the fpu test did not pass on $model (exit status $rc; serial: $serial)"; return 1
+  fi
+  record pass "$suite" "$label"
+}
+
 # run_system <arch> <suite>: the system image (root task: the system
 # repository's init) boots on two processors, starts its programs and
 # reports BOOT OK through the debug-exit device.

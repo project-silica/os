@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build an image and boot it in QEMU, serial console to standard output.
-#   boot.sh [--arch x86_64|aarch64] [--system [--root <program>]] [--cmdline "<kernel command line>"] [--test <in-OS test>] [--smp <n>] [--mem <MiB>] [--timeout <s>]
+#   boot.sh [--arch x86_64|aarch64] [--system [--root <program>]] [--cmdline "<kernel command line>"] [--test <in-OS test>] [--smp <n>] [--mem <MiB>] [--timeout <s>] [--cpu <model>]
 # --test NAME is short for --cmdline test=NAME. --system boots the system
 # image (root task: the system repository's init) instead of the kernel's
 # test image; --root names another program of that repository as the root
@@ -16,7 +16,7 @@ while [ $# -gt 0 ]; do
     --arch) [ $# -ge 2 ] || die "--arch needs a value"; arch=$2; shift 2 ;;
     --system) builder=build_system_image; shift ;;
     --root) [ $# -ge 2 ] || die "--root needs a program name"; root=$2; shift 2 ;;
-    --smp|--mem|--timeout) [ $# -ge 2 ] || die "$1 needs a value"; pass+=("$1" "$2"); shift 2 ;;
+    --smp|--mem|--timeout|--cpu) [ $# -ge 2 ] || die "$1 needs a value"; pass+=("$1" "$2"); shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
 done

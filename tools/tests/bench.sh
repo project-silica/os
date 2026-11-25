@@ -198,6 +198,11 @@ has '^ERROR: bench::insns_ipc_roundtrip' && bad "counts: under one instruction m
 sed -i 's/insns_ipc_roundtrip 978.3/insns_ipc_roundtrip 979.5/' "$FX/counts"; run 2 --runs 1
 has '^ERROR: bench::insns_ipc_roundtrip: regression' || bad "counts: two instructions more per round trip must fail: $OUT"
 
+reset
+sed -i '/insns_ctx_switch/d' "$FX/counts"
+run 2 --only insns --sweep IDLE_WATCH_MAX=20000,200000
+[ "$RC" = 1 ] && has '^ERROR: bench: .*insns_ctx_switch' || bad "comparison without a context-switch count must fail: exit $RC: $OUT"
+
 # ---- 7c. measured once ------------------------------------------------------------
 # What was measured is kept under its inputs: a second run boots nothing and
 # says the same; a changed Silica is measured again; a changed count file is
