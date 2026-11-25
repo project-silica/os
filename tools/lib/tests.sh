@@ -800,7 +800,7 @@ run_http() {
   [ "$name" = http ] && mode=pipeline
   [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^httpd: 2000 answers$=restart netd\n')
   log=$(logfile "$suite" "build.$name")
-  img=$(build_system_image "$arch" "$log" "checks=http") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=http httpd.quit=allowed") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   httpload=$(host_tool httpload "$log") || { record fail "$suite" "$name" "httpload did not build: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   # A host port of this run's own (runs in parallel must not share one).
@@ -947,7 +947,7 @@ run_interop() {
   sudo -n true 2>/dev/null || { record fail "$suite" interop "needs passwordless sudo for its tap interface and the impairments on it"; return 1; }
   tool=$(host_tool tcpinterop "$log") || { record fail "$suite" interop "tcpinterop did not build: $(first_error "$log") (log: $log)"; return 1; }
   n=$((20 + ($$ + RANDOM) % 200)); host=10.211.$n.1; guest=10.211.$n.2; tap=siop$n; ifb=sifb$n
-  img=$(build_system_image "$arch" "$log" "checks=http netd.address=$guest/24 netd.router=$host") \
+  img=$(build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
     || { record fail "$suite" interop "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   iop_down() {
     sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
