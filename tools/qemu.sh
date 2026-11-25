@@ -11,6 +11,8 @@
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device.
+# --maxcpus <n> has the firmware describe n processors, --smp of them present
+# (the rest hot-plug slots, listed but not enabled).
 # --cpu <model> boots an emulated processor of that model (TCG) instead of
 # the host's or QEMU's most capable one: the CPUs the kernel must run on
 # that this host is not (x86_64 without AVX; Armv8.0 cores without PAN).
@@ -84,16 +86,17 @@ user_forwards() {
 
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
-cport="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
+cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu)
+    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu|--maxcpus)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
     --arch) arch=$2; shift 2 ;;
     --el2) el2=1; shift ;;
     --cpu) cpu_model=$2; shift 2 ;;
+    --maxcpus) maxcpus=$2; shift 2 ;;
     --image) image=$2; shift 2 ;;
     --serial) serial=$2; shift 2 ;;
     --timeout) timeout=$2; shift 2 ;;
@@ -269,7 +272,7 @@ why_stopped=(-trace enable=qemu_system_shutdown_request -trace enable=runstate_s
 # the emulator when its parent (this script) exits, by any signal.
 command -v setpriv >/dev/null || die "setpriv (util-linux) is needed: the guest must die with its harness"
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
-  cd "$RUN" && TMPDIR=$RUN exec setpriv --pdeathsig KILL "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp" -m "$mem" \
+  cd "$RUN" && TMPDIR=$RUN exec setpriv --pdeathsig KILL "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp${maxcpus:+,maxcpus=$maxcpus}" -m "$mem" \
   "${serial_dev[@]}" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
   -drive "format=raw,file=$image,if=none,id=boot,snapshot=on,aio=io_uring" "${disk[@]}" "${vga[@]}" "${extra[@]}" "${devices[@]+"${devices[@]}"}" ) 2>"$RUN/qemu.out" &

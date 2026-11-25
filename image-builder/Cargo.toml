@@ -12,3 +12,8 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+# The kernel's own reader of the ramdisk archive: one validator for the
+# host, the kernel and userspace.
+silica-formats = { path = "../../kernel/formats" }

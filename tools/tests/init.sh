@@ -23,7 +23,7 @@ mkenv() { # mkenv <name> [milestone]  (everything present, aarch64 included)
   local e=$FX/$1 t r
   mkdir -p "$e/bin" "$e/ws/kernel" "$e/fw/usr/share/OVMF" "$e/fw/usr/share/AAVMF"
   for t in $REAL_UTILS; do p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$e/bin/$t"; done
-  for t in cargo size nm socat qemu-system-x86_64 qemu-system-aarch64; do stub "$e/bin/$t"; done
+  for t in cargo size nm socat setpriv qemu-system-x86_64 qemu-system-aarch64; do stub "$e/bin/$t"; done
   cat >"$e/bin/rustup" <<'EOF'
 #!/bin/bash
 # fake: rustup component list --installed --toolchain <tc>

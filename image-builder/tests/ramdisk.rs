@@ -1,6 +1,6 @@
 //! Host tests for the initial ramdisk archive: every entry reads back with its
 //! name and contents, and malformed archives are rejected.
-use silica_image::crc32;
+use silica_formats::ramdisk::crc32c as crc32;
 use silica_image::ramdisk::{self, Ramdisk, RamdiskError};
 
 fn sample() -> Vec<(String, Vec<u8>)> {
@@ -62,7 +62,7 @@ fn empty_archive_reads_back() {
 fn layout_matches_the_documented_format() {
     let archive = pack(&[("init".to_owned(), b"xyz".to_vec())]);
     assert_eq!(&archive[..8], b"SILRAMDK");
-    assert_eq!(u32::from_le_bytes(archive[8..12].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(archive[8..12].try_into().unwrap()), 2);
     assert_eq!(u32::from_le_bytes(archive[12..16].try_into().unwrap()), 1);
     assert_eq!(
         u64::from_le_bytes(archive[16..24].try_into().unwrap()),
@@ -109,7 +109,7 @@ fn malformed_archives_are_rejected() {
         ramdisk::parse(&a).err()
     };
     assert_eq!(corrupt(&|a| a[0] = b'X'), Some(RamdiskError::BadMagic));
-    assert_eq!(corrupt(&|a| a[8] = 2), Some(RamdiskError::BadVersion(2)));
+    assert_eq!(corrupt(&|a| a[8] = 1), Some(RamdiskError::BadVersion(1)));
     assert!(
         corrupt(&|a| a[12..16].copy_from_slice(&1000u32.to_le_bytes())).is_some(),
         "count"

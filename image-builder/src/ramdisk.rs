@@ -2,23 +2,14 @@
 //! hands to the kernel. The format is documented in `image-builder/README.md`.
 //!
 //! Little-endian, deterministic, and strict: a reader accepts exactly the
-//! bytes a writer produces, so any corruption is rejected.
+//! bytes a writer produces, so any corruption is rejected. The reader is
+//! the kernel's own (`silica_formats::ramdisk`), so the parser tested here
+//! is the one that decides what boots.
 
-use crate::crc32;
+use silica_formats::ramdisk::{self as format, Malformed};
 use std::fmt;
 
-/// First eight bytes of every archive.
-pub const MAGIC: [u8; 8] = *b"SILRAMDK";
-/// The only format version.
-pub const VERSION: u32 = 1;
-/// Header size in bytes.
-pub const HEADER: usize = 32;
-/// Size of one table entry in bytes.
-pub const ENTRY: usize = 48;
-/// Longest entry name in bytes (the field holds 32, the last is always NUL).
-pub const NAME_MAX: usize = 31;
-/// Entry data starts at multiples of this.
-pub const ALIGN: usize = 16;
+pub use format::{ALIGN, ENTRY, HEADER, MAGIC, MAX_ENTRIES, NAME_MAX, VERSION};
 
 /// Why an archive or an entry was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +18,14 @@ pub enum RamdiskError {
     Truncated,
     /// The magic bytes are wrong.
     BadMagic,
-    /// The version is not 1.
+    /// The version is not [`VERSION`].
     BadVersion(u32),
     /// The checksum does not match.
     BadChecksum,
     /// A reserved field or padding byte is not zero.
     NotZero,
+    /// More than [`MAX_ENTRIES`] entries.
+    TooMany,
     /// A name is empty, too long, or has a character outside `A-Z a-z 0-9 . _ -`.
     BadName(String),
     /// Two entries share a name.
@@ -49,6 +42,7 @@ impl fmt::Display for RamdiskError {
             RamdiskError::BadVersion(v) => write!(f, "unsupported ramdisk version {v}"),
             RamdiskError::BadChecksum => write!(f, "ramdisk checksum mismatch"),
             RamdiskError::NotZero => write!(f, "ramdisk reserved or padding bytes are not zero"),
+            RamdiskError::TooMany => write!(f, "ramdisk has more than {MAX_ENTRIES} entries"),
             RamdiskError::BadName(n) => write!(f, "bad ramdisk entry name {n:?}"),
             RamdiskError::Duplicate(n) => write!(f, "duplicate ramdisk entry {n:?}"),
             RamdiskError::BadEntry(i) => write!(f, "ramdisk entry {i} is misplaced"),
@@ -59,11 +53,7 @@ impl fmt::Display for RamdiskError {
 impl std::error::Error for RamdiskError {}
 
 fn name_ok(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= NAME_MAX
-        && name
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-')
+    format::name_ok(name.as_bytes())
 }
 
 const fn align(n: usize) -> usize {
@@ -86,6 +76,9 @@ impl Ramdisk {
     pub fn add(&mut self, name: &str, data: Vec<u8>) -> Result<(), RamdiskError> {
         if !name_ok(name) {
             return Err(RamdiskError::BadName(name.to_owned()));
+        }
+        if self.entries.len() == MAX_ENTRIES {
+            return Err(RamdiskError::TooMany);
         }
         if self.entries.iter().any(|(n, _)| n == name) {
             return Err(RamdiskError::Duplicate(name.to_owned()));
@@ -118,7 +111,7 @@ impl Ramdisk {
         out.extend_from_slice(&[0u8; 8]); // checksum and reserved, filled below
         out.extend_from_slice(&table);
         out.extend_from_slice(&body);
-        let crc = crc32(&out);
+        let crc = format::crc32c(&out);
         out[24..28].copy_from_slice(&crc.to_le_bytes());
         out
     }
@@ -166,90 +159,34 @@ impl<'a> Parsed<'a> {
     }
 }
 
-fn u32at(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
-}
-
-fn u64at(b: &[u8], o: usize) -> u64 {
-    let mut a = [0u8; 8];
-    a.copy_from_slice(&b[o..o + 8]);
-    u64::from_le_bytes(a)
-}
-
-/// Validate `archive` completely and return its entries.
+/// Validate `archive` completely (`silica_formats::ramdisk::check`, the
+/// kernel's own) and return its entries.
 pub fn parse(archive: &[u8]) -> Result<Parsed<'_>, RamdiskError> {
-    if archive.len() < HEADER {
-        return Err(RamdiskError::Truncated);
-    }
-    if archive[..8] != MAGIC {
-        return Err(RamdiskError::BadMagic);
-    }
-    let version = u32at(archive, 8);
-    if version != VERSION {
-        return Err(RamdiskError::BadVersion(version));
-    }
-    let count = u32at(archive, 12) as usize;
-    if u64at(archive, 16) != archive.len() as u64 {
-        return Err(RamdiskError::Truncated);
-    }
-    let table_end = count
-        .checked_mul(ENTRY)
-        .and_then(|t| t.checked_add(HEADER))
-        .filter(|&e| e <= archive.len())
-        .ok_or(RamdiskError::Truncated)?;
-    let mut copy = archive.to_vec();
-    copy[24..28].fill(0);
-    if crc32(&copy) != u32at(archive, 24) {
-        return Err(RamdiskError::BadChecksum);
-    }
-    if u32at(archive, 28) != 0 {
-        return Err(RamdiskError::NotZero);
-    }
-    let mut entries: Vec<Entry<'_>> = Vec::with_capacity(count);
-    let mut expect = align(table_end);
-    if archive[table_end..expect.min(archive.len())].iter().any(|&b| b != 0) {
-        return Err(RamdiskError::NotZero);
-    }
-    for i in 0..count {
-        let rec = &archive[HEADER + i * ENTRY..HEADER + (i + 1) * ENTRY];
-        let field = &rec[..32];
-        let len = field.iter().position(|&b| b == 0).unwrap_or(32);
-        let bad_name = || RamdiskError::BadName(String::from_utf8_lossy(&field[..len]).into_owned());
-        if field[len..].iter().any(|&b| b != 0) {
-            return Err(bad_name());
-        }
-        let name = std::str::from_utf8(&field[..len]).map_err(|_| bad_name())?;
-        if !name_ok(name) {
-            return Err(bad_name());
-        }
-        if entries.iter().any(|e| e.name == name) {
-            return Err(RamdiskError::Duplicate(name.to_owned()));
-        }
-        let offset = u64at(rec, 32);
-        let size = u64at(rec, 40);
-        if offset != expect as u64 {
-            return Err(RamdiskError::BadEntry(i));
-        }
-        let end = usize::try_from(size)
-            .ok()
-            .and_then(|s| expect.checked_add(s))
-            .filter(|&e| e <= archive.len())
-            .ok_or(RamdiskError::BadEntry(i))?;
-        let next = align(end);
-        if next > archive.len() {
-            return Err(RamdiskError::BadEntry(i));
-        }
-        if archive[end..next].iter().any(|&b| b != 0) {
-            return Err(RamdiskError::NotZero);
-        }
-        entries.push(Entry {
-            name,
-            data: &archive[expect..end],
-        });
-        expect = next;
-    }
-    if expect != archive.len() {
-        return Err(RamdiskError::Truncated);
-    }
-    Ok(Parsed { entries })
+    let name = |i: usize| {
+        format::entries(archive)
+            .nth(i)
+            .map(|(n, _)| n.to_owned())
+            .unwrap_or_else(|| {
+                let e = HEADER + i * ENTRY;
+                String::from_utf8_lossy(archive.get(e..e + 32).unwrap_or(&[]))
+                    .trim_end_matches('\0')
+                    .to_owned()
+            })
+    };
+    format::check(archive, format::crc32c_update).map_err(|m| match m {
+        Malformed::Truncated => RamdiskError::Truncated,
+        Malformed::BadMagic => RamdiskError::BadMagic,
+        Malformed::BadVersion(v) => RamdiskError::BadVersion(v),
+        Malformed::BadChecksum => RamdiskError::BadChecksum,
+        Malformed::NotZero => RamdiskError::NotZero,
+        Malformed::TooMany => RamdiskError::TooMany,
+        Malformed::BadName(i) => RamdiskError::BadName(name(i)),
+        Malformed::Duplicate(i) => RamdiskError::Duplicate(name(i)),
+        Malformed::BadEntry(i) => RamdiskError::BadEntry(i),
+    })?;
+    Ok(Parsed {
+        entries: format::entries(archive)
+            .map(|(name, data)| Entry { name, data })
+            .collect(),
+    })
 }

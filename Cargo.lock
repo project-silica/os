@@ -34,6 +34,9 @@ version = "0.0.0"
 [[package]]
 name = "silica-image"
 version = "0.0.0"
+dependencies = [
+ "silica-formats",
+]
 
 [[package]]
 name = "silica-protocols"

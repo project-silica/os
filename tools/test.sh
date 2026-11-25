@@ -223,6 +223,12 @@ inos_machine() {
       mem=*) INOS_QEMU+=(--mem "${o#mem=}"); INOS_NAMED=1 ;;
       progress) INOS_QEMU+=(--timeout 1800 --quiet 60) ;;
       quiet) INOS_QUIET=quiet ;;
+      # The harness injects the event the test waits for, once it says it is
+      # ready: an uncorrected, recoverable machine check on processor 1
+      # (MCIP and RIPV; bank 1 valid, uncorrected, enabled, signalled), or an
+      # NMI to every processor.
+      mce) INOS_QEMU+=(--on 'MACHINE CHECK READY=mce 1 1 0xb100000000000000 0x5 0 0') ;;
+      nmi) INOS_QEMU+=(--on 'NMI READY=nmi') ;;
       *) record fail "inos.$1" "$2" "unknown option $o in $4"; return 1 ;;
     esac
   done
@@ -242,7 +248,10 @@ inos_on() {
 inos_manifest() {
   local a=$1 manifest name missing=""
   manifest="$(checkout_of kernel)/tests/inos-$a.txt"
-  for name in $(awk '/^const TESTS/ { on = 1 } on && /^\];/ { exit } on' "$(checkout_of kernel)/roottest/src/main.rs" | grep -o '("[a-z0-9_]*",' | tr -d '(",'); do
+  # An entry under #[cfg(target_arch = "...")] is that architecture's alone.
+  for name in $(awk -v arch="$a" '/^const TESTS/ { on = 1 } on && /^\];/ { exit }
+      on && /#\[cfg\(target_arch = "/ { only = $0; sub(/.*target_arch = "/, "", only); sub(/".*/, "", only); next }
+      on { if (only == "" || only == arch) print; only = "" }' "$(checkout_of kernel)/roottest/src/main.rs" | grep -o '("[a-z0-9_]*",' | tr -d '(",'); do
     awk -v t="$name" '$1 == t { found = 1 } END { exit !found }' "$manifest" || missing="$missing $name"
   done
   if [ -n "$missing" ]; then record fail "inos.$a" manifest "roottest has tests tests/inos-$a.txt does not list, so they never run:$missing"
@@ -276,7 +285,13 @@ suite_inos() { # in-OS tests on one architecture, each a unit; --fast boots boot
 # host being neither (and an Armv8.0 core, without PAN, which the aarch64
 # user programs are built for). With a name (cpu.no_avx), that one alone.
 suite_cpu_models() {
-  local only=${1:-} base=Haswell-noTSX,+x2apic,+tsc-deadline,+invtsc,+xsave,+xgetbv1 label a model want
+  # The baseline: the oldest processors Silica runs on, x86-64-v3 with
+  # x2APIC, the TSC-deadline timer and an invariant TSC; a Zen core, not
+  # affected by Meltdown. An Intel core of the same generation is (and the
+  # emulator does not report RDCL_NO for any): it is refused
+  # (cpu.meltdown), since the kernel is mapped in every program's address
+  # space.
+  local only=${1:-} base=EPYC,+x2apic,+tsc-deadline,+invtsc,+xsave,+xgetbv1 intel=Haswell-noTSX,+x2apic,+tsc-deadline,+invtsc,+xsave,+xgetbv1 label a model want
   while IFS='|' read -r label a model want; do
     [ -z "$only" ] || [ "$only" = "$label" ] || continue
     [ "$a" = x86_64 ] || command -v qemu-system-aarch64 >/dev/null || continue
@@ -287,30 +302,46 @@ cpu.baseline|x86_64|$base|
 cpu.armv8_0|aarch64|cortex-a72|
 cpu.no_avx|x86_64|$base,-avx,-avx2,-fma,-f16c|ERROR: loader: this processor lacks AVX (x86-64-v3), which Silica requires
 cpu.no_nx|x86_64|$base,-nx|ERROR: loader: this processor lacks NX (no-execute pages), which Silica requires
+cpu.meltdown|x86_64|$intel|ERROR: kernel: this processor is affected by Meltdown
 EOF
+  # A firmware that lists more processors than are there (hot-plug slots,
+  # online-capable but not enabled): only those present are counted, so a
+  # thread is placed on each processor and every one of them runs.
+  if [ -z "$only" ] || [ "$only" = cpu.hotplug_slots ]; then
+    gin x86_64
+    unit any inos.x86_64/cpu.hotplug_slots "${GIN[@]}" -- inos_on x86_64 inos.x86_64 smp_run cpu.hotplug_slots --smp 4 --maxcpus 8
+  fi
 }
 
-suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path
-  local c m
+suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path; [name]: that one alone
+  local only=${1:-} c m
   gin x86_64
+  # unit, unless a name was given and this is not it.
+  want() { [ -z "$only" ] || [ "$only" = "$1" ]; }
   for c in 1 2 8 64; do
     for m in 256 16384; do
-      unit any "inos.x86_64/boot_ok.smp$c.mem$m" "${GIN[@]}" -- inos_on x86_64 inos.x86_64 boot_ok "boot_ok.smp$c.mem$m" --smp "$c" --mem "$m"
+      want "boot_ok.smp$c.mem$m" && unit any "inos.x86_64/boot_ok.smp$c.mem$m" "${GIN[@]}" -- inos_on x86_64 inos.x86_64 boot_ok "boot_ok.smp$c.mem$m" --smp "$c" --mem "$m"
     done
   done
-  suite_cpu_models
-  unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
-  unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
-  unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64
+  [ -n "$only" ] && [[ $only != cpu.* ]] || suite_cpu_models "$only"
+  if [ -z "$only" ]; then
+    unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
+    unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
+    unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64
+  fi
   # Boots that cannot succeed say why.
   local e=inos.x86_64 boot='EFI/BOOT/BOOTX64.EFI=$L'
-  boot_error() { local label=$1; shift; unit any "$e/$label" "${GIN[@]}" -- run_boot_error x86_64 $e "$label" "$@"; }
+  boot_error() { local label=$1; shift; want "$label" || return 0; unit any "$e/$label" "${GIN[@]}" -- run_boot_error x86_64 $e "$label" "$@"; }
   boot_error error.no_kernel 'ERROR: loader: SILICA\KERNEL.ELF not found' "$boot"
   boot_error error.kernel_not_elf 'ERROR: loader: SILICA\KERNEL.ELF is not an x86_64 ELF image' "$boot" 'SILICA/KERNEL.ELF=$L'
   boot_error error.kernel_not_ours 'ERROR: loader: kernel image is not position-independent at the kernel base' "$boot" 'SILICA/KERNEL.ELF=$R'
   boot_error error.no_ramdisk 'ERROR: kernel: no root task' "$boot" 'SILICA/KERNEL.ELF=$K'
   boot_error error.no_root_entry 'ERROR: kernel: no root task' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'other=$R'
   boot_error error.root_not_elf 'ERROR: kernel: cannot start the root task: Image(NotElf)' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'root=$L'
+  # A damaged archive (one byte flipped in a program's code) runs nothing,
+  # the root task included (duplicate names and the rest: the shared
+  # reader's own tests, silica_formats::ramdisk and image-builder).
+  boot_error error.archive_damaged 'ERROR: kernel: no root task: the boot archive is refused: its checksum does not match: it is damaged' "$boot" 'SILICA/KERNEL.ELF=$K' --ramdisk-entry 'root=$R' --damage-ramdisk 100
 }
 
 # suite_arch_entry <arch>: the loader and kernel entry on their own: the
@@ -673,12 +704,12 @@ if [ "${#guests[@]}" -gt 0 ]; then
           else system_test "$guest"; fi
           continue ;;
       esac
-      # The processor models, by name (cpu.baseline, cpu.no_avx, ...).
+      # The boot matrix, the processor models and the boots that must fail,
+      # by name (boot_ok.smp8.mem256, cpu.no_avx, error.archive_damaged).
       case "$guest" in
-        cpu.*)
+        cpu.* | boot_ok.* | error.*)
           if [ "$PHASE" = rest ]; then
-            gin x86_64
-            suite_cpu_models "$guest"
+            suite_matrix "$guest"
           fi
           continue ;;
       esac

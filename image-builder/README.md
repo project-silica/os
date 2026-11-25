@@ -11,7 +11,7 @@ deterministic (fixed GUIDs and volume id).
 stores it on the ESP as `SILICA/RAMDISK.IMG`. Library: `silica_image::ramdisk`
 (`Ramdisk` writes, `parse` validates and reads).
 
-## Ramdisk archive format, version 1
+## Ramdisk archive format, version 2
 
 The loader hands the archive to the kernel unchanged. All integers are
 little-endian. All offsets count from the first byte of the archive.
@@ -21,10 +21,10 @@ Header, 32 bytes:
 | offset | size | field |
 |-------:|-----:|-------|
 | 0 | 8 | magic `SILRAMDK` |
-| 8 | 4 | version, `1` |
+| 8 | 4 | version, `2` (1 had a CRC-32, which no processor here computes in hardware) |
 | 12 | 4 | entry count `n` |
 | 16 | 8 | total archive length in bytes |
-| 24 | 4 | CRC-32 (IEEE, as GPT) of the whole archive with this field read as zero |
+| 24 | 4 | CRC-32C (Castagnoli, as iSCSI; SSE4.2 and Arm compute it in hardware) of the whole archive with this field read as zero |
 | 28 | 4 | reserved, zero |
 
 Entry table, `n` records of 48 bytes starting at offset 32:
@@ -47,4 +47,7 @@ than the header or table, or its length differs from the length field; the
 magic or version is wrong; the checksum fails; a reserved or padding byte is
 not zero; a name is empty, too long, has a byte outside the allowed set or
 non-NUL bytes after its NUL; two names are equal; or an offset is not the
-position given above or an entry runs past the end.
+position given above or an entry runs past the end; or it has more than 4096
+entries. One reader does this for every program that reads an archive:
+`silica_formats::ramdisk::check` (the kernel's, before it starts the root task;
+the image builder's tests; userspace's).

@@ -5,6 +5,10 @@
 //! `--ramdisk-entry <name>=<host file>` (repeatable) packs the named server
 //! images into the initial ramdisk archive and stores it on the ESP at
 //! `SILICA/RAMDISK.IMG`.
+//!
+//! `--damage-ramdisk <byte>` (for tests) flips the bits of that byte of the
+//! archive once it is built: a boot that must refuse a damaged archive is
+//! tested with it.
 
 use std::process::ExitCode;
 
@@ -14,6 +18,7 @@ fn run() -> Result<(), String> {
     let mut image = silica_image::Image::new();
     let mut ramdisk = silica_image::ramdisk::Ramdisk::new();
     let mut packed = false;
+    let mut damage: Option<usize> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -23,6 +28,13 @@ fn run() -> Result<(), String> {
                     .next()
                     .and_then(|v| v.parse().ok())
                     .ok_or("--esp-mib needs a number")?;
+            }
+            "--damage-ramdisk" => {
+                damage = Some(
+                    args.next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("--damage-ramdisk needs a byte offset")?,
+                );
             }
             "--ramdisk-entry" => {
                 let spec = args.next().ok_or("--ramdisk-entry needs <name>=<file>")?;
@@ -39,9 +51,14 @@ fn run() -> Result<(), String> {
         }
     }
     if packed {
-        image
-            .add("SILICA/RAMDISK.IMG", ramdisk.build())
-            .map_err(|e| e.to_string())?;
+        let mut archive = ramdisk.build();
+        if let Some(at) = damage {
+            let len = archive.len();
+            *archive
+                .get_mut(at)
+                .ok_or_else(|| format!("--damage-ramdisk {at}: the archive has {len} bytes"))? ^= 0xFF;
+        }
+        image.add("SILICA/RAMDISK.IMG", archive).map_err(|e| e.to_string())?;
     }
     let out = out.ok_or("--out is required")?;
     let disk = image.build(esp_mib).map_err(|e| e.to_string())?;
