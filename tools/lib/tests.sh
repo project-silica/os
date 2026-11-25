@@ -920,6 +920,16 @@ run_remote() {
   { cat "$(system_program "$arch" remote "$log")"; printf 'a new version of remote\n'; } >"$dir/remote-new.elf"
   out=$(R update remote "$dir/remote-new.elf") && grep -q '^remote runs the program sent' <<<"$out" || step "update remote (the session's own service): $out"
   until_seen '^init: remote started on its new program' || step "remote was not started on its new program"
+  # A service that keeps a page across restarts (the network stack: its
+  # lease, its connections) gets an empty one with a new program: nothing an
+  # instance wrote there is trusted by the program put in its place (the
+  # 2026-11-24 audit: the page survived updates). The session's connection
+  # ends with the stack it runs on; the next command connects anew.
+  { cat "$(system_program "$arch" netd "$log")"; printf 'a new version of netd\n'; } >"$dir/netd-new.elf"
+  R update netd "$dir/netd-new.elf" >/dev/null 2>&1
+  { until_seen "^init: netd's kept page starts empty for its new program" && until_seen '^init: netd started on its new program'; } \
+    || step "netd's new program was not given an empty kept page"
+  until_seen '^netd: [0-9.]+/[0-9]+ from DHCP server' 2 || step "netd's new program did not take a lease of its own"
   R shutdown >/dev/null
   wait $qemu; rc=$?
   if [ -n "$why" ]; then record fail "$suite" remote "$why (serial: $serial)"
