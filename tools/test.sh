@@ -426,6 +426,7 @@ suite_tools() { # tool self-tests (os/tools/tests/*.sh), each a unit: they take 
     # the system and the emulators as well. One that judges a
     # time says "# alone" and runs when nothing else does.
     in=(path:os:tools path:os:bench crate:os:silica-image)
+    grep -q '^# inputs: idl$' "$t" && in+=(repo:idl ws:bootstrap.pins path:os:manifest.toml)
     grep -q '^# inputs: kernel$' "$t" && in+=(repo:os repo+:kernel)
     grep -q '^# inputs: system$' "$t" && in+=(repo:os repo+:system repo+:kernel host:qemu-x86_64 host:qemu-aarch64)
     if grep -q '^# alone$' "$t"; then
@@ -741,6 +742,10 @@ else
     repo_units "$r" &
   done
   wait
+  if { in_scope idl || in_scope os; } && { manifest_repos | grep -Fx idl >/dev/null || grep -q '^idl ' "$WS/bootstrap.pins"; }; then
+    held idl.compat crate:idl:silica-idlc path:idl:protocols/silica ws:bootstrap.pins path:os:manifest.toml \
+      path:os:tools/check-protocols.sh path:os:tools/lib/common.sh -- run_named os tools/check-protocols.sh idl.compat
+  fi
   if [ -z "$repo" ]; then
     in=(); for r in $(all_repos); do in+=("repo:$r"); done
     held unsafe "${in[@]}" ws:spec/UNSAFE_MODULES.md -- suite_unsafe
