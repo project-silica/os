@@ -1087,6 +1087,38 @@ run_shutdown() {
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_server_image <arch> <suite>: the minimal server image (build_server_image)
+# holds what a server runs and nothing that tests it (the 2026-11-24 audit:
+# every image carried the checks, the test programs and a hostile driver,
+# any of which a service-manager holder could start). Its archive must hold
+# exactly init, the services that start at boot and the drivers; booted with
+# a network, it must come up on it, run no check, and turn off in order when
+# the power button is pressed.
+run_server_image() {
+  local arch=$1 suite=$2 log img serial rc sys want got extra
+  log=$(logfile "$suite" build.server_image)
+  img=$(build_server_image "$arch" "$log") || { record fail "$suite" server_image "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  sys=${img%/*}
+  want=$( { echo root; echo drivers; echo services; grep -vx init "$img.programs"; } | LC_ALL=C sort -u)
+  got=$(LC_ALL=C sort -u "$img.entries")
+  extra=$(comm -13 <(echo "$want") <(echo "$got") | tr '\n' ' ')
+  if [ "$want" != "$got" ]; then
+    record fail "$suite" server_image "the server image's archive is not init, the boot services and the drivers: extra [${extra}] missing [$(comm -23 <(echo "$want") <(echo "$got") | tr '\n' ' ')]"; return 1
+  fi
+  if grep -qE '^(systest|stress|virtio-rogue|hello|blkcheck|svcload|httpd)$' <<<"$got" || grep -q 'start=check:' "$img.services"; then
+    record fail "$suite" server_image "a test program or check service is in the server image"; return 1
+  fi
+  serial=$(logfile "$suite" server_image)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user \
+    --on '^netd: the router 10\.0\.2\.2 answers a ping=system_powerdown' >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc != 0 ] || ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping' || ! serial_has "$serial" '^init: shutting down'; then
+    record fail "$suite" server_image "it did not come up on the network and turn off in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif serial_has "$serial" '^init: hello|passed$'; then record fail "$suite" server_image "a check ran on the server image (serial: $serial)"
+  elif serial_has "$serial" '^ERROR'; then record fail "$suite" server_image "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
+  else record pass "$suite" server_image; fi
+}
+
 # run_console <arch> <suite>: someone at the machine. It boots with a
 # display and a keyboard (virtio, behind the IOMMU) and no checks; the host
 # types on the keyboard: `services`, `devices`, then restarts the keyboard's

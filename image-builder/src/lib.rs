@@ -190,6 +190,16 @@ impl Image {
         Ok(())
     }
 
+    /// The bytes of every file on the ESP: what the system occupies on a
+    /// disk it is installed to, whatever size the partition is (FAT32 takes
+    /// at least 32 MiB for any content).
+    pub fn files_bytes(&self) -> u64 {
+        fn walk(d: &Dir) -> u64 {
+            d.files.values().map(|f| f.len() as u64).sum::<u64>() + d.dirs.values().map(walk).sum::<u64>()
+        }
+        walk(&self.root)
+    }
+
     /// Build the whole disk image in memory.
     pub fn build(&self, esp_mib: u64) -> Result<Vec<u8>, Error> {
         let l = Layout::new(esp_mib)?;

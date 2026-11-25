@@ -61,7 +61,7 @@ evidence_init
 
 # The system image's guest tests (run_<name> in lib/tests.sh), and those of
 # them that judge a time.
-SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http power recovery entropy console_port shutdown console typeahead nvme net net_e1000e
+SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http power recovery entropy console_port shutdown server_image console typeahead nvme net net_e1000e
   dhcp_e1000e ntp_e1000e http_e1000e net_recovery net_recovery_e1000e hotplug partitions partitions_small_transfer
   recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces
   remote)

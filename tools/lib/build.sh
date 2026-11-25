@@ -110,6 +110,14 @@ build_system() {
       + (if $s.sets_time then ["sets_time"] else [] end)
       + (if ($s.files // []) != [] then ["files=\($s.files | join(","))"] else [] end)
     | join(" ")' <<<"$meta" >"$out/services.list" || return 1
+  # A server image holds what a machine runs and nothing that tests it
+  # (IMAGE_PROFILE=server, build_server_image): the services that start at
+  # boot and the drivers, never a `check:` service, a test program or a
+  # hostile driver, so none of them can be started on it (the 2026-11-24
+  # audit: every image shipped them, startable through the service manager).
+  grep -E '(^| )start=boot( |$)' "$out/services.list" >"$out/services.server.list" || return 1
+  { jq -r '.packages[] | select(.metadata.silica.drivers) | .targets[] | select(.kind[] == "bin") | .name' <<<"$meta"
+    sed -E 's/^.* program=([^ ]+).*$/\1/' "$out/services.server.list"; } | LC_ALL=C sort -u >"$out/server.programs" || return 1
   echo "$out"
 }
 
@@ -173,7 +181,7 @@ run_pieces() {
     cp "${k%.elf}.stripped" "$d/kernel.stripped" && cp "$l" "$d/loader.efi" && cp "$t" "$d/silica-image" || failed "$log"
     if [ "$kind" = system ]; then
       sys=$(build_system "$arch" "$log.system") || failed "$log.system"
-      mkdir -p "$d/system" && cp "$sys"/drivers.list "$sys"/services.list "$d/system/" || failed "$log"
+      mkdir -p "$d/system" && cp "$sys"/drivers.list "$sys"/services.list "$sys"/services.server.list "$sys"/server.programs "$d/system/" || failed "$log"
       for f in "$sys"/*.elf; do case "$f" in *.debug.elf) ;; *) cp "$f" "$d/system/" || failed "$log" ;; esac; done
     elif [ -f "$(checkout_of kernel)/targets/$arch-silica-user.json" ]; then
       # A kernel checkout with a user target spec has a root task to pack.
@@ -220,18 +228,21 @@ build_system_image_locked() {
   fi
   [ -f "$sys/$root.elf" ] || { echo "the system repository has no program named $root" >"$log"; return 1; }
   local -a entries=(--ramdisk-entry "root=$sys/$root.elf") extra=()
+  local services=$sys/services.list server=
+  [ "${IMAGE_PROFILE:-}" = server ] && { server=1; services=$sys/services.server.list; }
   for f in "$sys"/*.elf; do
     n=$(basename "$f" .elf)
     case "$n" in "$root"|*.debug) continue ;; esac
+    [ -n "$server" ] && ! grep -qx "$n" "$sys/server.programs" && continue
     entries+=(--ramdisk-entry "$n=$f")
   done
-  entries+=(--ramdisk-entry "drivers=$sys/drivers.list" --ramdisk-entry "services=$sys/services.list")
+  entries+=(--ramdisk-entry "drivers=$sys/drivers.list" --ramdisk-entry "services=$services")
   # Files provisioned for this machine ($SYSTEM_FILES: "<name>=<host file>"
   # words), as an installer would put them in its archive: a service
   # declared with `files=` is given them (the remote service's keys).
   for f in ${SYSTEM_FILES:-}; do entries+=(--ramdisk-entry "$f"); done
-  n=system.img; [ "$root" = init ] || n=system-$root.img
-  tag=$(printf '%s %s' "$cmdline" "${SYSTEM_FILES:-}" | cksum | cut -d' ' -f1)
+  n=system.img; [ "$root" = init ] || n=system-$root.img; [ -n "$server" ] && n=server.img
+  tag=$(printf '%s %s %s' "$cmdline" "${SYSTEM_FILES:-}" "$server" | cksum | cut -d' ' -f1)
   if [ -n "${UNIT_DIR:-}" ]; then out=$UNIT_DIR/image-$tag
   elif [ -n "$cmdline" ] && [ -n "${RUN:-}" ]; then out=$RUN/image-$tag; fi
   mkdir -p "$out" || return 1
@@ -240,7 +251,22 @@ build_system_image_locked() {
     extra=("SILICA/CMDLINE.TXT=$out/SYSTEM-CMDLINE.TXT")
   fi
   "$t" --out "$out/$n" "$lp=$l" "SILICA/KERNEL.ELF=$k" "${entries[@]}" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
+  # The archive's entry names beside the image, for whoever checks what it holds.
+  printf '%s\n' "${entries[@]}" | grep -v '^--ramdisk-entry$' | sed 's/=.*//' >"$out/$n.entries" || return 1
+  if [ -n "$server" ]; then cp "$sys/server.programs" "$out/$n.programs" && cp "$services" "$out/$n.services" || return 1; fi
   echo "$out/$n"
+}
+
+# build_server_image <arch> <log>: the minimal server image (ARCHITECTURE.md
+# section 2's budget): init, the services that start at boot and the
+# drivers, no checks run and none in it. Kept as server.img in the kernel's
+# artifacts, where size.sh measures it. Prints its path.
+build_server_image() {
+  local arch=$1 log=$2 img out
+  img=$(IMAGE_PROFILE=server build_system_image "$arch" "$log" "checks=") || return 1
+  out=$(art_dir "$arch")
+  [ "$img" = "$out/server.img" ] || { put "$img" "$out/server.img" && put "$img.entries" "$out/server.img.entries" && put "$img.files" "$out/server.img.files" && put "$img.programs" "$out/server.img.programs" && put "$img.services" "$out/server.img.services"; } || return 1
+  echo "$out/server.img"
 }
 
 # system_program <arch> <name> <log>: the path of the system repository's

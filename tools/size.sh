@@ -45,7 +45,13 @@ missing_or_measure() { # <name> <file> <budget> <from>
   if [ -f "$2" ]; then check "$1" "$(stat -c %s "$2")" "$3" "$4" " bytes"; else missing "$1" "$4"; fi
 }
 missing_or_measure "kernel + core servers resident text" "$ART/x86_64/core-text.bin" 2097152 5
-missing_or_measure "minimal server image" "$ART/x86_64/server.img" 16777216 4
+# The server image is built here, from the checkouts measured: a copy left
+# from another tree would measure that one.
+if [ -f "$(checkout_of system)/Cargo.toml" ]; then
+  mkdir -p "$OUTBASE"
+  build_server_image x86_64 "$OUTBASE/size.server-image.log" >/dev/null || bad "minimal server image: the build failed (log: $OUTBASE/size.server-image.log)"
+fi
+if [ -f "$ART/x86_64/server.img.files" ]; then check "minimal server image (its files)" "$(cat "$ART/x86_64/server.img.files")" 16777216 4 " bytes"; else missing "minimal server image" 4; fi
 missing_or_measure "desktop image" "$ART/x86_64/desktop.img" 134217728 6
 
 # Bloat ceilings.
