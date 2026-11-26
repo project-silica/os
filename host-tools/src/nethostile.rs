@@ -1,5 +1,5 @@
 //! A hostile host on the guest's link, for the interop test:
-//! `nethostile <relay> <guest address> <host address> <arp|synflood|timewait>`.
+//! `nethostile <relay> <guest address> <host address> <arp|synflood|timewait|shutwindow|crosslisten>`.
 //!
 //! The host is the guest's router on a tap interface of the test's own.
 //! This program forges frames for that link and hands each to `<relay>`, a
@@ -21,6 +21,12 @@
 //!   by the guest first, so each stays in TIME-WAIT there for a minute. A
 //!   guest whose TIME-WAIT holds places in its table of live connections
 //!   refuses the host once they are full.
+//! - `shutwindow`: 140 connections that each ask for an answer httpd writes
+//!   whole and closes after, and never read it (the test clamps the host's
+//!   window on this route, so it shuts with most of the answer unsent) while
+//!   the host's stack answers every probe. A guest that keeps each closed
+//!   connection for as long as its peer answers refuses the host once its
+//!   program's places are full.
 //!
 //! Prints `nethostile: <case>: ok` or `ERROR: nethostile: <case>: <why>`
 //! and exits 0 or 1.
@@ -171,7 +177,9 @@ fn main() {
         a.get(3).and_then(|h| h.parse::<Ipv4Addr>().ok()),
         a.get(4),
     ) else {
-        eprintln!("usage: nethostile <relay address:port> <guest address> <host address> <arp|synflood|timewait>");
+        eprintln!(
+            "usage: nethostile <relay address:port> <guest address> <host address> <arp|synflood|timewait|shutwindow|crosslisten>"
+        );
         exit(2);
     };
     let fail = |why: String| -> ! {
@@ -233,7 +241,79 @@ fn main() {
                 }
             }
         }
-        _ => fail("no such case (arp, synflood, timewait)".into()),
+        "shutwindow" => {
+            // Connections that ask for an answer httpd writes whole and
+            // finishes, and never read it: the host's window (the test
+            // clamps it to 4 KiB on this route) shuts with most of the
+            // answer still the guest's to send, and the host answers
+            // every probe of it for as long as it likes. First answers
+            // the stack takes whole from httpd (30,000 bytes: the
+            // connection is let go of, and the stack's to finish), then
+            // answers it cannot (50,000: httpd's block still holds the
+            // rest). Each time more of them than httpd may have
+            // connections: each must cost its place only until httpd
+            // needs it, so the host is answered all the same.
+            for bytes in [30_000, 50_000] {
+                let mut held = Vec::new();
+                for _ in 0..140 {
+                    if let Ok(mut s) =
+                        TcpStream::connect_timeout(&SocketAddr::from((guest, 80)), Duration::from_secs(2))
+                    {
+                        let _ = s.write_all(
+                            format!("GET /{bytes} HTTP/1.1\r\nHost: guest\r\nConnection: close\r\n\r\n").as_bytes(),
+                        );
+                        held.push(s);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                let r = answer(guest, Duration::from_secs(5));
+                let n = held.len();
+                drop(held);
+                if let Err(e) = r {
+                    fail(format!(
+                        "with {n} connections whose answers of {bytes} bytes the host never reads (its window shut), the guest does not answer the host: {e}"
+                    ));
+                }
+            }
+        }
+        "crosslisten" => {
+            // A connection to another listener (port 22, the remote
+            // service's) whose handshake is under way while 300 SYNs that
+            // never finish arrive for port 80: the test delays the
+            // host's frames 200 ms, so the SYN for 22 arrives, then the
+            // flood, then the host's ACK. A guest that keeps unfinished
+            // handshakes in one pool for every listener gives the place
+            // of 22's to the flood, and answers the ACK with a reset.
+            let [a0, a1, a2, _] = host.octets();
+            let other = std::thread::spawn(move || -> Result<(), String> {
+                let mut s = TcpStream::connect_timeout(&SocketAddr::from((guest, 22)), Duration::from_secs(5))
+                    .map_err(|e| format!("connect: {e}"))?;
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                s.write_all(b"x").map_err(|e| format!("write: {e}"))?;
+                match s.read(&mut [0u8; 16]) {
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => Err("reset".into()),
+                    _ => Ok(()),
+                }
+            });
+            std::thread::sleep(Duration::from_millis(20));
+            for i in 0..300u32 {
+                let src = Ipv4Addr::new(a0, a1, a2, 100 + (i % 150) as u8);
+                let src_mac: Mac = [0x02, 0x5f, 1, 0, (i >> 8) as u8, i as u8];
+                link.send(&ether(
+                    guest_mac,
+                    src_mac,
+                    0x0800,
+                    &syn(src, 30_000 + i as u16, guest, 80, i.wrapping_mul(2_654_435_761)),
+                ));
+            }
+            if let Err(e) = other.join().unwrap_or_else(|_| Err("panicked".into())) {
+                fail(format!(
+                    "a handshake with port 22 under way while 300 SYNs that never finish arrived for port 80 was lost to them: {e}"
+                ));
+            }
+        }
+        _ => fail("no such case (arp, synflood, timewait, shutwindow, crosslisten)".into()),
     }
     println!("nethostile: {case}: ok");
 }

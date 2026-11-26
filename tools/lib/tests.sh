@@ -1000,8 +1000,12 @@ run_http_load() { run_http "$1" "$2" http_load 10000; }
 # The same two over an Intel 82574 (M4).
 run_http_e1000e() { NIC=e1000e run_http "$1" "$2" http_e1000e; }
 run_http_load_e1000e() { NIC=e1000e run_http "$1" "$2" http_load_e1000e 10000; }
-# run_http_restart: M4's "killing the network stack under load": once httpd
-# has answered 2,000 of 6,000 requests the host types `restart netd` at the
+# run_http_restart: M4's "killing the network stack under load". First,
+# once httpd has answered 1,000 of 6,000 requests, the host types
+# `restart-driver` for the interface at the shell: the stack hears from
+# the device manager when the next driver is there (its watch; it does not
+# look by the clock) and its connections carry on. Then, once httpd
+# has answered 2,000, the host types `restart netd` at the
 # shell (a keyboard, the console's); the connections then open are reset,
 # the program's listener is set up again on the new stack (its events), and
 # the load goes on. Judged: no answer ever wrong, every failure a
@@ -1036,7 +1040,8 @@ run_http() {
   # its own (it must be refused, and httpd then serves as ever).
   local checks=http
   [ "$name" = http ] && mode=pipeline && checks=tcphog,http
-  [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^httpd: 2000 answers$=restart netd\n')
+  [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --type '^httpd: 1000 answers$=restart-driver 00:02.0\n' --type '^httpd: 2000 answers$=restart netd\n')
   log=$(logfile "$suite" "build.$name")
   img=$(build_system_image "$arch" "$log" "checks=$checks httpd.quit=allowed") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   httpload=$(host_tool httpload "$log") || { record fail "$suite" "$name" "httpload did not build: $(first_error "$log") (log: $log)"; return 1; }
@@ -1062,6 +1067,8 @@ run_http() {
   if [ $lrc != 0 ]; then record fail "$suite" "$name" "$(head -2 <<<"$load" | tr '\n' ' ' | cut -c1-200) (serial: $serial)"
   elif [ $rc != 0 ] || ! serial_has "$serial" '^init: httpd passed'; then
     record fail "$suite" "$name" "httpd did not end in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC|httpd)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif [ "$mode" = restart ] && ! serial_has "$serial" '^devmgr: restarting virtio-net for 00:02\.0, as asked'; then
+    record fail "$suite" "$name" "the interface's driver was never restarted (serial: $serial)"
   elif [ "$mode" = restart ] && ! serial_has "$serial" '^init: netd restarted, as asked'; then
     record fail "$suite" "$name" "netd was never restarted (serial: $serial)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" "$name" "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
@@ -1288,18 +1295,26 @@ run_remote() {
   # lease, its connections) gets an empty one with a new program: nothing an
   # instance wrote there is trusted by the program put in its place (the
   # 2026-11-24 audit: the page survived updates). The session's connection
-  # ends with the stack it runs on; the next command connects anew.
-  # Nothing resets that connection yet (spec/MILESTONES.md: the stack's
-  # peers are not reset when its program is replaced), so the tool would
-  # wait out its two minutes for an answer: what the update did is read
-  # from the machine, and the tool let go of.
+  # ends with the stack it runs on, and the new stack says so to its peer:
+  # the page of the program before it is handed to the new one read-only,
+  # as another program's, and the stack takes from it only the connections
+  # to reset, as it does after it was killed. The owner's tool, which holds
+  # the session the update was asked on, is reset within 1 s of the new
+  # stack holding its address (before: nothing reset it, and the tool
+  # waited out its two minutes); the next command connects anew.
   { cat "$(system_program "$arch" netd "$log")"; printf 'a new version of netd\n'; } >"$dir/netd-new.elf"
-  R update netd "$dir/netd-new.elf" >/dev/null 2>&1 &
+  R update netd "$dir/netd-new.elf" >"$dir/update-netd.out" 2>&1 &
   local updater=$!
   { until_seen "^init: netd's kept page starts empty for its new program" && until_seen '^init: netd started on its new program'; } \
     || step "netd's new program was not given an empty kept page"
   until_seen '^netd: [0-9.]+/[0-9]+ from DHCP server' 2 || step "netd's new program did not take a lease of its own"
-  kill $updater 2>/dev/null; wait $updater 2>/dev/null
+  for i in $(seq 10); do kill -0 $updater 2>/dev/null || break; sleep 0.1; done
+  if kill -0 $updater 2>/dev/null; then
+    step "the session netd's update was asked on was not reset within 1 s of the new stack holding its address: the owner's tool still waits"
+    kill $updater 2>/dev/null
+  fi
+  wait $updater 2>/dev/null
+  serial_has "$serial" -E '^netd: [0-9]+ connections of the program before this one to reset' || step "the new stack did not say it resets the connections of the program before it"
   R shutdown >/dev/null
   wait $qemu; rc=$?
   # What the shell's `log remote` sent to the console port: the escaped
@@ -1329,12 +1344,17 @@ run_remote() {
 # asked to end and the machine turns off. Needs passwordless sudo, as the
 # benchmark's tap does, and socat; without them the test fails and says so.
 run_interop() {
-  local arch=$1 suite=$2 log img serial rc qemu tool n host guest tap ifb why="" out i
+  local arch=$1 suite=$2 log img serial rc qemu tool n host guest tap ifb why="" out i rmt dir
   log=$(logfile "$suite" build.interop)
   sudo -n true 2>/dev/null || { record fail "$suite" interop "needs passwordless sudo for its tap interface and the impairments on it"; return 1; }
   tool=$(host_tool tcpinterop "$log") || { record fail "$suite" interop "tcpinterop did not build: $(first_error "$log") (log: $log)"; return 1; }
   n=$((20 + ($$ + RANDOM) % 200)); host=10.211.$n.1; guest=10.211.$n.2; tap=siop$n; ifb=sifb$n
-  img=$(build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
+  # The remote service listens too (a key and an owner of this run's own):
+  # a second listener, for the flood on one that must not cost the other.
+  dir=${UNIT_DIR:-$RUN}/interop; rm -rf "$dir"; mkdir -p "$dir"
+  rmt=$(host_tool silica-remote "$log") && "$rmt" keygen "$dir/machine.key" >/dev/null && printf '%s interop\n' "$("$rmt" keygen "$dir/owner.key")" >"$dir/owners" \
+    || { record fail "$suite" interop "silica-remote did not build or make keys: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
     || { record fail "$suite" interop "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   iop_down() {
     sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
@@ -1387,11 +1407,21 @@ run_interop() {
     sudo -n socat -u "UDP-RECV:$rport,bind=127.0.0.1" "INTERFACE:$tap" 2>>"${serial%.log}.interop" &
     relay=$!
     sleep 0.3
-    for c in arp synflood timewait; do
+    for c in arp synflood timewait shutwindow crosslisten; do
+      # shutwindow: the host advertises at most 4 KiB on this route, so an
+      # answer it never reads shuts its window with most of it unsent.
+      [ $c != shutwindow ] || sudo -n ip route replace "$guest/32" dev "$tap" window 4096 || why=${why:-"could not clamp the route's window"}
+      # crosslisten: the host's frames reach the guest 200 ms late, so a
+      # handshake's SYN, then the flood, then its ACK arrive in that order.
+      if [ $c = crosslisten ]; then
+        sudo -n ip route del "$guest/32" dev "$tap" 2>/dev/null
+        sudo -n tc qdisc add dev "$tap" root netem delay 200ms || why=${why:-"could not delay the path (tc netem)"}
+      fi
       out=$("$hostile" "127.0.0.1:$rport" "$guest" "$host" "$c" 2>&1)
       printf '%s\n' "$out" >>"${serial%.log}.interop"
       [ -n "$why" ] || why=$(grep -m1 '^ERROR' <<<"$out")
     done
+    sudo -n ip route del "$guest/32" dev "$tap" 2>/dev/null; sudo -n tc qdisc del dev "$tap" root 2>/dev/null
     sudo -n kill "$relay" 2>/dev/null; wait "$relay" 2>/dev/null
   fi
   phase quit
