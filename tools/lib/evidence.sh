@@ -273,8 +273,29 @@ ev_last() {
 
 held() { ev_unit 0 "$@"; }
 held_bg() { ev_unit 1 "$@"; }
+# SILICA_SHARD=<k>/<n>: this run is job k of n that run one tier between
+# them (a hosted runner's job has 5 minutes; a tier's guests on one of its 4
+# processors took some 210 s, 2026-11-26). The guests are dealt to the jobs
+# in turn, in the order they are declared (the same in every job); the rest
+# (lint, host tests, builds, budgets) run in the first.
+SHARD_K=1 SHARD_N=1 SHARD_SEEN=0
+if [ -n "${SILICA_SHARD:-}" ]; then
+  SHARD_K=${SILICA_SHARD%/*} SHARD_N=${SILICA_SHARD#*/}
+  [[ "$SHARD_K" =~ ^[1-9][0-9]*$ && "$SHARD_N" =~ ^[1-9][0-9]*$ && "$SHARD_K" -le "$SHARD_N" ]] || die "SILICA_SHARD=$SILICA_SHARD: want <k>/<n>, 1 <= k <= n"
+fi
+in_shard() {
+  [ "$SHARD_N" = 1 ] && return 0
+  case "$1" in
+    inos.*/manifest) [ "$SHARD_K" = 1 ] ;;
+    inos.*/* | system.*/* | systest.*/* | entry.*/*)
+      SHARD_SEEN=$((SHARD_SEEN + 1))
+      [ $(((SHARD_SEEN - 1) % SHARD_N + 1)) = "$SHARD_K" ] ;;
+    *) [ "$SHARD_K" = 1 ] ;;
+  esac
+}
 ev_unit() {
   local bg=$1 unit=$2 dir; shift 2
+  in_shard "$unit" || return 0
   local -a in=()
   while [ $# -gt 0 ] && [ "$1" != -- ]; do in+=("$1"); shift; done
   shift
