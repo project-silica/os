@@ -1328,12 +1328,17 @@ run_remote() {
 # asked to end and the machine turns off. Needs passwordless sudo, as the
 # benchmark's tap does, and socat; without them the test fails and says so.
 run_interop() {
-  local arch=$1 suite=$2 log img serial rc qemu tool n host guest tap ifb why="" out i
+  local arch=$1 suite=$2 log img serial rc qemu tool n host guest tap ifb why="" out i rmt dir
   log=$(logfile "$suite" build.interop)
   sudo -n true 2>/dev/null || { record fail "$suite" interop "needs passwordless sudo for its tap interface and the impairments on it"; return 1; }
   tool=$(host_tool tcpinterop "$log") || { record fail "$suite" interop "tcpinterop did not build: $(first_error "$log") (log: $log)"; return 1; }
   n=$((20 + ($$ + RANDOM) % 200)); host=10.211.$n.1; guest=10.211.$n.2; tap=siop$n; ifb=sifb$n
-  img=$(build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
+  # The remote service listens too (a key and an owner of this run's own):
+  # a second listener, for the flood on one that must not cost the other.
+  dir=${UNIT_DIR:-$RUN}/interop; rm -rf "$dir"; mkdir -p "$dir"
+  rmt=$(host_tool silica-remote "$log") && "$rmt" keygen "$dir/machine.key" >/dev/null && printf '%s interop\n' "$("$rmt" keygen "$dir/owner.key")" >"$dir/owners" \
+    || { record fail "$suite" interop "silica-remote did not build or make keys: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
     || { record fail "$suite" interop "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   iop_down() {
     sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
@@ -1386,11 +1391,21 @@ run_interop() {
     sudo -n socat -u "UDP-RECV:$rport,bind=127.0.0.1" "INTERFACE:$tap" 2>>"${serial%.log}.interop" &
     relay=$!
     sleep 0.3
-    for c in arp synflood timewait; do
+    for c in arp synflood timewait shutwindow crosslisten; do
+      # shutwindow: the host advertises at most 4 KiB on this route, so an
+      # answer it never reads shuts its window with most of it unsent.
+      [ $c != shutwindow ] || sudo -n ip route replace "$guest/32" dev "$tap" window 4096 || why=${why:-"could not clamp the route's window"}
+      # crosslisten: the host's frames reach the guest 200 ms late, so a
+      # handshake's SYN, then the flood, then its ACK arrive in that order.
+      if [ $c = crosslisten ]; then
+        sudo -n ip route del "$guest/32" dev "$tap" 2>/dev/null
+        sudo -n tc qdisc add dev "$tap" root netem delay 200ms || why=${why:-"could not delay the path (tc netem)"}
+      fi
       out=$("$hostile" "127.0.0.1:$rport" "$guest" "$host" "$c" 2>&1)
       printf '%s\n' "$out" >>"${serial%.log}.interop"
       [ -n "$why" ] || why=$(grep -m1 '^ERROR' <<<"$out")
     done
+    sudo -n ip route del "$guest/32" dev "$tap" 2>/dev/null; sudo -n tc qdisc del dev "$tap" root 2>/dev/null
     sudo -n kill "$relay" 2>/dev/null; wait "$relay" 2>/dev/null
   fi
   phase quit
