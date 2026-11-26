@@ -1000,8 +1000,12 @@ run_http_load() { run_http "$1" "$2" http_load 10000; }
 # The same two over an Intel 82574 (M4).
 run_http_e1000e() { NIC=e1000e run_http "$1" "$2" http_e1000e; }
 run_http_load_e1000e() { NIC=e1000e run_http "$1" "$2" http_load_e1000e 10000; }
-# run_http_restart: M4's "killing the network stack under load": once httpd
-# has answered 2,000 of 6,000 requests the host types `restart netd` at the
+# run_http_restart: M4's "killing the network stack under load". First,
+# once httpd has answered 1,000 of 6,000 requests, the host types
+# `restart-driver` for the interface at the shell: the stack hears from
+# the device manager when the next driver is there (its watch; it does not
+# look by the clock) and its connections carry on. Then, once httpd
+# has answered 2,000, the host types `restart netd` at the
 # shell (a keyboard, the console's); the connections then open are reset,
 # the program's listener is set up again on the new stack (its events), and
 # the load goes on. Judged: no answer ever wrong, every failure a
@@ -1036,7 +1040,8 @@ run_http() {
   # its own (it must be refused, and httpd then serves as ever).
   local checks=http
   [ "$name" = http ] && mode=pipeline && checks=tcphog,http
-  [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^httpd: 2000 answers$=restart netd\n')
+  [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --type '^httpd: 1000 answers$=restart-driver 00:02.0\n' --type '^httpd: 2000 answers$=restart netd\n')
   log=$(logfile "$suite" "build.$name")
   img=$(build_system_image "$arch" "$log" "checks=$checks httpd.quit=allowed") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   httpload=$(host_tool httpload "$log") || { record fail "$suite" "$name" "httpload did not build: $(first_error "$log") (log: $log)"; return 1; }
@@ -1062,6 +1067,8 @@ run_http() {
   if [ $lrc != 0 ]; then record fail "$suite" "$name" "$(head -2 <<<"$load" | tr '\n' ' ' | cut -c1-200) (serial: $serial)"
   elif [ $rc != 0 ] || ! serial_has "$serial" '^init: httpd passed'; then
     record fail "$suite" "$name" "httpd did not end in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC|httpd)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif [ "$mode" = restart ] && ! serial_has "$serial" '^devmgr: restarting virtio-net for 00:02\.0, as asked'; then
+    record fail "$suite" "$name" "the interface's driver was never restarted (serial: $serial)"
   elif [ "$mode" = restart ] && ! serial_has "$serial" '^init: netd restarted, as asked'; then
     record fail "$suite" "$name" "netd was never restarted (serial: $serial)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" "$name" "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
