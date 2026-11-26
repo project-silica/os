@@ -301,11 +301,14 @@ run_boot_error() {
 # processor Silica must refuse: the boot leaves with the failure code and
 # says why. Without, one it must run on: the in-OS `fpu` test passes there
 # (system calls, switches and the vector state, through a user program
-# built for the baseline).
+# built for the baseline). One it must run on is booted with the owner's
+# consent to run without a trusted entropy source (`entropy=accept`): an
+# emulated Armv8.0 core has no RNDR, and the refusal without consent is
+# cpu.no_rng's to show, not this test's.
 run_cpu() {
   local arch=$1 suite=$2 label=$3 model=$4 want=${5:-} log img serial rc
   log=$(logfile "$suite" "build.$label")
-  img=$(build_image "$arch" "$log" "$([ -n "$want" ] || echo test=fpu)") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  img=$(build_image "$arch" "$log" "$([ -n "$want" ] || echo test=fpu entropy=accept)") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$label")
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --cpu "$model" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-120}" >"$serial.qemu" 2>&1
   rc=$?
