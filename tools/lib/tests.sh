@@ -1630,17 +1630,23 @@ run_shutdown() {
 # cache; NVMe flushes and performs the controller's normal shutdown (CC.SHN,
 # until CSTS.SHST says it is done). QEMU's own trace must show the
 # controller's flush and shutdown; the drivers and the device manager must say
-# they ended in order; the machine must turn off.
+# they ended in order; the machine must turn off. The button is pressed while
+# the NVMe driver is still coming up (its controller answers its first admin
+# command 3 s late: `devmgr.inject=nvme:slow_start@1`): before 2026-11-26 the
+# driver's bring-up took the device manager's request to end and dropped it,
+# and the driver was ended where it stood, its cache never flushed (seen on a
+# hosted runner, where bring-up is slower).
 run_shutdown_flush_owner() { run_shutdown_flush "$1" "$2" owner; }
 run_shutdown_flush() {
   local arch=$1 suite=$2 mode=${3:-power} name=shutdown_flush log img serial rc why=""
-  local -a how=(--on '^devmgr: the power button is armed$=system_powerdown')
+  local -a how=(--on '^inject: SlowStart committed$=system_powerdown')
+  local cmdline="checks= devmgr.inject=nvme:slow_start@1"
   # The owner's way: `shutdown` typed at the shell, the service manager then
   # asking the device manager to end (the power button's way, the device
   # manager ends its drivers before it asks).
-  [ "$mode" = owner ] && name=shutdown_flush_owner how=(--console-port "$(logfile "$suite" shutdown_flush_owner).port" --port-type '^console: .* and the console port=shutdown\r')
+  [ "$mode" = owner ] && name=shutdown_flush_owner how=(--console-port "$(logfile "$suite" shutdown_flush_owner).port" --port-type '^console: .* and the console port=shutdown\r') cmdline="checks="
   log=$(logfile "$suite" build.$name)
-  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "$cmdline") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   nvme_machine "" "$img"
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" "${NVME_MACHINE[@]}" \
