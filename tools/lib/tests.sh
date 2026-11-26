@@ -797,10 +797,14 @@ host_ports() {
 run_http() {
   local arch=$1 suite=$2 name=${3:-http} requests=${4:-640} mode=${5:-} log img serial rc port qemu load i httpload
   local -a extra=()
-  [ "$name" = http ] && mode=pipeline
+  # The plain run starts tcphog first: one program trying to take the
+  # stack's connections from every other one, and to name memory past
+  # its own (it must be refused, and httpd then serves as ever).
+  local checks=http
+  [ "$name" = http ] && mode=pipeline && checks=tcphog,http
   [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^httpd: 2000 answers$=restart netd\n')
   log=$(logfile "$suite" "build.$name")
-  img=$(build_system_image "$arch" "$log" "checks=http httpd.quit=allowed") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=$checks httpd.quit=allowed") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   httpload=$(host_tool httpload "$log") || { record fail "$suite" "$name" "httpload did not build: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   # A host port of this run's own (runs in parallel must not share one).
@@ -948,9 +952,10 @@ run_remote() {
 # advertising a 536-byte MSS and an 8 KiB window (`ip route ... advmss
 # window`, so netd must segment small and wait for the window); and with
 # both directions delayed 1 ms, 2% lost, 1% duplicated and 10% reordered
-# (netem, the guest's direction through an ifb). Then httpd is asked to end
-# and the machine turns off. Needs passwordless sudo, as the benchmark's tap
-# does; without it the test fails and says so.
+# (netem, the guest's direction through an ifb). Then a hostile host on the
+# link (forged ARP, a flood of SYNs that never finish; below). Then httpd is
+# asked to end and the machine turns off. Needs passwordless sudo, as the
+# benchmark's tap does, and socat; without them the test fails and says so.
 run_interop() {
   local arch=$1 suite=$2 log img serial rc qemu tool n host guest tap ifb why="" out i
   log=$(logfile "$suite" build.interop)
@@ -994,6 +999,29 @@ run_interop() {
     phase lossy
   else why=${why:-"could not impair the path (tc netem, ifb)"}; fi
   sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
+  # A hostile host on the link (host-tools' nethostile; socat, as root, puts
+  # each datagram it sends on the tap as a frame): ARP packets naming the
+  # router at another hardware address, then 300 SYNs from addresses that
+  # never finish the handshake, then 400 short connections the guest closes
+  # first (each in TIME-WAIT there for a minute). After each the guest must
+  # still answer the host (before 2026-11-25 one forged ARP packet sent its
+  # answers astray, the SYNs filled httpd's backlog, and TIME-WAIT held
+  # places in the table of live connections).
+  local hostile relay rport c
+  if ! command -v socat >/dev/null; then why=${why:-"needs socat to put forged frames on the tap"}
+  elif ! hostile=$(host_tool nethostile "$log"); then why=${why:-"nethostile did not build: $(first_error "$log")"}
+  elif ! rport=$(host_ports 1); then why=${why:-"no free host port for the frame relay"}
+  else
+    sudo -n socat -u "UDP-RECV:$rport,bind=127.0.0.1" "INTERFACE:$tap" 2>>"${serial%.log}.interop" &
+    relay=$!
+    sleep 0.3
+    for c in arp synflood timewait; do
+      out=$("$hostile" "127.0.0.1:$rport" "$guest" "$host" "$c" 2>&1)
+      printf '%s\n' "$out" >>"${serial%.log}.interop"
+      [ -n "$why" ] || why=$(grep -m1 '^ERROR' <<<"$out")
+    done
+    sudo -n kill "$relay" 2>/dev/null; wait "$relay" 2>/dev/null
+  fi
   phase quit
   wait $qemu; rc=$?
   iop_down
@@ -1049,8 +1077,16 @@ run_idle() {
 # run_ntp <arch> <suite>: the wall clock set from a time server (M4: "syncs
 # time"). A server on the host's loopback (host-tools' sntpd), reached from the
 # guest as 10.0.2.2, answers with the host's time plus 1,000 s; the system
-# is booted with `netd.ntp=10.0.2.2:<port>`. The network stack must say it
-# set the clock, by about +1,000 s, to the server's time (within 3 s).
+# is booted with `netd.ntp=10.0.2.2:<port>`. The server's first two answers
+# are ones to refuse (sntpd's bad=2: one whose round trip took 1.5 s, one
+# sent before it was received), and the network stack must say it did not
+# believe either (before 2026-11-25 it set the clock from the first). Then
+# it must say it set the clock, by about +1,000 s, to the server's time
+# (within 3 s). With the first bad answer the server forges one at once
+# whose origin is not the question's, ten years ahead (a blind spoofer's):
+# the clock must not move by it. No question may carry the guest's clock
+# for its answer to echo (a number anyone can guess), and no two questions
+# may come from one port.
 run_ntp_e1000e() { NIC=e1000e run_ntp "$@"; }
 run_ntp() {
   local arch=$1 suite=$2 log img serial rc port server line at want moved sntpd nic=${NIC:-virtio} name=ntp
@@ -1060,7 +1096,7 @@ run_ntp() {
   img=$(build_system_image "$arch" "$log" "checks= netd.ntp=10.0.2.2:$port") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   sntpd=$(host_tool sntpd "$log") || { record fail "$suite" "$name" "sntpd did not build: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
-  "$sntpd" "$port" 1000 >"${serial%.log}.sntpd" 2>&1 &
+  "$sntpd" "$port" 1000 bad=2 >"${serial%.log}.sntpd" 2>&1 &
   server=$!
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" \
     --until "^netd: the wall clock is .* from 10\\.0\\.2\\.2:$port " >"$serial.qemu" 2>&1
@@ -1073,6 +1109,12 @@ run_ntp() {
   if [ $rc != 0 ] || [ -z "$at" ]; then record fail "$suite" "$name" "the clock was never set from the server: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|netd: )' | cut -c1-120) (exit status $rc; serial: $serial)"
   elif [ $((at - want)) -gt 3 ] || [ $((want - at)) -gt 3 ] || [ "${moved#+}" -lt 997000 ] || [ "${moved#+}" -gt 1003000 ]; then
     record fail "$suite" "$name" "set to $at, moved ${moved} ms, against the server's $want and +1000000 ms (serial: $serial)"
+  elif [ "$(tr -d '\r' <"$serial" | grep -c -a "^netd: a time server's answer .*; not believed")" != 2 ]; then
+    record fail "$suite" "$name" "netd did not refuse the server's two bad answers before it believed a good one (serial: $serial; server: ${serial%.log}.sntpd)"
+  elif grep -q 'carries the clock' "${serial%.log}.sntpd"; then
+    record fail "$suite" "$name" "a question carried the guest's clock for its answer to echo, which anyone can guess (server: ${serial%.log}.sntpd)"
+  elif [ "$(grep -c '^sntpd: a question from port' "${serial%.log}.sntpd")" != "$(grep '^sntpd: a question from port' "${serial%.log}.sntpd" | sort -u | wc -l)" ]; then
+    record fail "$suite" "$name" "two questions came from the same port: a spoofer knows where to send (server: ${serial%.log}.sntpd)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" "$name" "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
   else record pass "$suite" "$name"; fi
 }
