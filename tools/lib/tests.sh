@@ -537,7 +537,7 @@ run_partitions() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in size offset confined write; do
+  for name in size offset confined write scopes opens_bounded narrowing_bounded flush_bounded; do
     if grep -qx "TEST partitions.$name PASS" <<<"$text"; then record pass "$suite" "partitions_$name"
     else record fail "$suite" "partitions_$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
@@ -577,6 +577,8 @@ run_partitions_small_transfer() {
 run_faults() {
   local arch=$1 suite=$2 log img serial rc text token driver config fault restarts other want name say missing
   local -a faults=(garbage stuck spurious missed reset)
+  # `broken` (the device asks to be reset) is virtio's alone.
+  local -a fl
   if [ -n "${4:-}" ]; then faults=("$4"); fi
   local -a machine says
   # One driver's five boots when named (the drivers' run at once); the
@@ -592,17 +594,23 @@ run_faults() {
       nvme_machine "$config" "$(build_system_image "$arch" "$(logfile "$suite" build.faults_disk)")"
       machine=("${NVME_MACHINE[@]}") says=("${NVME_SAYS[@]}")
     fi
-    for fault in "${faults[@]}"; do
+    fl=("${faults[@]}"); if [ -z "${4:-}" ] && [[ $driver == virtio-* ]]; then fl+=(broken); [ "$driver" = virtio-blk ] && fl+=(tiny); fi
+    for fault in "${fl[@]}"; do
       name=fault_${token//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
-      img=$(build_system_image "$arch" "$log" "checks=block inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+      local at=50; [ $fault = tiny ] && at=1   # a queue is offered once, at bring-up
+      img=$(build_system_image "$arch" "$log" "checks=block inject=$driver:$fault@$at") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
       serial=$(logfile "$suite" "$name")
       "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" "${machine[@]}" >"$serial.qemu" 2>&1
       rc=$?
       text=$(tr -d '\r\0' <"$serial")
       restarts=$(grep -c "^devmgr: $driver for .* started again" <<<"$text")
       other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: $driver: " | head -1 | cut -c1-140)
-      case $fault in garbage|stuck|reset) want=1 ;; *) want=0 ;; esac
+      case $fault in garbage|stuck|reset|broken|tiny) want=1 ;; *) want=0 ;; esac
+      # A queue too small for one request is refused at once, saying why.
+      [ $fault = tiny ] && says=("${says[@]+"${says[@]}"}" "^ERROR: $driver: Protocol\(\"a queue too small for one request\"\)")
+      # A device that asks to be reset is seen asking, not timed out on.
+      [ $fault = broken ] && says=("${says[@]+"${says[@]}"}" "^ERROR: $driver: .*the device asks to be reset")
       missing=""; for say in "${says[@]+"${says[@]}"}"; do [ -n "$missing" ] || grep -qE "$say" <<<"$text" || missing=$say; done
       if [ $rc != 0 ] || ! grep -qx 'BOOT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
       elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
@@ -623,7 +631,8 @@ run_faults() {
   local nic
   for driver in "${network[@]+"${network[@]}"}"; do
     nic=virtio; [ "$driver" = e1000e ] && nic=e1000e
-    for fault in "${faults[@]}"; do
+    fl=("${faults[@]}"); if [ -z "${4:-}" ] && [[ $driver == virtio-* ]]; then fl+=(broken); [ "$driver" = virtio-blk ] && fl+=(tiny); fi
+    for fault in "${fl[@]}"; do
       name=fault_${driver//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
       img=$(build_system_image "$arch" "$log" "checks=netfault off=netd inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
@@ -636,6 +645,7 @@ run_faults() {
       if [ $rc != 0 ] || ! grep -qx 'NETFAULT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
       elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
       elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
+      elif [ $fault = broken ] && ! grep -qE "^ERROR: $driver: .*the device asks to be reset" <<<"$text"; then record fail "$suite" "$name" "the driver never saw the device ask to be reset (serial: $serial)"
       elif [ "$restarts" -gt 1 ]; then record fail "$suite" "$name" "the driver was started again $restarts times (serial: $serial)"
       else record pass "$suite" "$name"; fi
     done
@@ -1279,8 +1289,16 @@ rogue_on() {
     --until "^devmgr: virtio-rogue for $at ended with status 0" "$@" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
+  # The write to the driver's read-only page: the driver's PASS says its
+  # bytes did not change; the kernel's line says the device tried and was
+  # refused (without it the request may have failed for any other reason).
+  local ro
+  ro=$(sed -n 's/^virtio-rogue: told the device to write its read-only page at \(0x[0-9a-f]*\):.*/\1/p' <<<"$text" | head -1)
+  if [ -n "$ro" ] && grep -qx "TEST rogue_write_read_only PASS" <<<"$text" \
+    && grep -qE "^kernel: device $at was refused a write at $ro " <<<"$text"; then record pass "$suite" "rogue_write_read_only$sfx"
+  else record fail "$suite" "rogue_write_read_only$sfx" "no PASS, or no kernel line refusing the device's write at its read-only page ${ro:-(address not said)} (serial: $serial)"; fi
   for name in rogue_other_device rogue_other_interrupt rogue_physical_address rogue_address_above_the_top \
-              rogue_write_read_only rogue_recovers rogue_restart; do
+              rogue_recovers rogue_restart; do
     if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name$sfx"
     else record fail "$suite" "$name$sfx" "$(grep -m1 -a "^ERROR: virtio-rogue: $name" <<<"$text" | cut -c1-160) (no PASS line; serial: $serial)"; fi
   done
@@ -1349,3 +1367,58 @@ run_systest() {
   record fail "$suite" systest "the run did not end with SYSTEST OK: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   return 1
 }
+
+# run_nvme_admin_missed <arch> <suite>: an NVMe controller whose first admin
+# command completes without the driver hearing its interrupt
+# (inject=nvme:admin_missed@1). The driver must find the completion by
+# looking at the queue itself, within 100 ms (it slept out the whole 5 s
+# admin timeout before), bring the controller up and pass blkcheck, without
+# being started again.
+run_nvme_admin_missed() {
+  local arch=$1 suite=$2 log img serial rc text us name=nvme_admin_missed
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=block inject=nvme:admin_missed@1") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  nvme_machine "" "$(build_system_image "$arch" "$(logfile "$suite" build.$name.disk)")"
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" "${NVME_MACHINE[@]}" >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  us=$(sed -n 's/^nvme: .*its completion came without its interrupt; found by polling after \([0-9]*\) us$/\1/p' <<<"$text" | head -1)
+  if [ $rc != 0 ] || ! grep -qx 'BOOT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! grep -Fxq "inject: AdminMissed committed" <<<"$text"; then record fail "$suite" "$name" "the driver never lost the admin interrupt (serial: $serial)"
+  elif [ -z "$us" ] || [ "$us" -ge 100000 ]; then record fail "$suite" "$name" "the admin completion was not found by polling within 100 ms (${us:-never}; serial: $serial)"
+  elif [ "$(grep -c '^TEST nvme\.[a-z_]* PASS' <<<"$text")" != 5 ]; then record fail "$suite" "$name" "blkcheck did not pass every check on the disk (serial: $serial)"
+  elif grep -q "^devmgr: nvme for .* started again" <<<"$text"; then record fail "$suite" "$name" "the driver was started again (serial: $serial)"
+  else record pass "$suite" "$name"; fi
+}
+
+# run_hostile_clients <arch> <suite>: clients that attack the drivers and
+# the device manager with what any client holds (blkcheck's `hostile`, after
+# its disk checks), on a machine with a display, a keyboard and a console
+# port the console is using: a second client taking any of them over, a
+# client opening and watching 9000 times with a fresh notification each,
+# registering and withdrawing memory 5000 times, and breaking its ring with
+# 32 requests on the device. Each must fail; and the kernel must never have
+# refused the disk a DMA write (the memory of the broken ring's requests
+# was not pulled from under the device).
+run_hostile_clients() {
+  local arch=$1 suite=$2 log img serial rc text name port
+  log=$(logfile "$suite" build.hostile_clients)
+  img=$(build_system_image "$arch" "$log" "checks=block blkcheck.churn=120000") || { record fail "$suite" hostile_clients "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" hostile_clients)
+  port=${serial%.log}.port
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --no-exit-device \
+    --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --console-port "$port" \
+    --until '^init: blkcheck (passed|ended with status)' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  for name in device_manager_bounded dma_churn broken_ring_in_flight takeover_input takeover_port takeover_display; do
+    if grep -qx "TEST hostile.$name PASS" <<<"$text"; then record pass "$suite" "hostile_$name"
+    else record fail "$suite" "hostile_$name" "no PASS line: $(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+  done
+  if grep -qE '^kernel: device 00:01\.0 was refused' <<<"$text"; then
+    record fail "$suite" hostile_no_dma_fault "the disk was refused a DMA access: $(grep -m1 -E '^kernel: device 00:01\.0 was refused' <<<"$text") (serial: $serial)"
+  elif grep -q '^blkcheck: a client broke its ring' <<<"$text"; then record pass "$suite" hostile_no_dma_fault
+  else record fail "$suite" hostile_no_dma_fault "the ring was never broken (serial: $serial)"; fi
+}
+
