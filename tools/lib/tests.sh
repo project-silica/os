@@ -1422,3 +1422,43 @@ run_hostile_clients() {
   else record fail "$suite" hostile_no_dma_fault "the ring was never broken (serial: $serial)"; fi
 }
 
+
+# run_unstartable_driver <arch> <suite>: a device whose driver cannot be
+# started (the boot archive's services list named as its program). The
+# device manager enables memory decoding, bus mastering and MSI-X just
+# before the start; when the start fails, the device must be left unable to
+# reach memory (bus mastering off, read back from its command register) and
+# the system must come up.
+run_unstartable_driver() {
+  local arch=$1 suite=$2 log img serial rc text port name=unstartable_driver
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks= driver=1af4:1043=services") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  port=${serial%.log}.port
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --console-port "$port" \
+    --until '^BOOT OK$' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if grep -qE '^devmgr: cannot start services: .* left with bus mastering off ' <<<"$text" && grep -qx 'BOOT OK' <<<"$text"; then record pass "$suite" "$name"
+  else record fail "$suite" "$name" "the device was not left with bus mastering off: $(grep -m1 -a '^devmgr: cannot start' <<<"$text" | cut -c1-160) (exit status $rc; serial: $serial)"; fi
+}
+
+# run_entropy_broken_device <arch> <suite>: a machine with no source of
+# randomness the loader trusts (no RDRAND or RDSEED; its owner accepts the
+# boot: entropy=accept) and a virtio entropy device that gives only zeros
+# (a broken or hostile device). The entropy service mixes the zeros in but
+# must not count them: it refuses to answer (`not_seeded`) rather than give
+# guessable bytes, and says why.
+run_entropy_broken_device() {
+  local arch=$1 suite=$2 log img serial rc text name=entropy_broken_device
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=entropy entropy=accept entropycheck.expect=unseeded") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --cpu EPYC,+x2apic,+tsc-deadline,+invtsc,+xsave,+xgetbv1,-rdrand,-rdseed \
+    --object rng-random,id=zero,filename=/dev/zero --device virtio-rng-pci,rng=zero,disable-legacy=on,iommu_platform=on >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if grep -qx 'TEST entropy.a_broken_device_does_not_seed PASS' <<<"$text" && grep -q "^entropy: device .*failed a health test" <<<"$text"; then record pass "$suite" "$name"
+  else record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-160) (exit status $rc; serial: $serial)"; fi
+}

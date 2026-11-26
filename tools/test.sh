@@ -63,7 +63,7 @@ evidence_init
 # them that judge a time.
 SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http power recovery entropy console_port shutdown console typeahead nvme net net_e1000e
   dhcp_e1000e ntp_e1000e http_e1000e net_recovery net_recovery_e1000e hotplug partitions partitions_small_transfer
-  recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable nvme_admin_missed hostile_clients hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces
+  recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable nvme_admin_missed hostile_clients unstartable_driver entropy_broken_device hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces
   remote)
 QUIET_SYSTEM=" recovery recovery_nvme net_recovery net_recovery_e1000e svcload http_restart "
 # unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has
