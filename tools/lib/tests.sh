@@ -1011,6 +1011,14 @@ run_remote() {
   grep -qE '^remote +running' <<<"$out" && grep -qE '^netd +running .* silica.net.Tcp' <<<"$out" || step "services did not list remote and netd running: $(head -3 <<<"$out" | tr '\n' ' ')"
   grep -qE "^httpd +stopped .* $(hash_of "$httpd")\$" <<<"$out" || step "services did not show httpd stopped with the boot archive's program $(hash_of "$httpd")"
   out=$(R describe netd); grep -q '^process netd: ' <<<"$out" || step "describe netd said: $(head -1 <<<"$out")"
+  # Services that hold secrets (declared `secrets`) run in address spaces
+  # isolated against speculation; others do not pay for it. The owner sees
+  # which through the capabilities `describe` reports.
+  grep -q 'AddressSpace.*isolated against speculation' <<<"$out" && step "netd's address space is isolated though it declares no secrets"
+  for s in remote entropy; do
+    out=$(R describe $s)
+    grep -q 'AddressSpace.*isolated against speculation' <<<"$out" || step "$s holds secrets but its address space is not isolated against speculation: $(grep -m1 AddressSpace <<<"$out")"
+  done
   out=$(R log remote); grep -q 'listening on port 22' <<<"$out" || step "log remote said: $(head -1 <<<"$out")"
   out=$(R logs); grep -q '^netd ' <<<"$out" || step "logs did not name netd: $(head -1 <<<"$out")"
   out=$(R memory); grep -q '^free [0-9]* KiB' <<<"$out" || step "memory said: $out"
