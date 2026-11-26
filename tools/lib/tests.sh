@@ -1279,18 +1279,26 @@ run_remote() {
   # lease, its connections) gets an empty one with a new program: nothing an
   # instance wrote there is trusted by the program put in its place (the
   # 2026-11-24 audit: the page survived updates). The session's connection
-  # ends with the stack it runs on; the next command connects anew.
-  # Nothing resets that connection yet (spec/MILESTONES.md: the stack's
-  # peers are not reset when its program is replaced), so the tool would
-  # wait out its two minutes for an answer: what the update did is read
-  # from the machine, and the tool let go of.
+  # ends with the stack it runs on, and the new stack says so to its peer:
+  # the page of the program before it is handed to the new one read-only,
+  # as another program's, and the stack takes from it only the connections
+  # to reset, as it does after it was killed. The owner's tool, which holds
+  # the session the update was asked on, is reset within 1 s of the new
+  # stack holding its address (before: nothing reset it, and the tool
+  # waited out its two minutes); the next command connects anew.
   { cat "$(system_program "$arch" netd "$log")"; printf 'a new version of netd\n'; } >"$dir/netd-new.elf"
-  R update netd "$dir/netd-new.elf" >/dev/null 2>&1 &
+  R update netd "$dir/netd-new.elf" >"$dir/update-netd.out" 2>&1 &
   local updater=$!
   { until_seen "^init: netd's kept page starts empty for its new program" && until_seen '^init: netd started on its new program'; } \
     || step "netd's new program was not given an empty kept page"
   until_seen '^netd: [0-9.]+/[0-9]+ from DHCP server' 2 || step "netd's new program did not take a lease of its own"
-  kill $updater 2>/dev/null; wait $updater 2>/dev/null
+  for i in $(seq 10); do kill -0 $updater 2>/dev/null || break; sleep 0.1; done
+  if kill -0 $updater 2>/dev/null; then
+    step "the session netd's update was asked on was not reset within 1 s of the new stack holding its address: the owner's tool still waits"
+    kill $updater 2>/dev/null
+  fi
+  wait $updater 2>/dev/null
+  serial_has "$serial" -E '^netd: [0-9]+ connections of the program before this one to reset' || step "the new stack did not say it resets the connections of the program before it"
   R shutdown >/dev/null
   wait $qemu; rc=$?
   # What the shell's `log remote` sent to the console port: the escaped
