@@ -329,6 +329,7 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path; [n
     unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
     unit any inos.x86_64/panic_reset "${GIN[@]}" -- run_panic_reset x86_64 inos.x86_64
     unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
+    unit any inos.x86_64/stall_named "${GIN[@]}" -- run_panic x86_64 inos.x86_64 park
     unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64
   fi
   # Boots that cannot succeed say why.
@@ -738,15 +739,23 @@ if [ "${#guests[@]}" -gt 0 ]; then
           fi
           continue ;;
       esac
-      # The kernel's panic tests, by name.
+      # The kernel's panic tests, by name (aarch64's secondary panic too: its
+      # processors are stopped by an SGI, x86_64's by an NMI).
       case "$guest" in
-        panic_backtrace | panic_reset | null_object_faults | panic_screen)
+        panic_backtrace_secondary)
+          if [ "$PHASE" = rest ]; then
+            gin aarch64
+            unit any inos.aarch64/panic_backtrace_secondary "${GIN[@]}" -- run_panic aarch64 inos.aarch64 secondary
+          fi
+          continue ;;
+        panic_backtrace | panic_reset | null_object_faults | panic_screen | stall_named)
           if [ "$PHASE" = rest ]; then
             gin x86_64
             case "$guest" in
               panic_backtrace) unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64 ;;
               panic_reset) unit any inos.x86_64/panic_reset "${GIN[@]}" -- run_panic_reset x86_64 inos.x86_64 ;;
               null_object_faults) unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null ;;
+              stall_named) unit any inos.x86_64/stall_named "${GIN[@]}" -- run_panic x86_64 inos.x86_64 park ;;
               panic_screen) unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64 ;;
             esac
           fi

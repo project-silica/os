@@ -195,12 +195,17 @@ run_panic_reset() {
 # function that panicked to a function name, a source file and a line.
 run_panic() {
   local arch=$1 suite=$2 mode=${3:-test} label=panic_backtrace cpus=1 log img serial rc sym want=deliberate_panic
-  if [ "$mode" = secondary ]; then label=panic_backtrace_secondary; cpus=2; fi
+  if [ "$mode" = secondary ]; then label=panic_backtrace_secondary; cpus=4; fi
   # panic=null: the kernel reaches an object through the null address,
   # which must fault (physical page 0 is never mapped for it).
   if [ "$mode" = null ]; then label=null_object_faults; want=deliberate_null_access; fi
+  # panic=park: processor 1 keeps its lock with interrupts off; the next
+  # entry that takes every lock must stop the machine naming processor 1
+  # within its bound, not hang (the 2026-11-25 kernel review).
+  if [ "$mode" = park ]; then label=stall_named; cpus=2; want=stalled; fi
   log=$(logfile "$suite" "build.$label")
-  img=$(build_image "$arch" "$log" "panic=$mode") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  local extra=; [ "$mode" = park ] && extra=" test=caps"   # capability calls: entries that take every lock
+  img=$(build_image "$arch" "$log" "panic=$mode$extra") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$label")
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp "$cpus" --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
@@ -209,7 +214,11 @@ run_panic() {
   if [ $rc != 1 ] || ! grep -q 'guest exit code 17' "$serial.qemu"; then
     record fail "$suite" "$label" "a panicking kernel did not leave with the failure code (exit status $rc)"; return 1
   fi
-  if [ "$mode" = null ]; then
+  if [ "$mode" = park ]; then
+    if ! grep -aq '^PANIC: processor 1 has not let go of its lock in 10 s' "$serial"; then
+      record fail "$suite" "$label" "a processor holding its lock for good was not named: $(grep -am1 '^PANIC' "$serial" | cut -c1-120) (serial: $serial)"; return 1
+    fi
+  elif [ "$mode" = null ]; then
     if ! grep -aq '^PANIC: kernel exception' "$serial"; then
       record fail "$suite" "$label" "a null object address did not fault: $(grep -am1 '^PANIC' "$serial" | cut -c1-120) (serial: $serial)"; return 1
     fi
@@ -218,6 +227,11 @@ run_panic() {
   fi
   if [ "$mode" = secondary ] && ! grep -aq '^PANIC: deliberate panic on processor 1' "$serial"; then
     record fail "$suite" "$label" "the secondary processor did not report its panic (serial: $serial)"; return 1
+  fi
+  # The other processors stop with it (the boot processor, still starting
+  # them with interrupts masked, may not: at least one of the three must).
+  if [ "$mode" = secondary ] && ! grep -aqE '^kernel: [1-3] of 3 other processors stopped' "$serial"; then
+    record fail "$suite" "$label" "the other processors were not stopped: $(grep -am1 ' other processors stopped' "$serial") (serial: $serial)"; return 1
   fi
   if ! grep -aqE "$want at .+\.rs:[1-9][0-9]*" "$sym"; then
     record fail "$suite" "$label" "the backtrace does not decode to function, file and line (see $sym)"; return 1
@@ -1769,6 +1783,7 @@ rogue_on() {
   done <<'CHECKS'
 rogue_write_unmapped|^kernel: device % was refused a write at 0x100000 
 rogue_read_unmapped|^kernel: device % was refused a read at 0x200000 
+rogue_late_fault_reported|^kernel: device % was refused a write at 0x3f0000 
 rogue_log_ring|^logd: the log ring of devmgr/virtio-rogue@% made no sense; what it held is skipped$
 rogue_config_space|^devmgr: virtio-rogue for % touched memory it may not \(page fault\)
 rogue_interrupt_other_entry_refused|^kernel: device % was refused interrupt entry 9 \(IOMMU fault reason 0x26\)$
@@ -1887,6 +1902,8 @@ run_hostile_clients() {
 # before the start; when the start fails, the device must be left unable to
 # reach memory (bus mastering off, read back from its command register) and
 # the system must come up.
+# (The device manager says so after the system's BOOT OK, so the run waits
+# for its line, not for BOOT OK: stopping at BOOT OK raced it.)
 run_unstartable_driver() {
   local arch=$1 suite=$2 log img serial rc text port name=unstartable_driver
   log=$(logfile "$suite" "build.$name")
@@ -1894,7 +1911,7 @@ run_unstartable_driver() {
   serial=$(logfile "$suite" "$name")
   port=${serial%.log}.port
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --console-port "$port" \
-    --until '^BOOT OK$' >"$serial.qemu" 2>&1
+    --until '^devmgr: cannot start services' >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
   if grep -qE '^devmgr: cannot start services: .* left with bus mastering off ' <<<"$text" && grep -qx 'BOOT OK' <<<"$text"; then record pass "$suite" "$name"
