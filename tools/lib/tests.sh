@@ -1227,17 +1227,13 @@ run_remote() {
   # session that, once proven, starts a frame it never finishes: the owner
   # is still served, and the machine closes each (the silent ones within the
   # 10 s to prove an owner, the trickling session at its idle limit, 6 s in
-  # this owner's line of the owners file: bytes are not messages). The
-  # 10 s count from when the machine took the connection, which the host
-  # cannot see: QEMU's user-mode network completes the host's connect at
-  # once and sends the guest its SYN on its own, again at 3 s and at 9 s
-  # when the listener has no room (nine silent connections and the owner's
-  # two are more than its eight). So the probe waits 10 s past the last of
-  # those, and the machine must say that it closed the two it kept for want
-  # of a proof (before: 14 s from the host's connect, and on a hosted
-  # runner, whose guest took the last two after a retried SYN, they were
-  # closed after it gave up).
-  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" silent 9 20 >"$dir/silent.out" 2>&1 &
+  # this owner's line of the owners file: bytes are not messages), within
+  # 14 s of the host's connect. Ten SYNs against the listener's eight
+  # places: the handshakes evicted for the last are reset, so the host sees
+  # them closed at once (before: dropped without a word, their peers retried
+  # for seconds, and on a hosted runner two were never taken before the probe
+  # gave up).
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" silent 9 14 >"$dir/silent.out" 2>&1 &
   prober=$!
   "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" trickle-session 10 >"$dir/trickle.out" 2>&1 &
   local trickler=$!
@@ -1326,12 +1322,13 @@ run_remote() {
   # the page of the program before it is handed to the new one read-only,
   # as another program's, and the stack takes from it only the connections
   # to reset, as it does after it was killed. The owner's tool, which holds
-  # the session the update was asked on, is reset once the new stack holds
-  # its address and reaches the router, which the stack says, and the tool
-  # has ended 1 s after that (before: nothing reset it, and the tool waited
-  # out its two minutes); the next command connects anew. Not 1 s from the
-  # lease: the router's answer between is the guest's own progress, which a
-  # loaded host delays (a --fast run on 2026-11-26, and hosted runners).
+  # the session the update was asked on, is reset: the new stack asks each
+  # peer, resets it at the number it answers with, and says they are reset
+  # once every peer has answered that it holds the connection no more. The
+  # tool has ended by then, give or take the host noticing (1 s) (before:
+  # nothing reset it, and the tool waited out its two minutes; then a reset
+  # at the number the last stack wrote down, sent once, which the peer may
+  # drop). The next command connects anew.
   { cat "$(system_program "$arch" netd "$log")"; printf 'a new version of netd\n'; } >"$dir/netd-new.elf"
   local resets; resets=$(tr -d '\r' <"$serial" | grep -ac '^netd: the connections of the stack before it are reset')
   R update netd "$dir/netd-new.elf" >"$dir/update-netd.out" 2>&1 &
@@ -1339,10 +1336,10 @@ run_remote() {
   { until_seen "^init: netd's kept page starts empty for its new program" && until_seen '^init: netd started on its new program'; } \
     || step "netd's new program was not given an empty kept page"
   until_seen '^netd: [0-9.]+/[0-9]+ from DHCP server' 2 || step "netd's new program did not take a lease of its own"
-  until_seen '^netd: the connections of the stack before it are reset' $((resets + 1)) || step "the new stack did not say it reset the connections of the one before it"
+  until_seen '^netd: the connections of the stack before it are reset' $((resets + 1)) || step "the new stack did not say every peer of the one before it was reset"
   for i in $(seq 10); do kill -0 $updater 2>/dev/null || break; sleep 0.1; done
   if kill -0 $updater 2>/dev/null; then
-    step "the session netd's update was asked on was not reset within 1 s of the new stack saying it reset the old one's connections: the owner's tool still waits"
+    step "the session netd's update was asked on was not reset within 1 s of the new stack saying every peer of the old one was reset: the owner's tool still waits"
     kill $updater 2>/dev/null
   fi
   wait $updater 2>/dev/null
@@ -1633,17 +1630,23 @@ run_shutdown() {
 # cache; NVMe flushes and performs the controller's normal shutdown (CC.SHN,
 # until CSTS.SHST says it is done). QEMU's own trace must show the
 # controller's flush and shutdown; the drivers and the device manager must say
-# they ended in order; the machine must turn off.
+# they ended in order; the machine must turn off. The button is pressed while
+# the NVMe driver is still coming up (its controller answers its first admin
+# command 3 s late: `devmgr.inject=nvme:slow_start@1`): before 2026-11-26 the
+# driver's bring-up took the device manager's request to end and dropped it,
+# and the driver was ended where it stood, its cache never flushed (seen on a
+# hosted runner, where bring-up is slower).
 run_shutdown_flush_owner() { run_shutdown_flush "$1" "$2" owner; }
 run_shutdown_flush() {
   local arch=$1 suite=$2 mode=${3:-power} name=shutdown_flush log img serial rc why=""
-  local -a how=(--on '^devmgr: the power button is armed$=system_powerdown')
+  local -a how=(--on '^inject: SlowStart committed$=system_powerdown')
+  local cmdline="checks= devmgr.inject=nvme:slow_start@1"
   # The owner's way: `shutdown` typed at the shell, the service manager then
   # asking the device manager to end (the power button's way, the device
   # manager ends its drivers before it asks).
-  [ "$mode" = owner ] && name=shutdown_flush_owner how=(--console-port "$(logfile "$suite" shutdown_flush_owner).port" --port-type '^console: .* and the console port=shutdown\r')
+  [ "$mode" = owner ] && name=shutdown_flush_owner how=(--console-port "$(logfile "$suite" shutdown_flush_owner).port" --port-type '^console: .* and the console port=shutdown\r') cmdline="checks="
   log=$(logfile "$suite" build.$name)
-  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "$cmdline") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   nvme_machine "" "$img"
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" "${NVME_MACHINE[@]}" \
