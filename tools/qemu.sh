@@ -10,7 +10,8 @@
 #           [--console-port <file>] [--port-type '<extended regex>=<text>']...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
-# --no-iommu boots the machine without one. --device adds a device.
+# --no-iommu boots the machine without one. --device adds a device, --object
+# an object one may name (a backend: rng-random,id=zero,filename=/dev/zero).
 # --maxcpus <n> has the firmware describe n processors, --smp of them present
 # (the rest hot-plug slots, listed but not enabled).
 # --cpu <model> boots an emulated processor of that model (TCG) instead of
@@ -89,7 +90,7 @@ nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
 cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu|--maxcpus)
+    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--object|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu|--maxcpus)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -111,6 +112,7 @@ while [ $# -gt 0 ]; do
     --no-iommu) iommu=""; shift ;;
     --no-exit-device) exitdev=""; shift ;;
     --device) devices+=(-device "$2"); shift 2 ;;
+    --object) devices+=(-object "$2"); shift 2 ;;
     --until) until=$2; shift 2 ;;
     --nvme) nvme=$2; shift 2 ;;
     --net) net=$2; shift 2 ;;
