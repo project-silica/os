@@ -1,6 +1,6 @@
 //! HTTP load from the host against a server in a guest (M4's exit test).
 //!
-//! `httpload <port> <requests> <connections> [restart|pipeline]`
+//! `httpload <port> <requests> <connections> [restart|pipeline|quit-refused]`
 //!
 //! Sends `<requests>` `GET /<n>` requests over `<connections>` kept-alive
 //! connections at once, n cycling through sizes from 1 KiB to 1 MiB, and
@@ -22,7 +22,11 @@
 //! outage, at most 1 s), that no body is ever wrong, and that every failure
 //! is a connection's (never a wrong answer).
 //! With `pipeline`, also check two requests sent together before a TCP
-//! half-close. Read both complete responses and wait for the server's EOF.
+//! half-close. Read both complete responses and wait for the server's EOF;
+//! and a 4 MiB answer with 400 requests (15 KiB, more than the server keeps
+//! of input) sent behind it before any of it is read: every answer whole.
+//! With `quit-refused`, no load: `GET /quit` must be answered 404 and the
+//! connection served after it (a server not allowed to end by it).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -153,17 +157,83 @@ fn half_closed_pipeline(port: u16, sizes: &[usize], pattern: &[u8]) -> Result<()
     Ok(())
 }
 
+/// A large answer with, sent behind its request before any of it is read,
+/// requests whose heads come to more than the server keeps of input
+/// (8 KiB): every answer must come whole and in order. (The server took
+/// the waiting input for one oversized head while the large answer went
+/// out, and wrote a 431 over it.)
+fn long_pipeline(port: u16) -> Result<(), String> {
+    const LARGE: usize = 4 << 20;
+    const BEHIND: usize = 400;
+    let mut c = Conn { port, stream: None };
+    let r = c.open()?;
+    let mut requests = format!("GET /{LARGE} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    for _ in 0..BEHIND {
+        requests.push_str("GET /1000 HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    }
+    debug_assert!(requests.len() > 8192 * 2);
+    r.get_mut()
+        .write_all(requests.as_bytes())
+        .map_err(|e| format!("send: {e}"))?;
+    let good = |body: &[u8]| body.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8);
+    let (status, body, _) = Conn::response(r).map_err(|e| format!("GET /{LARGE}: {e}"))?;
+    if status != 200 || body.len() != LARGE || !good(&body) {
+        return Err(format!(
+            "GET /{LARGE}: status {status}, {} bytes, body {}",
+            body.len(),
+            if good(&body) { "matches" } else { "differs" }
+        ));
+    }
+    for k in 0..BEHIND {
+        let (status, body, _) = Conn::response(r).map_err(|e| format!("request {k} behind the large one: {e}"))?;
+        if status != 200 || body.len() != 1000 || !good(&body) {
+            return Err(format!(
+                "request {k} behind the large one: status {status}, {} bytes",
+                body.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `GET /quit` on a server not allowed to end by it: answered 404, and the
+/// same connection is served after it.
+fn quit_refused(port: u16) -> Result<(), String> {
+    let mut c = Conn { port, stream: None };
+    let (status, _) = c.get("/quit", false)?;
+    if status != 404 {
+        return Err(format!("GET /quit was answered {status}, not 404"));
+    }
+    let (status, body) = c.get("/1024", false).map_err(|e| format!("after /quit: {e}"))?;
+    if status != 200 || body.len() != 1024 {
+        return Err(format!(
+            "after /quit, GET /1024 was answered {status} with {} bytes",
+            body.len()
+        ));
+    }
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let num = |i: usize| args.get(i).and_then(|a| a.parse::<usize>().ok());
     let (Some(port), Some(total), Some(conns)) = (num(1), num(2), num(3)) else {
-        eprintln!("usage: httpload <port> <requests> <connections> [restart|pipeline]");
+        eprintln!("usage: httpload <port> <requests> <connections> [restart|pipeline|quit-refused]");
         exit(2);
     };
     let Ok(port) = u16::try_from(port) else {
         eprintln!("httpload: port {port} is not a port");
         exit(2);
     };
+    if args.get(4).is_some_and(|a| a == "quit-refused") {
+        match quit_refused(port) {
+            Ok(()) => return println!("httpload: GET /quit refused, and the connection served after it"),
+            Err(e) => {
+                println!("httpload: {e}");
+                exit(1);
+            }
+        }
+    }
     let restart = args.get(4).is_some_and(|a| a == "restart");
     let pattern: Vec<u8> = (0..SIZES[SIZES.len() - 1]).map(|i| (i % 251) as u8).collect();
     let state = Mutex::new(State::default());
@@ -227,6 +297,10 @@ fn main() {
             if let Err(e) = half_closed_pipeline(port, sizes, &pattern) {
                 st.errors.push((took, format!("half-closed requests {sizes:?}: {e}")));
             }
+        }
+        if let Err(e) = long_pipeline(port) {
+            st.errors
+                .push((took, format!("requests pipelined behind a large answer: {e}")));
         }
     }
     if let Err(e) = (Conn { port, stream: None }).get("/quit", true) {
