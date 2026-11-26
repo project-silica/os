@@ -286,7 +286,10 @@ build_system_image_locked() {
   if [ -n "${SYSTEM_DRIVERS:-}" ]; then
     [ -z "$server" ] || { echo "a server image's drivers are its own: SYSTEM_DRIVERS is for test images" >"$log"; return 1; }
     drivers=$out/drivers-$(printf '%s' "$SYSTEM_DRIVERS" | cksum | cut -d' ' -f1).list
-    { printf '%s\n' "$SYSTEM_DRIVERS"; cat "$sys/drivers.list"; } >"$drivers.$$" && mv "$drivers.$$" "$drivers" || return 1
+    # A file of this build's own first ($$ is the same in every unit a run
+    # starts in parallel, and two units name the same drivers).
+    local tmp; tmp=$(mktemp "$drivers.XXXXXX") || return 1
+    { printf '%s\n' "$SYSTEM_DRIVERS"; cat "$sys/drivers.list"; } >"$tmp" && mv "$tmp" "$drivers" || { rm -f "$tmp"; return 1; }
   fi
   entries+=(--ramdisk-entry "drivers=$drivers" --ramdisk-entry "services=$services")
   # Files provisioned for this machine ($SYSTEM_FILES: "<name>=<host file>"
