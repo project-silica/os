@@ -834,6 +834,42 @@ run_http() {
   else record pass "$suite" "$name"; fi
 }
 
+# run_http_quit <arch> <suite>: `GET /quit` from any peer on a machine
+# whose command line does not allow it (no `httpd.quit=allowed`): httpd
+# answers 404, serves the same connection after it, and says once that it
+# refused; then a key typed at the shell turns the machine off, httpd still
+# running. (Before, any peer's `GET /quit` ended the service.)
+run_http_quit() {
+  local arch=$1 suite=$2 log img serial rc port qemu load i httpload
+  log=$(logfile "$suite" build.http_quit)
+  img=$(build_system_image "$arch" "$log" "checks=http") || { record fail "$suite" http_quit "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  httpload=$(host_tool httpload "$log") || { record fail "$suite" http_quit "httpload did not build: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" http_quit)
+  port=$(host_ports 1) || { record fail "$suite" http_quit "no free host port below the ephemeral range"; return 1; }
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --net "user:$port-80" --nic "${NIC:-virtio}" --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --type '^httpd: GET /quit refused=shutdown\n' >"$serial.qemu" 2>&1 &
+  qemu=$!
+  for i in $(seq 600); do
+    serial_has "$serial" '^httpd: listening on port 80' && break
+    kill -0 $qemu 2>/dev/null || break
+    sleep 0.1
+  done
+  if ! serial_has "$serial" '^httpd: listening on port 80'; then
+    kill $qemu 2>/dev/null; wait $qemu
+    record fail "$suite" http_quit "httpd never listened: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"
+    return 1
+  fi
+  load=$("$httpload" "$port" 0 0 quit-refused 2>&1); local lrc=$?
+  wait $qemu; rc=$?
+  if [ $lrc != 0 ]; then record fail "$suite" http_quit "$(head -2 <<<"$load" | tr '\n' ' ' | cut -c1-200) (serial: $serial)"
+  elif serial_has "$serial" '^init: httpd (ended|passed)'; then record fail "$suite" http_quit "httpd ended on a peer's GET /quit (serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^init: shutting down'; then
+    record fail "$suite" http_quit "the machine was not turned off from the shell after the refusal (exit status $rc; serial: $serial)"
+  elif serial_has "$serial" '^ERROR'; then record fail "$suite" http_quit "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
+  else record pass "$suite" http_quit; fi
+}
+
 
 # run_remote <arch> <suite>: remote management (M4: "accepts a remote
 # management session that can inspect, restart and update any service").
