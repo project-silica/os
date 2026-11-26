@@ -479,6 +479,24 @@ run_nvme_namespaces() { run_nvme "$1" "$2" namespaces; }
 # run_net_e1000e: the same over an Intel 82574 (M4: "runs the same tests
 # over an e1000e interface"), its driver e1000e.
 run_net_e1000e() { run_net "$1" "$2" e1000e; }
+
+# run_net_crowd <arch> <suite>: a network client at full queue depth while
+# its link changes (netcheck.crowd): every completion must arrive and the
+# link's news after them (the 2026-11-24 audit: the news took the
+# completion ring's place of a transmit's completion, which was lost).
+run_net_crowd() {
+  local arch=$1 suite=$2 test=net_crowd log img serial rc text
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.crowd=1") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
+    --on '^netcheck: crowd: ready for the link to change$=set_link net0 off' \
+    --on '^netcheck: crowd: [0-9]+ transmits in flight$=set_link net0 on' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if [ $rc = 0 ] && grep -qx 'TEST crowd PASS' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" "$test"
+  else record fail "$suite" "$test" "$(grep -m1 -aE '^(ERROR|PANIC|netcheck: crowd: [0-9]+ of)' <<<"$text" | cut -c1-160) (exit status $rc; serial: $serial)"; fi
+}
 run_net() {
   local arch=$1 suite=$2 nic=${3:-virtio} log img serial rc text name driver=virtio-net test=net
   [ "$nic" = e1000e ] && driver=e1000e test=net_e1000e
@@ -618,7 +636,7 @@ run_hotplug_nvme_one_vector() { run_hotplug "$1" "$2" nvme_one_vector; }
 # each line the machine had, and the frames of one device's registers
 # blocked a device laid out otherwise in the same slot).
 run_hotplug_cycle() {
-  local arch=$1 suite=$2 test=hotplug_cycle log img serial rc text bad="" d2 d3 l1 l3 f1 f3 vb
+  local arch=$1 suite=$2 test=hotplug_cycle log img serial rc text bad="" d2 d3 l1 l3 f1 f3 vb t
   log=$(logfile "$suite" "build.$test")
   img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$test")
@@ -648,6 +666,11 @@ run_hotplug_cycle() {
   f1=$(sed -nE 's/^devmgr: 00:02\.0: departure 1 from the slot, ([0-9]+) lines free.*/\1/p' <<<"$text")
   f3=$(sed -nE 's/^devmgr: 00:02\.0: departure 3 from the slot, ([0-9]+) lines free.*/\1/p' <<<"$text")
   [ -n "$bad" ] || { [ -n "$f1" ] && [ "$f1" = "$f3" ]; } || bad="$f1 lines were free after the first departure, $f3 after the third"
+  # The device manager serves while a slot's device comes up (its link,
+  # then 100 ms): no turn of its loop may hold it 50 ms (before, it spun
+  # through the wait, up to 1.1 s, with every client and fault report).
+  t=$(sed -nE 's/^devmgr: 00:02\.0: departure 3 from the slot, .*longest turn ([0-9]+) ms$/\1/p' <<<"$text")
+  [ -n "$bad" ] || { [ -n "$t" ] && [ "$t" -lt 50 ]; } || bad="the device manager went ${t:-?} ms without listening while devices came and went"
   [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
   if [ -z "$bad" ]; then record pass "$suite" "$test"
   else record fail "$suite" "$test" "$bad (serial: $serial)"; fi
