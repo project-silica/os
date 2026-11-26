@@ -261,7 +261,7 @@ fn main() {
                 ));
             }
             println!(
-                "{name} runs the program sent: {} bytes, BLAKE2s {}",
+                "{name} runs the program sent: {} bytes, BLAKE2s {}, until the next reboot (an update is not kept on disk yet)",
                 program.len(),
                 hex(&want)
             );
