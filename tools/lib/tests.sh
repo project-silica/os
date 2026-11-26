@@ -1811,7 +1811,7 @@ rogue_on() {
     && grep -qE "^kernel: device $at was refused a write at $ro " <<<"$text"; then record pass "$suite" "rogue_write_read_only$sfx"
   else record fail "$suite" "rogue_write_read_only$sfx" "no PASS, or no kernel line refusing the device's write at its read-only page ${ro:-(address not said)} (serial: $serial)"; fi
   for name in rogue_other_device rogue_other_interrupt rogue_physical_address rogue_address_above_the_top \
-              rogue_recovers rogue_restart; do
+              rogue_recovers rogue_faults_reported rogue_restart; do
     if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name$sfx"
     else record fail "$suite" "$name$sfx" "$(grep -m1 -a "^ERROR: virtio-rogue: $name" <<<"$text" | cut -c1-160) (no PASS line; serial: $serial)"; fi
   done
