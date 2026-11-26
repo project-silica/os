@@ -537,10 +537,34 @@ run_partitions() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in size offset confined write scopes opens_bounded narrowing_bounded flush_bounded; do
+  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded; do
     if grep -qx "TEST partitions.$name PASS" <<<"$text"; then record pass "$suite" "partitions_$name"
     else record fail "$suite" "partitions_$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
+}
+
+# run_partitions_full_table <arch> <suite>: a second disk whose GPT is full
+# (128 partitions, host-tools' gptdisk). The block server's list is answered
+# a part at a time, so every caller gets all 129 partitions of the machine
+# (the 2026-11-24 audit: one full table made the list too long for a message,
+# refused to everyone: partcheck said "the block server does not answer").
+run_partitions_full_table() {
+  local arch=$1 suite=$2 name=partitions_full_table log img serial disk gptdisk text
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=partitions partcheck.partitions=129") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  gptdisk=$(host_tool gptdisk "$log") || { record fail "$suite" "$name" "gptdisk did not build: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  disk=${serial%.log}.gpt128.img
+  "$gptdisk" "$disk" 128 || { record fail "$suite" "$name" "gptdisk failed"; return 1; }
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --disk "$disk" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  text=$(tr -d '\r\0' <"$serial")
+  if grep -q '^partitions: disk 0x[0-9a-f]*: 128 partitions$' <<<"$text" && grep -qx "TEST partitions.listed_whole PASS" <<<"$text" \
+      && grep -q '^partcheck: 129 partitions listed, in [2-9] parts$' <<<"$text"; then
+    record pass "$suite" "$name"
+  else
+    record fail "$suite" "$name" "not every partition of a full table was listed: $(grep -m1 -aE "^(ERROR|PANIC|partcheck: [0-9])" <<<"$text" | cut -c1-140) (serial: $serial)"
+  fi
+  rm -f "$disk"
 }
 
 # The system image has a 16 KiB GPT entry array. MDTS=1 on this NVMe

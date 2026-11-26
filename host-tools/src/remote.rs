@@ -139,31 +139,38 @@ fn main() {
     let command: Vec<&str> = args.iter().map(String::as_str).collect();
     match command[..] {
         ["services"] => {
-            let reply = or_fail("services", mgr.list());
             println!(
                 "{:<14} {:<8} {:>8}  {:<24} program",
                 "service", "state", "failures", "provides"
             );
-            for s in reply.services.iter() {
-                let state = match s.state {
-                    manager::State::Running => "running",
-                    manager::State::Stopped => "stopped",
-                    manager::State::Failed => "failed",
-                    _ => "?",
-                };
-                let program = format!(
-                    "{}{}",
-                    hex(&s.program[..s.program.len().min(8)]),
-                    if s.updated { " (updated)" } else { "" }
-                );
-                println!(
-                    "{:<14} {:<8} {:>8}  {:<24} {}",
-                    printable(s.name),
-                    state,
-                    s.failures,
-                    printable(s.provides),
-                    program
-                );
+            let mut part = 0;
+            loop {
+                let reply = or_fail("services", mgr.list(part));
+                for s in reply.services.iter() {
+                    let state = match s.state {
+                        manager::State::Running => "running",
+                        manager::State::Stopped => "stopped",
+                        manager::State::Failed => "failed",
+                        _ => "?",
+                    };
+                    let program = format!(
+                        "{}{}",
+                        hex(&s.program[..s.program.len().min(8)]),
+                        if s.updated { " (updated)" } else { "" }
+                    );
+                    println!(
+                        "{:<14} {:<8} {:>8}  {:<24} {}",
+                        printable(s.name),
+                        state,
+                        s.failures,
+                        printable(s.provides),
+                        program
+                    );
+                }
+                if reply.next <= part {
+                    break;
+                }
+                part = reply.next;
             }
         }
         ["describe", name] => {
@@ -178,9 +185,16 @@ fn main() {
             }
         }
         ["logs"] => {
-            let reply = or_fail("logs", log.sources());
-            for s in reply.sources.iter() {
-                println!("{:<32} {:>10} bytes written", printable(s.name), s.written);
+            let mut part = 0;
+            loop {
+                let reply = or_fail("logs", log.sources(part));
+                for s in reply.sources.iter() {
+                    println!("{:<32} {:>10} bytes written", printable(s.name), s.written);
+                }
+                if reply.next <= part {
+                    break;
+                }
+                part = reply.next;
             }
         }
         ["log", name] => {
@@ -228,16 +242,21 @@ fn main() {
             }
             // What runs now is what was sent: the machine's hash of it.
             let want = silica_crypto::blake2s::hash(&[&program]);
-            let reply = or_fail("services", mgr.list());
-            let s = reply
-                .services
-                .iter()
-                .find(|s| s.name == name)
-                .unwrap_or_else(|| fail(format!("{name} is not among the machine's services")));
-            if s.program != want || !s.updated {
+            let mut part = 0;
+            let (runs, updated) = loop {
+                let reply = or_fail("services", mgr.list(part));
+                if let Some(s) = reply.services.iter().find(|s| s.name == name) {
+                    break (s.program.to_vec(), s.updated);
+                }
+                if reply.next <= part {
+                    fail(format!("{name} is not among the machine's services"));
+                }
+                part = reply.next;
+            };
+            if runs != want || !updated {
                 fail(format!(
                     "{name} runs program {} after the update, not the one sent ({})",
-                    hex(s.program),
+                    hex(&runs),
                     hex(&want)
                 ));
             }
