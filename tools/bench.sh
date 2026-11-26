@@ -522,7 +522,7 @@ if [ -z "$compare$sweep" ]; then
     # The server benchmarks: httpd on the stack at the address the Linux
     # baseline's server takes, and the host's end.
     log=$LOGS/bench/build.silica-server.log
-    silica_srv=$(build_system_image x86_64 "$log" "checks=http netd.address=$srvguest/24 netd.router=$srvhost") && [ -f "$silica_srv" ] \
+    silica_srv=$(build_system_image x86_64 "$log" "checks=http httpd.quit=allowed netd.address=$srvguest/24 netd.router=$srvhost") && [ -f "$silica_srv" ] \
       || { err "cannot build the Silica server image (log: $log)"; quit 2; }
     tcpbench=$(host_tool tcpbench "$log") || { err "cannot build tcpbench (log: $log)"; quit 2; }
   fi

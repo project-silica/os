@@ -62,7 +62,11 @@ fn run() -> Result<(), String> {
     }
     let out = out.ok_or("--out is required")?;
     let disk = image.build(esp_mib).map_err(|e| e.to_string())?;
-    std::fs::write(&out, disk).map_err(|e| format!("{out}: {e}"))
+    std::fs::write(&out, disk).map_err(|e| format!("{out}: {e}"))?;
+    // What the image's files take, beside it: the size the system has on a
+    // disk, which size.sh measures (the partition is padded to FAT32's least).
+    let files = format!("{out}.files");
+    std::fs::write(&files, format!("{}\n", image.files_bytes())).map_err(|e| format!("{files}: {e}"))
 }
 
 fn main() -> ExitCode {

@@ -61,9 +61,9 @@ evidence_init
 
 # The system image's guest tests (run_<name> in lib/tests.sh), and those of
 # them that judge a time.
-SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http power recovery entropy console_port shutdown console typeahead nvme net net_e1000e
-  dhcp_e1000e ntp_e1000e http_e1000e net_recovery net_recovery_e1000e hotplug partitions
-  recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces
+SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http http_quit power recovery entropy console_port shutdown shutdown_flush shutdown_flush_owner server_image console typeahead nvme net net_mac net_e1000e net_unplug_e1000e
+  dhcp_e1000e ntp_e1000e http_e1000e net_recovery net_recovery_e1000e hotplug hotplug_cycle partitions partitions_full_table partitions_backup_gpt partitions_small_transfer
+  recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable nvme_admin_missed hostile_clients unstartable_driver entropy_broken_device hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces
   remote)
 QUIET_SYSTEM=" recovery recovery_nvme net_recovery net_recovery_e1000e svcload http_restart "
 # unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has
@@ -85,6 +85,15 @@ LIB=(path:os:tools/lib/common.sh path:os:tools/lib/build.sh)
 gin() {
   GIN=(repo+:kernel crate:os:silica-image "${LIB[@]}" path:os:tools/qemu.sh path:os:tools/symbolize.sh "host:qemu-$1" env:SILICA_QEMU_TIMEOUT env:SILICA_FW_TIMEOUT env:SILICA_NO_KVM)
   [ -z "${2:-}" ] || GIN+=(repo+:system env:SILICA_SYSTEST_TIMEOUT)
+}
+
+# panic_reset_unit <arch>: the panic_reset guest test. Its root task is the
+# system's init where there is a checkout of it (run_panic_reset), so what
+# it reads is the system's too.
+panic_reset_unit() {
+  if [ -f "$(checkout_of system)/Cargo.toml" ] && [ -f "$(checkout_of kernel)/targets/$1-silica-user.json" ]; then gin "$1" system; fi
+  unit any "inos.$1/panic_reset" "${GIN[@]}" -- run_panic_reset "$1" "inos.$1"
+  gin "$1"
 }
 
 if [ -n "$repo" ]; then
@@ -195,16 +204,23 @@ suite_host() { # every host test of the repo's default members
   done < <(packages "$r")
 }
 
-suite_builds() { # the kernel for all three targets and the UEFI loader
-  local s=kernel.build a log
+# suite_builds [server]: the kernel for all three targets and the UEFI loader,
+# as a test image has them (with `harness`, lib/build.sh). With `server`: as
+# a machine runs them (without), the aarch64 loader too. Only the x86_64
+# server image is booted, and a build that no check makes can stop building
+# unnoticed.
+suite_builds() {
+  local p=${1:-} s=kernel.build${1:+.$1} a log
   for a in x86_64 aarch64 riscv64; do
     log=$(logfile "$s" "$a")
-    if build_kernel "$a" "$log" >/dev/null; then record pass "$s" "$a"
+    if IMAGE_PROFILE=$p build_kernel "$a" "$log" >/dev/null; then record pass "$s" "$a"
     else record fail "$s" "$a" "build failed: $(first_error "$log")"; fi
   done
-  log=$(logfile "$s" loader)
-  if build_loader "$log" >/dev/null; then record pass "$s" loader
-  else record fail "$s" loader "build failed: $(first_error "$log")"; fi
+  for a in x86_64 ${p:+aarch64}; do
+    log=$(logfile "$s" "loader${p:+.$a}")
+    if IMAGE_PROFILE=$p build_loader "$log" "$a" >/dev/null; then record pass "$s" "loader${p:+.$a}"
+    else record fail "$s" "loader${p:+.$a}" "build failed: $(first_error "$log")"; fi
+  done
 }
 
 # inos_machine <arch> <test> <options> <manifest>: set INOS_QEMU to the
@@ -303,6 +319,7 @@ cpu.armv8_0|aarch64|cortex-a72|
 cpu.no_avx|x86_64|$base,-avx,-avx2,-fma,-f16c|ERROR: loader: this processor lacks AVX (x86-64-v3), which Silica requires
 cpu.no_nx|x86_64|$base,-nx|ERROR: loader: this processor lacks NX (no-execute pages), which Silica requires
 cpu.meltdown|x86_64|$intel|ERROR: kernel: this processor is affected by Meltdown
+cpu.no_rng|x86_64|$base,-rdrand,-rdseed|ERROR: kernel: the loader found no source of randomness it trusts
 EOF
   # A firmware that lists more processors than are there (hot-plug slots,
   # online-capable but not enabled): only those present are counted, so a
@@ -326,7 +343,9 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path; [n
   [ -n "$only" ] && [[ $only != cpu.* ]] || suite_cpu_models "$only"
   if [ -z "$only" ]; then
     unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
+    panic_reset_unit x86_64
     unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
+    unit any inos.x86_64/stall_named "${GIN[@]}" -- run_panic x86_64 inos.x86_64 park
     unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64
   fi
   # Boots that cannot succeed say why.
@@ -426,6 +445,7 @@ suite_tools() { # tool self-tests (os/tools/tests/*.sh), each a unit: they take 
     # the system and the emulators as well. One that judges a
     # time says "# alone" and runs when nothing else does.
     in=(path:os:tools path:os:bench crate:os:silica-image)
+    grep -q '^# inputs: idl$' "$t" && in+=(repo:idl ws:bootstrap.pins path:os:manifest.toml)
     grep -q '^# inputs: kernel$' "$t" && in+=(repo:os repo+:kernel)
     grep -q '^# inputs: system$' "$t" && in+=(repo:os repo+:system repo+:kernel host:qemu-x86_64 host:qemu-aarch64)
     if grep -q '^# alone$' "$t"; then
@@ -599,6 +619,26 @@ suite_bench() {
   if [ $rc != 0 ] && ! grep -q "^fail"$'\t'"$s"$'\t' "$RES"; then record fail "$s" run "bench.sh exited $rc (log: $log)"; fi
 }
 
+# uses_host_tools <function>: whether a test function, or a run_ function it
+# calls, runs a program of os/host-tools (`host_tool`). Read from the
+# functions themselves: a hand-kept list of such tests once missed one
+# (partitions_full_table, gptdisk), and its result outlived changes to the
+# tool it runs.
+uses_host_tools() {
+  local seen=" " todo=("$1") f body w
+  while [ ${#todo[@]} -gt 0 ]; do
+    f=${todo[0]}; todo=("${todo[@]:1}")
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    body=$(declare -f "$f") || continue
+    [[ ${body#*\{} == *host_tool* ]] && return 0
+    for w in $(grep -oE '\brun_[a-z0-9_]+' <<<"$body" | sort -u); do
+      [ "$w" != "$f" ] && declare -F "$w" >/dev/null && todo+=("$w")
+    done
+  done
+  return 1
+}
+
 # system_test <name>: one of the system image's guest tests (or the faults
 # of one driver, "faults.<driver>"), a unit: each boots its own machine.
 system_test() {
@@ -607,8 +647,9 @@ system_test() {
   gin x86_64 system
   case "$QUIET_SYSTEM" in *" $t "*) q=quiet ;; esac
   # The checks that run a program of os/host-tools beside the guest (theirs
-  # alone: GIN is shared by the units declared after this one).
-  case "$t" in http | http_load | http_restart | ntp | console | http_e1000e | http_load_e1000e | ntp_e1000e | remote | interop) host=(crate:os:silica-host) ;; esac
+  # alone: GIN is shared by the units declared after this one), found from
+  # what the test's function calls, so no test can be left off a list.
+  case "$t" in faults.*) ;; *) uses_host_tools "run_$t" && host=(crate:os:silica-host) ;; esac
   case "$t" in
     faults.*) unit any "system.x86_64/$t" "${GIN[@]}" -- run_faults x86_64 system.x86_64 "${t#faults.}" ;;
     *) unit "$q" "system.x86_64/$t" "${GIN[@]}" "${host[@]+"${host[@]}"}" -- "run_$t" x86_64 system.x86_64 ;;
@@ -646,6 +687,9 @@ guests() {
       # TCP against the host's Linux stack, three paths of eight cases:
       # some 40 s, most of it 16 MiB through loss.
       system_test interop
+      # A machine petted past its watchdog's 30 s, then one let go of
+      # until the watchdog resets it: some two minutes, all waiting.
+      system_test watchdog
       system_test idle
       system_test http_restart
       unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64
@@ -667,6 +711,7 @@ guests() {
       gin aarch64
       unit any entry.aarch64/entry "${GIN[@]}" -- suite_arch_entry aarch64
       unit any inos.aarch64/panic_backtrace "${GIN[@]}" -- run_panic aarch64 inos.aarch64
+      panic_reset_unit aarch64
       unit any inos.aarch64/panic_backtrace_secondary "${GIN[@]}" -- run_panic aarch64 inos.aarch64 secondary
       unit any inos.aarch64/null_object_faults "${GIN[@]}" -- run_panic aarch64 inos.aarch64 null
       suite_inos aarch64
@@ -688,7 +733,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
           prefix=fault_${driver//-/_}_
           fault=${guest#"$prefix"}
           case "$fault" in
-            garbage|stuck|spurious|missed|reset)
+            garbage|stuck|spurious|missed|reset|broken|tiny|generation|short)
               gin x86_64 system
               unit any "system.x86_64/$guest" "${GIN[@]}" -- run_faults x86_64 system.x86_64 "$driver" "$fault"
               continue 2 ;;
@@ -696,7 +741,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
         done
       fi
       # The system image's own tests, by name.
-      case " ${SYSTEM_TESTS[*]} faults systest svcload http_load http_load_e1000e http_restart idle interop " in
+      case " ${SYSTEM_TESTS[*]} faults systest svcload http_load http_load_e1000e http_restart idle interop watchdog " in
         *" $guest "*)
           if [ "$guest" = faults ]; then for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
           elif [ "$guest" = systest ]; then
@@ -713,14 +758,23 @@ if [ "${#guests[@]}" -gt 0 ]; then
           fi
           continue ;;
       esac
-      # The kernel's panic tests, by name.
+      # The kernel's panic tests, by name (aarch64's secondary panic too: its
+      # processors are stopped by an SGI, x86_64's by an NMI).
       case "$guest" in
-        panic_backtrace | null_object_faults | panic_screen)
+        panic_backtrace_secondary)
+          if [ "$PHASE" = rest ]; then
+            gin aarch64
+            unit any inos.aarch64/panic_backtrace_secondary "${GIN[@]}" -- run_panic aarch64 inos.aarch64 secondary
+          fi
+          continue ;;
+        panic_backtrace | panic_reset | null_object_faults | panic_screen | stall_named)
           if [ "$PHASE" = rest ]; then
             gin x86_64
             case "$guest" in
               panic_backtrace) unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64 ;;
+              panic_reset) panic_reset_unit x86_64 ;;
               null_object_faults) unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null ;;
+              stall_named) unit any inos.x86_64/stall_named "${GIN[@]}" -- run_panic x86_64 inos.x86_64 park ;;
               panic_screen) unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64 ;;
             esac
           fi
@@ -741,6 +795,10 @@ else
     repo_units "$r" &
   done
   wait
+  if { in_scope idl || in_scope os; } && { manifest_repos | grep -Fx idl >/dev/null || grep -q '^idl ' "$WS/bootstrap.pins"; }; then
+    held idl.compat crate:idl:silica-idlc path:idl:protocols/silica ws:bootstrap.pins path:os:manifest.toml \
+      path:os:tools/check-protocols.sh path:os:tools/lib/common.sh -- run_named os tools/check-protocols.sh idl.compat
+  fi
   if [ -z "$repo" ]; then
     in=(); for r in $(all_repos); do in+=("repo:$r"); done
     held unsafe "${in[@]}" ws:spec/UNSAFE_MODULES.md -- suite_unsafe
@@ -749,6 +807,7 @@ else
   fi
   if { in_scope kernel || in_scope os; } && [ -n "$have_kernel" ]; then
     held kernel.build repo+:kernel "${LIB[@]}" -- suite_builds
+    [ "$tier" = fast ] || held kernel.build.server repo+:kernel "${LIB[@]}" -- suite_builds server
     in_scope kernel && held kernel.kani/build crate:kernel:kernel-core host:kani "ms:$ms" -- suite_kani_build
   fi
   # The guest tests that judge a time, with the host to themselves.

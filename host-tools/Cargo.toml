@@ -7,6 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
+name = "gptdisk"
+path = "src/gptdisk.rs"
+
+[[bin]]
 name = "httpload"
 path = "src/httpload.rs"
 
@@ -23,12 +27,20 @@ name = "silica-remote"
 path = "src/remote.rs"
 
 [[bin]]
+name = "remoteprobe"
+path = "src/remoteprobe.rs"
+
+[[bin]]
 name = "tcpinterop"
 path = "src/tcpinterop.rs"
 
 [[bin]]
 name = "tcpbench"
 path = "src/tcpbench.rs"
+
+[[bin]]
+name = "nethostile"
+path = "src/nethostile.rs"
 
 # The remote session's client is written on the machine's own crates: the
 # framing and the cryptography it shares with the machine's service, and

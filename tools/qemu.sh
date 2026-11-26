@@ -3,14 +3,16 @@
 #   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--cpu <model>] [--serial <file>] [--timeout <s>] [--quiet <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
-#           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
-#           [--net user[:<host port>-<guest port>,...]|tap:<interface>] [--nic virtio|e1000e] [--hotplug <disk image>] [--emulator <host cpu list>] [--disk-props <k=v,...>]
+#           [--until <extended regex>] [--no-exit-device] [--reboot] [--nvme <disk image>] [--disk <disk image>]
+#           [--net user[:<host port>-<guest port>,...]|tap:<interface>] [--nic virtio|e1000e[,<prop>=<v>...]] [--hotplug <disk image>] [--emulator <host cpu list>] [--disk-props <k=v,...>]
 #           [--nvme-disk <disk image>] [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 #           [--console-port <file>] [--port-type '<extended regex>=<text>']...
+#           [--trace <QEMU trace event>]...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
-# --no-iommu boots the machine without one. --device adds a device.
+# --no-iommu boots the machine without one. --device adds a device, --object
+# an object one may name (a backend: rng-random,id=zero,filename=/dev/zero).
 # --maxcpus <n> has the firmware describe n processors, --smp of them present
 # (the rest hot-plug slots, listed but not enabled).
 # --cpu <model> boots an emulated processor of that model (TCG) instead of
@@ -34,6 +36,11 @@
 # hot-added there: `--on '<regex>=device_add virtio-blk-pci,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on'`.
 # --disk adds a second virtio disk that
 # is written for real (not a snapshot): the host reads it afterwards.
+# --trace <event> records a QEMU trace event: its lines, as the emulator
+# printed them, land in <serial>.trace once it has stopped (what a device
+# was told to do, seen from the device's side).
+# --reboot lets a reset start the machine again (a guest that resets after a
+# panic boots once more), where normally a reset ends the emulator.
 # --no-exit-device leaves out the debug-exit device (x86_64): the guest
 # must turn the machine off itself (ACPI), and exit status 0 then means the
 # emulator stopped because the guest turned it off or reset it.
@@ -86,10 +93,11 @@ user_forwards() {
 
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
-cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
+traced=()
+cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 noreboot=-no-reboot nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu|--maxcpus)
+    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--object|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu|--maxcpus)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -110,7 +118,9 @@ while [ $# -gt 0 ]; do
     --stamp) stamp=$2; shift 2 ;;
     --no-iommu) iommu=""; shift ;;
     --no-exit-device) exitdev=""; shift ;;
+    --reboot) noreboot=""; shift ;;
     --device) devices+=(-device "$2"); shift 2 ;;
+    --object) devices+=(-object "$2"); shift 2 ;;
     --until) until=$2; shift 2 ;;
     --nvme) nvme=$2; shift 2 ;;
     --net) net=$2; shift 2 ;;
@@ -126,6 +136,7 @@ while [ $# -gt 0 ]; do
     --nvme-ns) [ $# -ge 2 ] || die "$1 needs a value"; nvme_ns+=("$2"); shift 2 ;;
     --drive) [ $# -ge 2 ] && [[ $2 == ?*=?* ]] || die "--drive needs <id>=<disk image>"; drives+=("$2"); shift 2 ;;
     --on) on+=("$2"); shift 2 ;;
+    --trace) traced+=("$2"); shift 2 ;;
     --type) typing+=("$2"); shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
@@ -155,11 +166,15 @@ for k in "${!drives[@]}"; do
   d=${drives[$k]#*=}; [ -f "$d" ] || die "--drive: image $d not found"
   case "$d" in /*) ;; *) drives[$k]="${drives[$k]%%=*}=$PWD/$d" ;; esac
 done
+# --nic <model>,<property>=<value>...: the model, with properties of its own
+# (a test's MAC address).
+nicprops=""; case "$nic" in *,*) nicprops=,${nic#*,}; nic=${nic%%,*} ;; esac
 case "$nic" in
   virtio) nicdev=virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on ;;
   e1000e) nicdev=e1000e,netdev=net0 ;;
   *) die "--nic: virtio or e1000e, not $nic" ;;
 esac
+nicdev=$nicdev$nicprops
 case "$arch" in
   x86_64)
     bin=qemu-system-x86_64
@@ -265,6 +280,7 @@ if [ -n "$cport" ]; then
   cport_copy=$!
 fi
 why_stopped=(-trace enable=qemu_system_shutdown_request -trace enable=runstate_set -trace enable=watchdog_perform_action -trace enable=tco_timer_expired)
+for t in "${traced[@]+"${traced[@]}"}"; do why_stopped+=(-trace "enable=$t"); done
 # The guest dies with this script, however it ends: the timeout below is
 # this script's to enforce, and a harness killed mid-run (an interrupted
 # test, a lost terminal) once left a guest running for nine hours, taking
@@ -272,7 +288,7 @@ why_stopped=(-trace enable=qemu_system_shutdown_request -trace enable=runstate_s
 # the emulator when its parent (this script) exits, by any signal.
 command -v setpriv >/dev/null || die "setpriv (util-linux) is needed: the guest must die with its harness"
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
-  cd "$RUN" && TMPDIR=$RUN exec setpriv --pdeathsig KILL "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp${maxcpus:+,maxcpus=$maxcpus}" -m "$mem" \
+  cd "$RUN" && TMPDIR=$RUN exec setpriv --pdeathsig KILL "${run[@]+"${run[@]}"}" "$bin" -nodefaults ${noreboot} -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp${maxcpus:+,maxcpus=$maxcpus}" -m "$mem" \
   "${serial_dev[@]}" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
   -drive "format=raw,file=$image,if=none,id=boot,snapshot=on,aio=io_uring" "${disk[@]}" "${vga[@]}" "${extra[@]}" "${devices[@]+"${devices[@]}"}" ) 2>"$RUN/qemu.out" &
@@ -393,7 +409,9 @@ while kill -0 "$pid" 2>/dev/null; do
   for k in "${!on[@]}"; do
     rule=${on[$k]}
     if serial_has "$serial" -E "${rule%%=*}"; then
-      (cd "$RUN" && printf '%s\n' "${rule#*=}" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon") >/dev/null 2>&1
+      # What the monitor answered, beside the serial log: a refused
+      # command is otherwise seen only as what did not happen.
+      { printf '>>> %s\n' "${rule#*=}"; (cd "$RUN" && printf '%s\n' "${rule#*=}" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon"); } >>"$serial.on" 2>&1
       unset "on[$k]"
     fi
   done
@@ -439,6 +457,7 @@ while kill -0 "$pid" 2>/dev/null; do
   sleep 0.1; waited=$((waited + 1))
 done
 wait "$pid"; rc=$?
+for t in "${traced[@]+"${traced[@]}"}"; do grep -a "^$t" "$RUN/qemu-reset.log" 2>/dev/null; done >"$serial.trace"
 stop_shot
 [ -z "$stamper" ] || wait "$stamper" 2>/dev/null
 stop_shot

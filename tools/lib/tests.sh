@@ -165,18 +165,58 @@ run_inos() {
   return 1
 }
 
+# run_panic_reset <arch> <suite>: a panic on a machine nobody watches (no
+# harness listens for the status). Before, every processor halted for ever and
+# the panic was lost with the machine; now the kernel writes a crash record into
+# memory the loader keeps across a warm reset, resets, and the next boot says
+# the record whole (the panic and its backtrace) before going on. That boot
+# does not panic again (`panic=test` is once: a boot with a record goes on),
+# and its root task is given the record: where there is a system checkout the
+# root task is init, which must say it too, as text (before, nothing read
+# what the kernel handed over, and an owner reading the services' log never
+# learnt that the machine had reset itself).
+run_panic_reset() {
+  local arch=$1 suite=$2 log img serial rc rec said="" until='^kernel: end of the last boot.s record'
+  log=$(logfile "$suite" build.panic_reset)
+  if [ -f "$(checkout_of system)/Cargo.toml" ] && [ -f "$(checkout_of kernel)/targets/$arch-silica-user.json" ]; then
+    said=1 until='^init: end of the last boot.s panic record'
+    img=$(UNATTENDED=1 build_system_image "$arch" "$log" "checks= panic=test") || { record fail "$suite" panic_reset "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  else
+    img=$(UNATTENDED=1 build_image "$arch" "$log" "panic=test") || { record fail "$suite" panic_reset "image build failed (log: $log)"; return 1; }
+  fi
+  serial=$(logfile "$suite" panic_reset)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --reboot --no-exit-device --timeout "${SILICA_QEMU_TIMEOUT:-120}" \
+    --until "$until" >"$serial.qemu" 2>&1
+  rc=$?
+  rec=$(tr -d '\r' <"$serial" | sed -n '/^kernel: the last boot (boot [0-9]*) ended in a panic; its record:/,/^kernel: end of the last boot.s record/p')
+  if ! grep -aq '^kernel: resetting the machine' <(tr -d '\r' <"$serial"); then
+    record fail "$suite" panic_reset "the panic did not reset the machine (exit status $rc; serial: $serial)"
+  elif [ -z "$rec" ]; then
+    record fail "$suite" panic_reset "the boot after the panic did not report its crash record (exit status $rc; serial: $serial)"
+  elif ! grep -q '^PANIC: deliberate panic' <<<"$rec" || ! grep -qE '^#[0-9]+ 0x[0-9a-f]{16}$' <<<"$rec"; then
+    record fail "$suite" panic_reset "the crash record lacks the panic or its backtrace (serial: $serial)"
+  elif [ -n "$said" ] && ! tr -d '\r' <"$serial" | sed -n '/^init: the last boot ended in a kernel panic/,/^init: end of the last boot.s panic record/p' | grep -q '^init: | PANIC: deliberate panic'; then
+    record fail "$suite" panic_reset "the service manager did not say the last boot's panic record (serial: $serial)"
+  else record pass "$suite" panic_reset; fi
+}
+
 # run_panic <arch> <suite>: the kernel is asked to panic (panic=test). The
 # boot must fail through the debug-exit device, the serial log must carry the
 # panic message and a backtrace, and symbolize.sh must decode the frame of the
 # function that panicked to a function name, a source file and a line.
 run_panic() {
   local arch=$1 suite=$2 mode=${3:-test} label=panic_backtrace cpus=1 log img serial rc sym want=deliberate_panic
-  if [ "$mode" = secondary ]; then label=panic_backtrace_secondary; cpus=2; fi
+  if [ "$mode" = secondary ]; then label=panic_backtrace_secondary; cpus=4; fi
   # panic=null: the kernel reaches an object through the null address,
   # which must fault (physical page 0 is never mapped for it).
   if [ "$mode" = null ]; then label=null_object_faults; want=deliberate_null_access; fi
+  # panic=park: processor 1 keeps its lock with interrupts off; the next
+  # entry that takes every lock must stop the machine naming processor 1
+  # within its bound, not hang (the 2026-11-25 kernel review).
+  if [ "$mode" = park ]; then label=stall_named; cpus=2; want=stalled; fi
   log=$(logfile "$suite" "build.$label")
-  img=$(build_image "$arch" "$log" "panic=$mode") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  local extra=; [ "$mode" = park ] && extra=" test=caps"   # capability calls: entries that take every lock
+  img=$(build_image "$arch" "$log" "panic=$mode$extra") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$label")
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp "$cpus" --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
@@ -185,7 +225,11 @@ run_panic() {
   if [ $rc != 1 ] || ! grep -q 'guest exit code 17' "$serial.qemu"; then
     record fail "$suite" "$label" "a panicking kernel did not leave with the failure code (exit status $rc)"; return 1
   fi
-  if [ "$mode" = null ]; then
+  if [ "$mode" = park ]; then
+    if ! grep -aq '^PANIC: processor 1 has not let go of its lock in 10 s' "$serial"; then
+      record fail "$suite" "$label" "a processor holding its lock for good was not named: $(grep -am1 '^PANIC' "$serial" | cut -c1-120) (serial: $serial)"; return 1
+    fi
+  elif [ "$mode" = null ]; then
     if ! grep -aq '^PANIC: kernel exception' "$serial"; then
       record fail "$suite" "$label" "a null object address did not fault: $(grep -am1 '^PANIC' "$serial" | cut -c1-120) (serial: $serial)"; return 1
     fi
@@ -194,6 +238,11 @@ run_panic() {
   fi
   if [ "$mode" = secondary ] && ! grep -aq '^PANIC: deliberate panic on processor 1' "$serial"; then
     record fail "$suite" "$label" "the secondary processor did not report its panic (serial: $serial)"; return 1
+  fi
+  # The other processors stop with it (the boot processor, still starting
+  # them with interrupts masked, may not: at least one of the three must).
+  if [ "$mode" = secondary ] && ! grep -aqE '^kernel: [1-3] of 3 other processors stopped' "$serial"; then
+    record fail "$suite" "$label" "the other processors were not stopped: $(grep -am1 ' other processors stopped' "$serial") (serial: $serial)"; return 1
   fi
   if ! grep -aqE "$want at .+\.rs:[1-9][0-9]*" "$sym"; then
     record fail "$suite" "$label" "the backtrace does not decode to function, file and line (see $sym)"; return 1
@@ -237,7 +286,10 @@ run_boot_error() {
   dir=$(art_dir "$arch"); k=$dir/kernel.stripped l=$dir/BOOTX64.EFI r=$dir/root.elf tool=$dir/silica-image
   if [ -n "${PIECES_ONCE:-}" ]; then dir=${PIECES_DIR:-$RUN}/pieces-kernel-$arch; k=$dir/kernel.stripped l=$dir/loader.efi r=$dir/root.elf tool=$dir/silica-image; fi
   out=${UNIT_DIR:-$dir}/error.img
-  local -a args=()
+  # The harness says it listens (QEMU's debug-exit device), as every test
+  # image does: the loader and the kernel write the port only when told.
+  printf 'exit=port\n' >"${UNIT_DIR:-$dir}/error-cmdline.txt" || return 1
+  local -a args=("SILICA/CMDLINE.TXT=${UNIT_DIR:-$dir}/error-cmdline.txt")
   for a in "$@"; do
     a=${a//\$K/$k}; a=${a//\$L/$l}; a=${a//\$R/$r}
     args+=("$a")
@@ -260,11 +312,14 @@ run_boot_error() {
 # processor Silica must refuse: the boot leaves with the failure code and
 # says why. Without, one it must run on: the in-OS `fpu` test passes there
 # (system calls, switches and the vector state, through a user program
-# built for the baseline).
+# built for the baseline). One it must run on is booted with the owner's
+# consent to run without a trusted entropy source (`entropy=accept`): an
+# emulated Armv8.0 core has no RNDR, and the refusal without consent is
+# cpu.no_rng's to show, not this test's.
 run_cpu() {
   local arch=$1 suite=$2 label=$3 model=$4 want=${5:-} log img serial rc
   log=$(logfile "$suite" "build.$label")
-  img=$(build_image "$arch" "$log" "$([ -n "$want" ] || echo test=fpu)") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
+  img=$(build_image "$arch" "$log" "$([ -n "$want" ] || echo test=fpu entropy=accept)") || { record fail "$suite" "$label" "image build failed (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$label")
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --cpu "$model" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-120}" >"$serial.qemu" 2>&1
   rc=$?
@@ -435,22 +490,76 @@ run_nvme_namespaces() { run_nvme "$1" "$2" namespaces; }
 # run_net_e1000e: the same over an Intel 82574 (M4: "runs the same tests
 # over an e1000e interface"), its driver e1000e.
 run_net_e1000e() { run_net "$1" "$2" e1000e; }
+
+# run_net <arch> <suite> [nic]: the interface's checks (netcheck, the stack
+# off): its link cycled, ARP and a ping; on virtio-net, in the same boot, a
+# client at full queue depth while its link changes (netcheck.crowd): every
+# completion must arrive and the link's news after them (the 2026-11-24
+# audit: the news took the completion ring's place of a transmit's
+# completion, which was lost). One boot for both: they need the same image.
 run_net() {
-  local arch=$1 suite=$2 nic=${3:-virtio} log img serial rc text name driver=virtio-net test=net
+  local arch=$1 suite=$2 nic=${3:-virtio} log img serial rc text name driver=virtio-net test=net crowd=() words="" names
   [ "$nic" = e1000e ] && driver=e1000e test=net_e1000e
+  [ "$nic" = virtio ] && words=" netcheck.crowd=1" crowd=(--on '^netcheck: crowd: ready for the link to change$=set_link net0 off' --on '^netcheck: crowd: [0-9]+ transmits in flight$=set_link net0 on')
   log=$(logfile "$suite" "build.$test")
-  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.link=cycle") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.link=cycle$words") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$test")
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" \
-    --on '^netcheck: ready for link down$=set_link net0 off' --on '^netcheck: confirmed link down$=set_link net0 on' >"$serial.qemu" 2>&1
+    --on '^netcheck: ready for link down$=set_link net0 off' --on '^netcheck: confirmed link down$=set_link net0 on' "${crowd[@]}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in "$driver.link_cycle" "$driver.arp" "$driver.ping"; do
+  names=("$driver.link_cycle" "$driver.arp" "$driver.ping")
+  [ "$nic" = virtio ] && names+=(crowd)
+  for name in "${names[@]}"; do
     if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name"
     else record fail "$suite" "$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
   if [ $rc = 0 ] && grep -qx 'BOOT OK' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" "$test"
   else record fail "$suite" "$test" "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+}
+
+# run_net_mac <arch> <suite>: a virtio NIC that reports a multicast address
+# (QEMU's `mac=01:00:5e:00:00:01`). The driver must not take it as the
+# interface's own: it says so and uses a locally administered one, with which
+# the gateway answers ARP.
+run_net_mac() {
+  local arch=$1 suite=$2 log img serial rc text test=net_mac
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
+    --nic virtio,mac=01:00:5e:00:00:01 >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if [ $rc != 0 ] || ! grep -qx 'TEST virtio-net.arp PASS' <<<"$text"; then
+    record fail "$suite" "$test" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! grep -q "^virtio-net: the device's address 01:00:5e:00:00:01 is multicast or zero" <<<"$text"; then
+    record fail "$suite" "$test" "the driver took a multicast address for the interface's own (serial: $serial)"
+  else record pass "$suite" "$test"; fi
+}
+
+# run_net_unplug_e1000e <arch> <suite>: the cable pulled during traffic on an
+# Intel 82574 whose device holds transmits while its link is down, as the
+# real one does (`devmgr.inject=e1000e:unplugged@1`; QEMU's model would send them
+# nowhere at once). netcheck sends eight frames with the link down and waits
+# past the driver's transmit limit: every one must be answered, the driver
+# must not be started again or say ERROR, and the gateway must answer once
+# the link is back.
+run_net_unplug_e1000e() {
+  local arch=$1 suite=$2 log img serial rc text test=net_unplug_e1000e
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.unplug=1 devmgr.inject=e1000e:unplugged@1") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user --nic e1000e \
+    --on '^netcheck: ready for unplug$=set_link net0 off' --on '^netcheck: ready for link up$=set_link net0 on' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if [ $rc != 0 ] || ! grep -qx 'TEST e1000e.unplug PASS' <<<"$text"; then
+    record fail "$suite" "$test" "$(grep -m1 -aE '^(ERROR|PANIC)|^netcheck: unplugged' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! grep -Fxq 'inject: Unplugged committed' <<<"$text"; then record fail "$suite" "$test" "the device never held transmits (serial: $serial)"
+  elif grep -q '^devmgr: e1000e for .* started again' <<<"$text"; then record fail "$suite" "$test" "the driver was started again: a pulled cable was taken for a dead device (serial: $serial)"
+  elif grep -q '^ERROR' <<<"$text"; then record fail "$suite" "$test" "$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140) (serial: $serial)"
+  else record pass "$suite" "$test"; fi
 }
 
 # run_net_recovery <arch> <suite>: the network interface's driver
@@ -520,6 +629,55 @@ run_hotplug() {
   else record fail "$suite" "$test" "$bad (serial: $serial)"; fi
 }
 run_hotplug_nvme_one_vector() { run_hotplug "$1" "$2" nvme_one_vector; }
+
+# run_hotplug_cycle <arch> <suite>: one slot, three devices in one boot: a
+# virtio disk put in and taken out, then an NVMe controller (registers laid
+# out otherwise), then a virtio disk again. Each must be driven, the third
+# must get the interrupt lines the first had, and the machine must have as
+# many lines free after the last departure as after the first (the
+# 2026-11-24 audit: interrupt lines never came back, a slot worked once for
+# each line the machine had, and the frames of one device's registers
+# blocked a device laid out otherwise in the same slot).
+run_hotplug_cycle() {
+  local arch=$1 suite=$2 test=hotplug_cycle log img serial rc text bad="" d2 d3 l1 l3 f1 f3 vb t
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  d2=$(dirname "$serial")/$test.2.img; d3=$(dirname "$serial")/$test.3.img
+  cp "$img" "$(dirname "$serial")/$test.img" && cp "$img" "$d2" && cp "$img" "$d3" || { record fail "$suite" "$test" "cannot copy the disks"; return 1; }
+  vb='disable-legacy=on,iommu_platform=on'
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" \
+    --hotplug "$(dirname "$serial")/$test.img" \
+    --on "^devmgr: the power button is armed\$=drive_add 0 if=none,id=hot2,format=raw,file=$d2" \
+    --on "^devmgr: 00:02\\.0 [0-9a-f]{4}:[0-9a-f]{4} class 06\\.04\\.00=drive_add 0 if=none,id=hot3,format=raw,file=$d3" \
+    --on "^devmgr: 00:02\\.0 takes devices while the system runs\$=device_add virtio-blk-pci,id=hot1,bus=hp0,drive=hot,$vb" \
+    --on "^devmgr: 00:02\\.0: arrival 1 in the slot=device_del hot1" \
+    --on "^devmgr: 00:02\\.0: departure 1 from the slot=device_add nvme,id=hot2dev,bus=hp0,drive=hot2,serial=hot2" \
+    --on "^devmgr: 00:02\\.0: arrival 2 in the slot=device_del hot2dev" \
+    --on "^devmgr: 00:02\\.0: departure 2 from the slot=device_add virtio-blk-pci,id=hot3dev,bus=hp0,drive=hot3,$vb" \
+    --on "^devmgr: 00:02\\.0: arrival 3 in the slot=device_del hot3dev" \
+    --until '^devmgr: 00:02\.0: departure 3 from the slot' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  [ $rc = 0 ] || bad="three devices did not come and go (exit status $rc; the last slot line: $(grep -a 'devmgr: 00:02\.0' <<<"$text" | tail -1 | cut -c1-120))"
+  [ -n "$bad" ] || [ "$(grep -c '^devmgr: 01:00\.0 1af4:1042 class 01\.00\.00 arrived: virtio-blk$' <<<"$text")" = 2 ] || bad="the virtio disk was not found and driven both times"
+  [ -n "$bad" ] || grep -q '^devmgr: 01:00\.0 1b36:0010 class 01\.08\.02 arrived: nvme$' <<<"$text" || bad="the NVMe controller put in after the virtio disk was not found"
+  [ -n "$bad" ] || ! grep -q 'is not driven' <<<"$text" || bad="$(grep -m1 'is not driven' <<<"$text" | cut -c1-140)"
+  l1=$(sed -nE 's/^devmgr: 00:02\.0: arrival 1 in the slot, (interrupt lines [0-9]+ to [0-9]+),.*/\1/p' <<<"$text")
+  l3=$(sed -nE 's/^devmgr: 00:02\.0: arrival 3 in the slot, (interrupt lines [0-9]+ to [0-9]+),.*/\1/p' <<<"$text")
+  [ -n "$bad" ] || { [ -n "$l1" ] && [ "$l1" = "$l3" ]; } || bad="the third device got $l3, the first $l1: lines were not given back"
+  f1=$(sed -nE 's/^devmgr: 00:02\.0: departure 1 from the slot, ([0-9]+) lines free.*/\1/p' <<<"$text")
+  f3=$(sed -nE 's/^devmgr: 00:02\.0: departure 3 from the slot, ([0-9]+) lines free.*/\1/p' <<<"$text")
+  [ -n "$bad" ] || { [ -n "$f1" ] && [ "$f1" = "$f3" ]; } || bad="$f1 lines were free after the first departure, $f3 after the third"
+  # The device manager serves while a slot's device comes up (its link,
+  # then 100 ms): no turn of its loop may hold it 50 ms (before, it spun
+  # through the wait, up to 1.1 s, with every client and fault report).
+  t=$(sed -nE 's/^devmgr: 00:02\.0: departure 3 from the slot, .*longest turn ([0-9]+) ms$/\1/p' <<<"$text")
+  [ -n "$bad" ] || { [ -n "$t" ] && [ "$t" -lt 50 ]; } || bad="the device manager went ${t:-?} ms without listening while devices came and went"
+  [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
+  if [ -z "$bad" ]; then record pass "$suite" "$test"
+  else record fail "$suite" "$test" "$bad (serial: $serial)"; fi
+}
 run_hotplug_nvme_4k() { run_hotplug "$1" "$2" nvme_4k; }
 run_hotplug_nvme_namespaces() { run_hotplug "$1" "$2" nvme_namespaces; }
 
@@ -537,15 +695,88 @@ run_partitions() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in size offset confined write; do
+  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded; do
     if grep -qx "TEST partitions.$name PASS" <<<"$text"; then record pass "$suite" "partitions_$name"
     else record fail "$suite" "partitions_$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
 }
 
+# run_partitions_full_table <arch> <suite>: a second disk whose GPT is full
+# (128 partitions, host-tools' gptdisk). The block server's list is answered
+# a part at a time, so every caller gets all 129 partitions of the machine
+# (the 2026-11-24 audit: one full table made the list too long for a message,
+# refused to everyone: partcheck said "the block server does not answer").
+run_partitions_full_table() {
+  local arch=$1 suite=$2 name=partitions_full_table log img serial disk gptdisk text
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=partitions partcheck.partitions=129") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  gptdisk=$(host_tool gptdisk "$log") || { record fail "$suite" "$name" "gptdisk did not build: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  disk=${serial%.log}.gpt128.img
+  "$gptdisk" "$disk" 128 || { record fail "$suite" "$name" "gptdisk failed"; return 1; }
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --disk "$disk" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  text=$(tr -d '\r\0' <"$serial")
+  if grep -q '^partitions: disk 0x[0-9a-f]*: 128 partitions$' <<<"$text" && grep -qx "TEST partitions.listed_whole PASS" <<<"$text" \
+      && grep -q '^partcheck: 129 partitions listed, in [2-9] parts$' <<<"$text"; then
+    record pass "$suite" "$name"
+  else
+    record fail "$suite" "$name" "not every partition of a full table was listed: $(grep -m1 -aE "^(ERROR|PANIC|partcheck: [0-9])" <<<"$text" | cut -c1-140) (serial: $serial)"
+  fi
+  rm -f "$disk"
+}
+
+# run_partitions_backup_gpt <arch> <suite>: a disk (host-tools' gptdisk,
+# four partitions) whose primary GPT header is damaged (its checksum zeroed),
+# put in while the system runs (the firmware repairs a primary GPT it finds
+# at boot, from the backup: only a disk that arrives later shows what the
+# block server does). It reads the backup at the disk's last block and lists
+# all four, saying so. Before, it read the primary alone and offered the
+# disk whole, its partitions unreachable.
+run_partitions_backup_gpt() {
+  local arch=$1 suite=$2 name=partitions_backup_gpt log img serial disk gptdisk text
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  gptdisk=$(host_tool gptdisk "$log") || { record fail "$suite" "$name" "gptdisk did not build: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  disk=${serial%.log}.gpt4.img
+  "$gptdisk" "$disk" 4 || { record fail "$suite" "$name" "gptdisk failed"; return 1; }
+  # The primary header's CRC32 (block 1, offset 16) zeroed.
+  dd if=/dev/zero of="$disk" bs=1 count=4 seek=$((512 + 16)) conv=notrunc status=none || { record fail "$suite" "$name" "cannot damage the disk"; return 1; }
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --hotplug "$disk" \
+    --on '^devmgr: 00:02\.0 takes devices while the system runs$=device_add virtio-blk-pci,id=hotdisk,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on' \
+    --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^devmgr: 01:00\.0 1af4:1042 class 01\.00\.00 arrived: virtio-blk$=trace\n' \
+    --until '^partitions: disk 0x100: [0-9]+ partitions$' >"$serial.qemu" 2>&1
+  text=$(tr -d '\r\0' <"$serial")
+  if grep -q '^partitions: disk 0x100: its GPT header.s checksum is wrong; its backup GPT is used$' <<<"$text" \
+      && grep -q '^partitions: disk 0x100: 4 partitions$' <<<"$text"; then
+    record pass "$suite" "$name"
+  else
+    record fail "$suite" "$name" "a disk whose primary GPT is damaged did not list its partitions from the backup: $(grep -m1 -aE "^(ERROR|PANIC|partitions: disk 0x100)" <<<"$text" | cut -c1-140) (serial: $serial)"
+  fi
+  rm -f "$disk"
+}
+
+# The system image has a 16 KiB GPT entry array. MDTS=1 on this NVMe
+# controller permits 8 KiB per transfer. Give it a fixed PCI slot so
+# finding the same partition on the virtio boot disk cannot pass the test.
+run_partitions_small_transfer() {
+  local arch=$1 suite=$2 name=partitions_small_transfer log img serial
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log")"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  if "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+      --nvme "$img" --nvme-props mdts=1,addr=0x4 --until '^partitions: disk 0x20:' >"$serial.qemu" 2>&1 \
+      && serial_has "$serial" '^nvme: .* blocks of 512 bytes, .*max 16 blocks per request$' \
+      && serial_has "$serial" '^partitions: disk 0x20: 1 partitions$'; then
+    record pass "$suite" "$name"
+  else
+    record fail "$suite" "$name" "the partition on the transfer-limited NVMe namespace was not found (serial: $serial)"
+  fi
+}
+
 # run_faults <arch> <suite>: a device that misbehaves (spec/MILESTONES.md
 # M3, fault injection). One boot per fault and block driver, the driver
-# committing the fault at its 50th request (inject=<driver>:<fault>@50,
+# committing the fault at its 50th request (devmgr.inject=<driver>:<fault>@50,
 # silica_driver::inject): for virtio-blk in the middle of blkcheck's 128
 # reads in flight. Every check of blkcheck's on that disk must still pass
 # (its requests are sent again to the driver started in place of one that
@@ -559,6 +790,8 @@ run_partitions() {
 run_faults() {
   local arch=$1 suite=$2 log img serial rc text token driver config fault restarts other want name say missing
   local -a faults=(garbage stuck spurious missed reset)
+  # `broken` (the device asks to be reset) is virtio's alone.
+  local -a fl
   if [ -n "${4:-}" ]; then faults=("$4"); fi
   local -a machine says
   # One driver's five boots when named (the drivers' run at once); the
@@ -574,17 +807,31 @@ run_faults() {
       nvme_machine "$config" "$(build_system_image "$arch" "$(logfile "$suite" build.faults_disk)")"
       machine=("${NVME_MACHINE[@]}") says=("${NVME_SAYS[@]}")
     fi
-    for fault in "${faults[@]}"; do
+    fl=("${faults[@]}"); if [ -z "${4:-}" ] && [[ $driver == virtio-* ]]; then fl+=(broken generation); [ "$driver" = virtio-blk ] && fl+=(tiny short); fi
+    local -a machine_says=("${says[@]+"${says[@]}"}")
+    for fault in "${fl[@]}"; do
+      # What the machine says every time, and what this fault adds (not
+      # what the faults before it added).
+      says=("${machine_says[@]+"${machine_says[@]}"}")
       name=fault_${token//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
-      img=$(build_system_image "$arch" "$log" "checks=block inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+      local at=50; case $fault in tiny|generation) at=1 ;; esac   # a queue is offered and the configuration read once, at bring-up
+      img=$(build_system_image "$arch" "$log" "checks=block devmgr.inject=$driver:$fault@$at") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
       serial=$(logfile "$suite" "$name")
       "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" "${machine[@]}" >"$serial.qemu" 2>&1
       rc=$?
       text=$(tr -d '\r\0' <"$serial")
       restarts=$(grep -c "^devmgr: $driver for .* started again" <<<"$text")
       other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: $driver: " | head -1 | cut -c1-140)
-      case $fault in garbage|stuck|reset) want=1 ;; *) want=0 ;; esac
+      case $fault in garbage|stuck|reset|broken|tiny|generation|short) want=1 ;; *) want=0 ;; esac
+      # A configuration that never settles is refused at bring-up, and a
+      # read the device did not write is not believed: each says why.
+      [ $fault = generation ] && says=("${says[@]+"${says[@]}"}" "^ERROR: $driver: Protocol\(\"the configuration changes on every read\"\)")
+      [ $fault = short ] && says=("${says[@]+"${says[@]}"}" "^ERROR: $driver: Protocol\(\"the device completed a read without writing its data\"\)")
+      # A queue too small for one request is refused at once, saying why.
+      [ $fault = tiny ] && says=("${says[@]+"${says[@]}"}" "^ERROR: $driver: Protocol\(\"a queue too small for one request\"\)")
+      # A device that asks to be reset is seen asking, not timed out on.
+      [ $fault = broken ] && says=("${says[@]+"${says[@]}"}" "^ERROR: $driver: .*the device asks to be reset")
       missing=""; for say in "${says[@]+"${says[@]}"}"; do [ -n "$missing" ] || grep -qE "$say" <<<"$text" || missing=$say; done
       if [ $rc != 0 ] || ! grep -qx 'BOOT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
       elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
@@ -605,10 +852,12 @@ run_faults() {
   local nic
   for driver in "${network[@]+"${network[@]}"}"; do
     nic=virtio; [ "$driver" = e1000e ] && nic=e1000e
-    for fault in "${faults[@]}"; do
+    fl=("${faults[@]}"); if [ -z "${4:-}" ] && [[ $driver == virtio-* ]]; then fl+=(broken generation); [ "$driver" = virtio-blk ] && fl+=(tiny short); fi
+    for fault in "${fl[@]}"; do
       name=fault_${driver//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
-      img=$(build_system_image "$arch" "$log" "checks=netfault off=netd inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+      local nat=50; [ $fault = generation ] && nat=1
+      img=$(build_system_image "$arch" "$log" "checks=netfault off=netd devmgr.inject=$driver:$fault@$nat") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
       serial=$(logfile "$suite" "$name")
       "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" >"$serial.qemu" 2>&1
       rc=$?
@@ -618,7 +867,9 @@ run_faults() {
       if [ $rc != 0 ] || ! grep -qx 'NETFAULT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
       elif ! grep -Fxq "inject: ${fault^} committed" <<<"$text"; then record fail "$suite" "$name" "the driver never committed $fault (serial: $serial)"
       elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
+      elif [ $fault = broken ] && ! grep -qE "^ERROR: $driver: .*the device asks to be reset" <<<"$text"; then record fail "$suite" "$name" "the driver never saw the device ask to be reset (serial: $serial)"
       elif [ "$restarts" -gt 1 ]; then record fail "$suite" "$name" "the driver was started again $restarts times (serial: $serial)"
+      elif [ $fault = generation ] && ! grep -qE "^ERROR: $driver: Protocol\(\"the configuration changes on every read\"\)" <<<"$text"; then record fail "$suite" "$name" "the driver never refused a configuration that never settles (serial: $serial)"
       else record pass "$suite" "$name"; fi
     done
   done
@@ -714,9 +965,12 @@ run_entropy() {
 # run_console_port <arch> <suite>: the shell through a virtual machine's
 # console port (virtio-console, port 0, behind the IOMMU). The host types
 # into the port once the console says it uses it (`echo through the port`,
-# then `shutdown`); what the port sends back must hold the shell's prompt and
-# the echo, line ends as a terminal wants them, and the machine must turn
-# itself off when told to there.
+# then twenty more lines in one burst while the shell is busy, then
+# `shutdown`); what the port sends back must hold the shell's prompt and
+# the echo, line ends as a terminal wants them; of the burst at most 16
+# lines wait for the shell (the rest are dropped, and said: before, every
+# line typed ahead was kept, without bound, and later run); and the machine
+# must turn itself off when told to there.
 run_console_port() {
   local arch=$1 suite=$2 log img serial rc port out
   log=$(logfile "$suite" build.console_port)
@@ -724,13 +978,14 @@ run_console_port() {
   serial=$(logfile "$suite" console_port)
   port=${serial%.log}.port
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --console-port "$port" \
-    --port-type '^console: .* and the console port=echo through the port\rshu' \
-    --port-type '^through the port$=tdown\r' >"$serial.qemu" 2>&1
+    --port-type '^console: .* and the console port=\recho through the port\recho ta' \
+    --port-type '^through the port$=01\recho ta02\recho ta03\recho ta04\recho ta05\recho ta06\recho ta07\recho ta08\recho ta09\recho ta10\recho ta11\recho ta12\recho ta13\recho ta14\recho ta15\recho ta16\recho ta17\recho ta18\recho ta19\recho ta20\r' --port-type '^ta16$=shutdown\r' >"$serial.qemu" 2>&1
   rc=$?
   out=$(tr -d '\0' <"$port")
   if [ $rc != 0 ]; then record fail "$suite" console_port "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   elif ! grep -q '^virtio-console: port 0, DMA confined by the IOMMU' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "the driver did not say it runs confined (serial: $serial)"
-  elif [[ "$out" != *$'silica> echo through the port\r\nthrough the port\r\nsilica> shutdown\r\n'* ]]; then record fail "$suite" console_port "queued input did not follow its prompt (port output: $port)"
+  elif [[ "$out" != *$'silica> \r\nsilica> echo through the port\r\nthrough the port\r\nsilica> echo ta01\r\n'* ]]; then record fail "$suite" console_port "the empty line or queued command did not follow its prompt (port output: $port)"
+  elif [[ "$out" != *$'\r\nta16\r\n'* || "$out" == *$'\r\nta18\r\n'* || "$out" != *"a line typed ahead was dropped"* ]]; then record fail "$suite" console_port "of twenty lines typed ahead, more than 16 waited for the shell, or none was said dropped (port output: $port)"
   elif ! grep -q '^init: shutting down' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "shutdown typed at the port did not shut down (serial: $serial)"
   else record pass "$suite" console_port; fi
 }
@@ -748,8 +1003,12 @@ run_http_load() { run_http "$1" "$2" http_load 10000; }
 # The same two over an Intel 82574 (M4).
 run_http_e1000e() { NIC=e1000e run_http "$1" "$2" http_e1000e; }
 run_http_load_e1000e() { NIC=e1000e run_http "$1" "$2" http_load_e1000e 10000; }
-# run_http_restart: M4's "killing the network stack under load": once httpd
-# has answered 2,000 of 6,000 requests the host types `restart netd` at the
+# run_http_restart: M4's "killing the network stack under load". First,
+# once httpd has answered 1,000 of 6,000 requests, the host types
+# `restart-driver` for the interface at the shell: the stack hears from
+# the device manager when the next driver is there (its watch; it does not
+# look by the clock) and its connections carry on. Then, once httpd
+# has answered 2,000, the host types `restart netd` at the
 # shell (a keyboard, the console's); the connections then open are reset,
 # the program's listener is set up again on the new stack (its events), and
 # the load goes on. Judged: no answer ever wrong, every failure a
@@ -779,9 +1038,15 @@ host_ports() {
 run_http() {
   local arch=$1 suite=$2 name=${3:-http} requests=${4:-640} mode=${5:-} log img serial rc port qemu load i httpload
   local -a extra=()
-  [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^httpd: 2000 answers$=restart netd\n')
+  # The plain run starts tcphog first: one program trying to take the
+  # stack's connections from every other one, and to name memory past
+  # its own (it must be refused, and httpd then serves as ever).
+  local checks=http
+  [ "$name" = http ] && mode=pipeline && checks=tcphog,http
+  [ "$mode" = restart ] && extra=(--device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --type '^httpd: 1000 answers$=restart-driver 00:02.0\n' --type '^httpd: 2000 answers$=restart netd\n')
   log=$(logfile "$suite" "build.$name")
-  img=$(build_system_image "$arch" "$log" "checks=http") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=$checks httpd.quit=allowed") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   httpload=$(host_tool httpload "$log") || { record fail "$suite" "$name" "httpload did not build: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   # A host port of this run's own (runs in parallel must not share one).
@@ -805,11 +1070,50 @@ run_http() {
   if [ $lrc != 0 ]; then record fail "$suite" "$name" "$(head -2 <<<"$load" | tr '\n' ' ' | cut -c1-200) (serial: $serial)"
   elif [ $rc != 0 ] || ! serial_has "$serial" '^init: httpd passed'; then
     record fail "$suite" "$name" "httpd did not end in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC|httpd)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif [ "$mode" = restart ] && ! serial_has "$serial" '^devmgr: restarting virtio-net for 00:02\.0, as asked'; then
+    record fail "$suite" "$name" "the interface's driver was never restarted (serial: $serial)"
   elif [ "$mode" = restart ] && ! serial_has "$serial" '^init: netd restarted, as asked'; then
     record fail "$suite" "$name" "netd was never restarted (serial: $serial)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" "$name" "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
   else record pass "$suite" "$name"; fi
 }
+
+# run_http_quit <arch> <suite>: `GET /quit` from any peer on a machine
+# whose command line does not allow it (no `httpd.quit=allowed`): httpd
+# answers 404, serves the same connection after it, and says once that it
+# refused; then a key typed at the shell turns the machine off, httpd still
+# running. (Before, any peer's `GET /quit` ended the service.)
+run_http_quit() {
+  local arch=$1 suite=$2 log img serial rc port qemu load i httpload
+  log=$(logfile "$suite" build.http_quit)
+  img=$(build_system_image "$arch" "$log" "checks=http") || { record fail "$suite" http_quit "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  httpload=$(host_tool httpload "$log") || { record fail "$suite" http_quit "httpload did not build: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" http_quit)
+  port=$(host_ports 1) || { record fail "$suite" http_quit "no free host port below the ephemeral range"; return 1; }
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --net "user:$port-80" --nic "${NIC:-virtio}" --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --type '^httpd: GET /quit refused=shutdown\n' >"$serial.qemu" 2>&1 &
+  qemu=$!
+  for i in $(seq 600); do
+    serial_has "$serial" '^httpd: listening on port 80' && break
+    kill -0 $qemu 2>/dev/null || break
+    sleep 0.1
+  done
+  if ! serial_has "$serial" '^httpd: listening on port 80'; then
+    kill $qemu 2>/dev/null; wait $qemu
+    record fail "$suite" http_quit "httpd never listened: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (serial: $serial)"
+    return 1
+  fi
+  load=$("$httpload" "$port" 0 0 quit-refused 2>&1); local lrc=$?
+  wait $qemu; rc=$?
+  if [ $lrc != 0 ]; then record fail "$suite" http_quit "$(head -2 <<<"$load" | tr '\n' ' ' | cut -c1-200) (serial: $serial)"
+  elif serial_has "$serial" '^init: httpd (ended|passed)'; then record fail "$suite" http_quit "httpd ended on a peer's GET /quit (serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^init: shutting down'; then
+    record fail "$suite" http_quit "the machine was not turned off from the shell after the refusal (exit status $rc; serial: $serial)"
+  elif serial_has "$serial" '^ERROR'; then record fail "$suite" http_quit "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
+  else record pass "$suite" http_quit; fi
+}
+
 
 # run_remote <arch> <suite>: remote management (M4: "accepts a remote
 # management session that can inspect, restart and update any service").
@@ -824,26 +1128,29 @@ run_http() {
 # reverts it to the boot archive's; a stranger's key and a wrong machine key
 # get nothing. Then it shuts the machine down. Each step's failure is said.
 run_remote() {
-  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i
+  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i probe watcher prober n0 free0 free1
   log=$(logfile "$suite" build.remote)
-  rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
+  rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") && probe=$(host_tool remoteprobe "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
   dir=${UNIT_DIR:-$RUN}/remote; rm -rf "$dir"; mkdir -p "$dir"
-  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") \
+  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") \
     || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
-  printf '# who may manage this machine\n%s test-owner\n' "$owner" >"$dir/owners"
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=") \
+  printf '# who may manage this machine\n%s test-owner idle=6\n%s watcher observe\n' "$owner" "$watcher" >"$dir/owners"
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed httpd.fail_after=11") \
     && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   # Two new programs for httpd: the same code with bytes after it (an ELF
   # file's loader reads only what its headers name), and one whose entry
   # point is an address nothing is mapped at.
   { cat "$httpd"; printf 'a new version of httpd, for the remote management test\n'; } >"$dir/httpd-new.elf"
   cp "$httpd" "$dir/httpd-faults.elf" && printf '\000\020\000\000\000\000\000\000' | dd of="$dir/httpd-faults.elf" bs=1 seek=24 conv=notrunc status=none
+  # And hello as httpd: it serves nobody, and this image tells it to fail late.
+  cp "$(system_program "$arch" hello "$log")" "$dir/httpd-late.elf" || { record fail "$suite" remote "no hello program (log: $log)"; return 1; }
   printf 'not a program\n' >"$dir/notes.txt"
   serial=$(logfile "$suite" remote)
   port=$(host_ports 2) || { record fail "$suite" remote "no free host ports below the ephemeral range"; return 1; }
   web=$((port + 1))
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
-    --net "user:$port-22,$web-80" --nic "${NIC:-virtio}" >"$serial.qemu" 2>&1 &
+    --net "user:$port-22,$web-80" --nic "${NIC:-virtio}" --console-port "$serial.port" \
+    --port-type '^remote: test-owner asks the service manager to start httpd.\]0;owned=log remote\r' >"$serial.qemu" 2>&1 &
   qemu=$!
   for i in $(seq 600); do
     serial_has "$serial" '^remote: listening on port 22' && break
@@ -861,13 +1168,28 @@ run_remote() {
   until_seen() { local k; for k in $(seq 300); do [ "$(tr -d '\r' <"$serial" | grep -acE "$1")" -ge "${2:-1}" ] && return 0; sleep 0.1; done; return 1; }
   step() { [ -n "$why" ] || why=$1; }
   hash_of() { "$rmt" hash "$1" | cut -c1-16; }
+  # lone_cr <text>: whether a carriage return in it ends no line (a command's
+  # output lost its last line end to $(...)).
+  lone_cr() { local t="$1"$'\n'; t=${t//$'\r\n'/}; [[ $t == *$'\r'* ]]; }
   out=$(R services); printf '%s\n' "$out" >"$dir/services.1"
   grep -qE '^remote +running' <<<"$out" && grep -qE '^netd +running .* silica.net.Tcp' <<<"$out" || step "services did not list remote and netd running: $(head -3 <<<"$out" | tr '\n' ' ')"
   grep -qE "^httpd +stopped .* $(hash_of "$httpd")\$" <<<"$out" || step "services did not show httpd stopped with the boot archive's program $(hash_of "$httpd")"
   out=$(R describe netd); grep -q '^process netd: ' <<<"$out" || step "describe netd said: $(head -1 <<<"$out")"
+  # Services that hold secrets (declared `secrets`) run in address spaces
+  # isolated against speculation; others do not pay for it. The owner sees
+  # which through the capabilities `describe` reports.
+  grep -q 'AddressSpace.*isolated against speculation' <<<"$out" && step "netd's address space is isolated though it declares no secrets"
+  for s in remote entropy; do
+    out=$(R describe $s)
+    grep -q 'AddressSpace.*isolated against speculation' <<<"$out" || step "$s holds secrets but its address space is not isolated against speculation: $(grep -m1 AddressSpace <<<"$out")"
+  done
   out=$(R log remote); grep -q 'listening on port 22' <<<"$out" || step "log remote said: $(head -1 <<<"$out")"
   out=$(R logs); grep -q '^netd ' <<<"$out" || step "logs did not name netd: $(head -1 <<<"$out")"
   out=$(R memory); grep -q '^free [0-9]* KiB' <<<"$out" || step "memory said: $out"
+  # A new program that serves nobody and fails 11 s after its start (hello,
+  # told so by this image's `httpd.fail_after=11`): looked at below, once
+  # the steps between have taken that long.
+  R update httpd "$dir/httpd-late.elf" >/dev/null && R start httpd >/dev/null || step "update httpd to the program that fails late was refused"
   R restart logd >/dev/null && until_seen '^init: logd restarted, as asked' && serial_has "$serial" '^remote: test-owner asks the service manager to restart logd' \
     || step "restart logd: not seen restarted, or not in the log as the owner's"
   # Strangers: an owner the machine does not know, and a machine that is not
@@ -876,33 +1198,163 @@ run_remote() {
   until_seen "is no owner's" || step "the machine did not say that it closed on a stranger's key"
   out=$("$rmt" -i "$dir/owner.key" -m "$stranger" "127.0.0.1:$port" services 2>&1) && step "a session to a wrong machine key was served: $out"
   until_seen 'its handshake did not open' || step "the machine did not say that a handshake for another key did not open"
+  # Someone who recorded an owner's first message replays it on nine
+  # connections, each then trickling a frame that never ends: the owner is
+  # still served, nobody is said to have connected but the owner, and the
+  # machine answers no replay with a byte, closing each at once: as a
+  # replay (its time is no later than the last taken from the owner), or as
+  # a stranger making room for newer ones (before: each replay was answered
+  # and an open session, held an hour by any byte, eight of them locking
+  # the owners out).
+  n0=$(tr -d '\r' <"$serial" | grep -ac '^remote: test-owner connected from')
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" replay 9 14 >"$dir/replay.out" 2>&1 &
+  prober=$!
+  sleep 1
+  out=$(R services) || step "the owner was not served while nine replayed handshakes were held: $out"
+  wait $prober || step "replayed handshakes: $(tail -1 "$dir/replay.out")"
+  [ "$(tr -d '\r' <"$serial" | grep -ac 'made no later than the last taken from them')" -ge 1 ] \
+    || step "the machine did not refuse the replayed handshakes as replays: $(tail -1 "$dir/replay.out")"
+  [ "$(tr -d '\r' <"$serial" | grep -ac '^remote: test-owner connected from')" = $((n0 + 1)) ] \
+    || step "a replayed handshake was taken for the owner connecting (the log says so more than once)"
+  # An owner the owners file gives `observe` alone sees, and changes nothing.
+  W() { "$rmt" -i "$dir/watcher.key" -m "$machine" "127.0.0.1:$port" "$@" 2>&1; }
+  out=$(W services); grep -qE '^logd +running' <<<"$out" || step "an owner who may observe did not see the services: $(head -1 <<<"$out")"
+  out=$(W log remote); grep -q "may not make call\\|test-owner connected" <<<"$out" || step "an owner who may observe did not read a log: $(head -1 <<<"$out" | cat -v)"
+  out=$(W restart logd) && step "an owner who may only observe restarted logd: $out"
+  grep -q 'Refused' <<<"$out" || step "an owner who may only observe was refused a restart, but not as refused: $out"
+  until_seen '^remote: watcher may not make call' || step "the machine did not say it refused the watcher's call"
+  # Connections that never say a word, nine of them, and an owner's own
+  # session that, once proven, starts a frame it never finishes: the owner
+  # is still served, and the machine closes each (the silent ones within the
+  # 10 s to prove an owner, the trickling session at its idle limit, 6 s in
+  # this owner's line of the owners file: bytes are not messages). The
+  # 10 s count from when the machine took the connection, which the host
+  # cannot see: QEMU's user-mode network completes the host's connect at
+  # once and sends the guest its SYN on its own, again at 3 s and at 9 s
+  # when the listener has no room (nine silent connections and the owner's
+  # two are more than its eight). So the probe waits 10 s past the last of
+  # those, and the machine must say that it closed the two it kept for want
+  # of a proof (before: 14 s from the host's connect, and on a hosted
+  # runner, whose guest took the last two after a retried SYN, they were
+  # closed after it gave up).
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" silent 9 20 >"$dir/silent.out" 2>&1 &
+  prober=$!
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" trickle-session 10 >"$dir/trickle.out" 2>&1 &
+  local trickler=$!
+  sleep 1
+  out=$(R memory) || step "the owner was not served while nine silent connections were held: $out"
+  wait $prober || step "silent connections: $(tail -1 "$dir/silent.out")"
+  until_seen 'closed: no owner proven within 10 s' 2 || step "the machine did not say it closed two silent connections for want of an owner's proof"
+  wait $trickler || step "an owner's session trickling a frame: $(tail -1 "$dir/trickle.out")"
+  until_seen "^remote: test-owner's session from .* closed: no message for 6 s" || step "the machine did not say it closed the trickling session"
+  # A service's name with a terminal's escapes, an OSC title and a carriage
+  # return in it: what the machine logs of it reaches no terminal as
+  # anything but text, checked on the bytes each sends: the serial console
+  # (logd), the console port (the shell's `log remote`, typed there when the
+  # line is logged, through the console) and the owner's terminal (the host
+  # tool's `log`).
+  out=$(R start $'httpd\e]0;owned\a\rforged line') && step "a service named with escapes was started: $out"
+  until_seen 'asks the service manager to start httpd\?\]0;owned\?\?forged line' || step "the machine did not log the escaped name as text"
+  [ "$(grep -a 'service manager to start httpd' "$serial" | sed 's/\r$//' | grep -ac $'\e\|\a\|\r')" = 0 ] \
+    || step "an escape or a carriage return a session sent reached the machine's serial console"
+  out=$(R log remote); grep -qF 'start httpd?]0;owned??forged line' <<<"$out" && ! grep -q $'\e\|\a' <<<"$out" && ! lone_cr "$out" \
+    || step "the remote log reached the owner's terminal with its escapes: $(grep -a 'owned' <<<"$out" | cat -v | head -1)"
+  # The program that failed late: it never served, so however long it ran
+  # it was the update that failed, and the program before it is back (before:
+  # an update was judged for 10 s, and one that failed after 11 was kept).
+  until_seen '^hello: failing after 11 s, having served nobody' && until_seen "^init: httpd's new program failed before it served" \
+    && until_seen '^init: httpd started again on the program before its update' && until_seen '^httpd: listening on port 80' \
+    || step "a new program that failed after 11 s without ever serving was kept: $(tr -d '\r' <"$serial" | grep -a '^init: httpd' | tail -1)"
+  out=$(R services); grep -qE "^httpd +running .* $(hash_of "$httpd")\$" <<<"$out" || step "after the update that failed late, httpd does not run the boot archive's program: $(grep '^httpd' <<<"$out")"
+  R stop httpd >/dev/null || step "stop httpd was refused"
   # httpd: started, then updated while it serves.
-  R start httpd >/dev/null && until_seen '^httpd: listening on port 80' || step "start httpd: it never listened"
+  R start httpd >/dev/null && until_seen '^httpd: listening on port 80' 2 || step "start httpd: it never listened"
   out=$(R update httpd "$dir/httpd-new.elf") || step "update httpd: $out"
-  until_seen '^init: httpd started on its new program' && until_seen '^httpd: listening on port 80' 2 || step "httpd was not started on its new program"
+  until_seen '^init: httpd started on its new program' && until_seen '^httpd: listening on port 80' 3 || step "httpd was not started on its new program"
   out=$("$httpload" "$web" 64 4 2>&1) || step "the updated httpd did not serve: $out"
-  until_seen '^init: httpd ended' || step "the updated httpd did not end in order"
+  until_seen '^init: httpd ended$' || step "the updated httpd did not end in order"
   out=$(R services); grep -qE "^httpd +stopped .* $(hash_of "$dir/httpd-new.elf") \(updated\)\$" <<<"$out" || step "services did not show httpd on its new program: $(grep '^httpd' <<<"$out")"
-  # Bytes that are no program: refused, nothing changes.
+  # An owner sends 1 MiB of a program and never asks for the update: the
+  # service manager holds none of it (before, it kept what every caller
+  # staged in its own memory, 32 MiB of it for all callers together: one
+  # caller's pieces were another's refusal, and the remote service kept
+  # its sessions apart with a lock and a minute's timer). The remote
+  # service holds it, in its own memory, for that owner; a piece past
+  # the largest program and one sent to the service manager are refused.
+  free0=$(R memory | sed -n 's/^free \([0-9]*\) KiB.*/\1/p')
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" send-hold 1048576 20 >"$dir/send.out" 2>&1 &
+  prober=$!
+  for i in $(seq 200); do grep -q 'and holds them' "$dir/send.out" && break; kill -0 $prober 2>/dev/null || break; sleep 0.1; done
+  grep -q 'and holds them' "$dir/send.out" || step "an owner sending 1 MiB of a program: $(tail -1 "$dir/send.out")"
+  free1=$(R memory | sed -n 's/^free \([0-9]*\) KiB.*/\1/p')
+  [ -n "$free0" ] && [ -n "$free1" ] && [ $((free0 - free1)) -lt 256 ] \
+    || step "the service manager held $((free0 - free1)) KiB more once an owner had sent 1 MiB of a program it never asked to run"
+  # Bytes that are no program: refused, nothing changes. Sent while that
+  # session holds on: nobody's update waits for another's.
   out=$(R update httpd "$dir/notes.txt") && step "a text file was installed as httpd"
   grep -q 'NotAProgram' <<<"$out" || step "a text file as httpd was refused, but not as no program: $out"
+  kill $prober 2>/dev/null; wait $prober 2>/dev/null
   # A program that faults at once: the one before it comes back.
   R update httpd "$dir/httpd-faults.elf" >/dev/null || step "update httpd to the faulting program was refused"
   R start httpd >/dev/null
-  until_seen "^init: httpd's new program failed within 10 s of its update" && until_seen '^init: httpd started again on the program before its update' \
-    && until_seen '^httpd: listening on port 80' 3 || step "the faulting update of httpd was not undone"
+  until_seen "^init: httpd's new program failed before it served" 2 && until_seen '^init: httpd started again on the program before its update' 2 \
+    && until_seen '^httpd: listening on port 80' 4 || step "the faulting update of httpd was not undone"
   out=$(R services); grep -qE "^httpd +running .* $(hash_of "$dir/httpd-new.elf") \(updated\)\$" <<<"$out" || step "after the faulting update, httpd does not run the program before it: $(grep '^httpd' <<<"$out")"
   out=$("$httpload" "$web" 64 4 2>&1) || step "httpd did not serve after its faulting update was undone: $out"
-  until_seen '^init: httpd ended' 2 || step "httpd did not end in order after the undone update"
+  until_seen '^init: httpd ended$' 2 || step "httpd did not end in order after the undone update"
   R revert httpd >/dev/null || step "revert httpd was refused"
   out=$(R services); grep -qE "^httpd +stopped .* $(hash_of "$httpd")\$" <<<"$out" || step "after revert, httpd does not have the boot archive's program: $(grep '^httpd' <<<"$out")"
   # The session's own service: its update ends the session that asked for
   # it, and the client asks a new one what runs.
   { cat "$(system_program "$arch" remote "$log")"; printf 'a new version of remote\n'; } >"$dir/remote-new.elf"
+  listening=$(tr -d '\r' <"$serial" | grep -ac '^remote: listening on port 22')
   out=$(R update remote "$dir/remote-new.elf") && grep -q '^remote runs the program sent' <<<"$out" || step "update remote (the session's own service): $out"
   until_seen '^init: remote started on its new program' || step "remote was not started on its new program"
+  # Its program changed, so its kept page (each owner's newest first message)
+  # is empty, as after any boot: a first message of the watcher's (who has
+  # not connected since) recorded an hour ago is refused by the machine's
+  # clock all the same (the review of 2026-11-25: before, it was answered).
+  until_seen '^remote: listening on port 22' $((listening + 1)) || step "remote did not listen again after its update"
+  "$probe" -i "$dir/watcher.key" -m "$machine" "127.0.0.1:$port" old-first 3600 >"$dir/old-first.out" 2>&1 \
+    || step "a first message made an hour ago was answered once the newest times were lost: $(tail -1 "$dir/old-first.out")"
+  until_seen "made [0-9]* s before this machine's clock" || step "the machine did not say it refused a first message made an hour ago"
+  # A service that keeps a page across restarts (the network stack: its
+  # lease, its connections) gets an empty one with a new program: nothing an
+  # instance wrote there is trusted by the program put in its place (the
+  # 2026-11-24 audit: the page survived updates). The session's connection
+  # ends with the stack it runs on, and the new stack says so to its peer:
+  # the page of the program before it is handed to the new one read-only,
+  # as another program's, and the stack takes from it only the connections
+  # to reset, as it does after it was killed. The owner's tool, which holds
+  # the session the update was asked on, is reset once the new stack holds
+  # its address and reaches the router, which the stack says, and the tool
+  # has ended 1 s after that (before: nothing reset it, and the tool waited
+  # out its two minutes); the next command connects anew. Not 1 s from the
+  # lease: the router's answer between is the guest's own progress, which a
+  # loaded host delays (a --fast run on 2026-11-26, and hosted runners).
+  { cat "$(system_program "$arch" netd "$log")"; printf 'a new version of netd\n'; } >"$dir/netd-new.elf"
+  local resets; resets=$(tr -d '\r' <"$serial" | grep -ac '^netd: the connections of the stack before it are reset')
+  R update netd "$dir/netd-new.elf" >"$dir/update-netd.out" 2>&1 &
+  local updater=$!
+  { until_seen "^init: netd's kept page starts empty for its new program" && until_seen '^init: netd started on its new program'; } \
+    || step "netd's new program was not given an empty kept page"
+  until_seen '^netd: [0-9.]+/[0-9]+ from DHCP server' 2 || step "netd's new program did not take a lease of its own"
+  until_seen '^netd: the connections of the stack before it are reset' $((resets + 1)) || step "the new stack did not say it reset the connections of the one before it"
+  for i in $(seq 10); do kill -0 $updater 2>/dev/null || break; sleep 0.1; done
+  if kill -0 $updater 2>/dev/null; then
+    step "the session netd's update was asked on was not reset within 1 s of the new stack saying it reset the old one's connections: the owner's tool still waits"
+    kill $updater 2>/dev/null
+  fi
+  wait $updater 2>/dev/null
+  serial_has "$serial" -E '^netd: [0-9]+ connections of the program before this one to reset' || step "the new stack did not say it resets the connections of the program before it"
   R shutdown >/dev/null
   wait $qemu; rc=$?
+  # What the shell's `log remote` sent to the console port: the escaped
+  # name as text, and from the command on no escape, bell or lone carriage
+  # return (the firmware's own escapes come before it).
+  out=$(tr -d '\0' <"$serial.port"); out=${out#*silica> log remote}
+  [[ $out == *'start httpd?]0;owned??forged line'* && $out != *$'\e'* && $out != *$'\a'* ]] && ! lone_cr "$out" \
+    || step "the shell's log reached the console port with its escapes: $(grep -a 'owned' <<<"$out" | cat -v | head -1) (port: $serial.port)"
   if [ -n "$why" ]; then record fail "$suite" remote "$why (serial: $serial)"
   elif [ $rc != 0 ] || ! serial_has "$serial" '^init: shutting down' || ! serial_has "$serial" '^remote: test-owner asks the service manager to shut down the machine'; then
     record fail "$suite" remote "the machine was not shut down from the session (exit status $rc; serial: $serial)"
@@ -919,16 +1371,22 @@ run_remote() {
 # advertising a 536-byte MSS and an 8 KiB window (`ip route ... advmss
 # window`, so netd must segment small and wait for the window); and with
 # both directions delayed 1 ms, 2% lost, 1% duplicated and 10% reordered
-# (netem, the guest's direction through an ifb). Then httpd is asked to end
-# and the machine turns off. Needs passwordless sudo, as the benchmark's tap
-# does; without it the test fails and says so.
+# (netem, the guest's direction through an ifb). Then a hostile host on the
+# link (forged ARP, a flood of SYNs that never finish; below). Then httpd is
+# asked to end and the machine turns off. Needs passwordless sudo, as the
+# benchmark's tap does, and socat; without them the test fails and says so.
 run_interop() {
-  local arch=$1 suite=$2 log img serial rc qemu tool n host guest tap ifb why="" out i
+  local arch=$1 suite=$2 log img serial rc qemu tool n host guest tap ifb why="" out i rmt dir
   log=$(logfile "$suite" build.interop)
   sudo -n true 2>/dev/null || { record fail "$suite" interop "needs passwordless sudo for its tap interface and the impairments on it"; return 1; }
   tool=$(host_tool tcpinterop "$log") || { record fail "$suite" interop "tcpinterop did not build: $(first_error "$log") (log: $log)"; return 1; }
   n=$((20 + ($$ + RANDOM) % 200)); host=10.211.$n.1; guest=10.211.$n.2; tap=siop$n; ifb=sifb$n
-  img=$(build_system_image "$arch" "$log" "checks=http netd.address=$guest/24 netd.router=$host") \
+  # The remote service listens too (a key and an owner of this run's own):
+  # a second listener, for the flood on one that must not cost the other.
+  dir=${UNIT_DIR:-$RUN}/interop; rm -rf "$dir"; mkdir -p "$dir"
+  rmt=$(host_tool silica-remote "$log") && "$rmt" keygen "$dir/machine.key" >/dev/null && printf '%s interop\n' "$("$rmt" keygen "$dir/owner.key")" >"$dir/owners" \
+    || { record fail "$suite" interop "silica-remote did not build or make keys: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
     || { record fail "$suite" interop "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   iop_down() {
     sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
@@ -965,6 +1423,39 @@ run_interop() {
     phase lossy
   else why=${why:-"could not impair the path (tc netem, ifb)"}; fi
   sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
+  # A hostile host on the link (host-tools' nethostile; socat, as root, puts
+  # each datagram it sends on the tap as a frame): ARP packets naming the
+  # router at another hardware address, then 300 SYNs from addresses that
+  # never finish the handshake, then 400 short connections the guest closes
+  # first (each in TIME-WAIT there for a minute). After each the guest must
+  # still answer the host (before 2026-11-25 one forged ARP packet sent its
+  # answers astray, the SYNs filled httpd's backlog, and TIME-WAIT held
+  # places in the table of live connections).
+  local hostile relay rport c
+  if ! command -v socat >/dev/null; then why=${why:-"needs socat to put forged frames on the tap"}
+  elif ! hostile=$(host_tool nethostile "$log"); then why=${why:-"nethostile did not build: $(first_error "$log")"}
+  elif ! rport=$(host_ports 1); then why=${why:-"no free host port for the frame relay"}
+  else
+    sudo -n socat -u "UDP-RECV:$rport,bind=127.0.0.1" "INTERFACE:$tap" 2>>"${serial%.log}.interop" &
+    relay=$!
+    sleep 0.3
+    for c in arp synflood timewait shutwindow crosslisten; do
+      # shutwindow: the host advertises at most 4 KiB on this route, so an
+      # answer it never reads shuts its window with most of it unsent.
+      [ $c != shutwindow ] || sudo -n ip route replace "$guest/32" dev "$tap" window 4096 || why=${why:-"could not clamp the route's window"}
+      # crosslisten: the host's frames reach the guest 200 ms late, so a
+      # handshake's SYN, then the flood, then its ACK arrive in that order.
+      if [ $c = crosslisten ]; then
+        sudo -n ip route del "$guest/32" dev "$tap" 2>/dev/null
+        sudo -n tc qdisc add dev "$tap" root netem delay 200ms || why=${why:-"could not delay the path (tc netem)"}
+      fi
+      out=$("$hostile" "127.0.0.1:$rport" "$guest" "$host" "$c" 2>&1)
+      printf '%s\n' "$out" >>"${serial%.log}.interop"
+      [ -n "$why" ] || why=$(grep -m1 '^ERROR' <<<"$out")
+    done
+    sudo -n ip route del "$guest/32" dev "$tap" 2>/dev/null; sudo -n tc qdisc del dev "$tap" root 2>/dev/null
+    sudo -n kill "$relay" 2>/dev/null; wait "$relay" 2>/dev/null
+  fi
   phase quit
   wait $qemu; rc=$?
   iop_down
@@ -1020,8 +1511,16 @@ run_idle() {
 # run_ntp <arch> <suite>: the wall clock set from a time server (M4: "syncs
 # time"). A server on the host's loopback (host-tools' sntpd), reached from the
 # guest as 10.0.2.2, answers with the host's time plus 1,000 s; the system
-# is booted with `netd.ntp=10.0.2.2:<port>`. The network stack must say it
-# set the clock, by about +1,000 s, to the server's time (within 3 s).
+# is booted with `netd.ntp=10.0.2.2:<port>`. The server's first two answers
+# are ones to refuse (sntpd's bad=2: one whose round trip took 1.5 s, one
+# sent before it was received), and the network stack must say it did not
+# believe either (before 2026-11-25 it set the clock from the first). Then
+# it must say it set the clock, by about +1,000 s, to the server's time
+# (within 3 s). With the first bad answer the server forges one at once
+# whose origin is not the question's, ten years ahead (a blind spoofer's):
+# the clock must not move by it. No question may carry the guest's clock
+# for its answer to echo (a number anyone can guess), and no two questions
+# may come from one port.
 run_ntp_e1000e() { NIC=e1000e run_ntp "$@"; }
 run_ntp() {
   local arch=$1 suite=$2 log img serial rc port server line at want moved sntpd nic=${NIC:-virtio} name=ntp
@@ -1031,7 +1530,7 @@ run_ntp() {
   img=$(build_system_image "$arch" "$log" "checks= netd.ntp=10.0.2.2:$port") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   sntpd=$(host_tool sntpd "$log") || { record fail "$suite" "$name" "sntpd did not build: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
-  "$sntpd" "$port" 1000 >"${serial%.log}.sntpd" 2>&1 &
+  "$sntpd" "$port" 1000 bad=2 >"${serial%.log}.sntpd" 2>&1 &
   server=$!
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" \
     --until "^netd: the wall clock is .* from 10\\.0\\.2\\.2:$port " >"$serial.qemu" 2>&1
@@ -1044,8 +1543,58 @@ run_ntp() {
   if [ $rc != 0 ] || [ -z "$at" ]; then record fail "$suite" "$name" "the clock was never set from the server: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|netd: )' | cut -c1-120) (exit status $rc; serial: $serial)"
   elif [ $((at - want)) -gt 3 ] || [ $((want - at)) -gt 3 ] || [ "${moved#+}" -lt 997000 ] || [ "${moved#+}" -gt 1003000 ]; then
     record fail "$suite" "$name" "set to $at, moved ${moved} ms, against the server's $want and +1000000 ms (serial: $serial)"
+  elif [ "$(tr -d '\r' <"$serial" | grep -c -a "^netd: a time server's answer .*; not believed")" != 2 ]; then
+    record fail "$suite" "$name" "netd did not refuse the server's two bad answers before it believed a good one (serial: $serial; server: ${serial%.log}.sntpd)"
+  elif grep -q 'carries the clock' "${serial%.log}.sntpd"; then
+    record fail "$suite" "$name" "a question carried the guest's clock for its answer to echo, which anyone can guess (server: ${serial%.log}.sntpd)"
+  elif [ "$(grep -c '^sntpd: a question from port' "${serial%.log}.sntpd")" != "$(grep '^sntpd: a question from port' "${serial%.log}.sntpd" | sort -u | wc -l)" ]; then
+    record fail "$suite" "$name" "two questions came from the same port: a spoofer knows where to send (server: ${serial%.log}.sntpd)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" "$name" "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
   else record pass "$suite" "$name"; fi
+}
+
+# run_watchdog <arch> <suite>: a machine whose service manager hangs is reset
+# by its hardware watchdog (QEMU's 6300ESB). The service manager pets it from
+# its own loop; booted with checks=watchdog it stops petting and answering
+# once the watchdog is found, as a hung one would. The watchdog must reset the
+# machine and the next boot must say the watchdog did it. Before, nothing
+# drove the device and the hung machine stayed hung.
+run_watchdog() {
+  local arch=$1 suite=$2 log img serial rc boots
+  # First, a machine that runs as usual for 75 s, past the watchdog's 30 s:
+  # petted, it is never reset. Its owner restarts the device manager on the
+  # way (the shell's `restart devmgr`): the watchdog's driver ends with it
+  # and a new one starts, which the service manager must take and pet as it
+  # did the first. (Before, the service manager asked the device manager
+  # once, at boot, to be told of watchdogs; the new device manager had
+  # never been asked, nobody petted the new driver's watchdog, and the
+  # machine was reset 30 s after any restart of the device manager.)
+  log=$(logfile "$suite" build.watchdog_petted)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" watchdog "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" watchdog_petted)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --reboot --device i6300esb --timeout 75 \
+    --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --type '^init: the watchdog resets this machine=restart devmgr\n' >"$serial.qemu" 2>&1
+  boots=$(tr -d '\r' <"$serial" | grep -ac '^init: the wall clock')
+  if ! serial_has "$serial" '^init: the watchdog resets this machine' || [ "$boots" != 1 ]; then
+    record fail "$suite" watchdog "a machine whose service manager pets its watchdog booted $boots times in 75 s, or never took the watchdog (serial: $serial)"; return 1
+  fi
+  if ! serial_has "$serial" '^init: devmgr restarted, as asked' || [ "$(tr -d '\r' <"$serial" | grep -ac '^init: the watchdog resets this machine')" != 2 ]; then
+    record fail "$suite" watchdog "the device manager was restarted and the service manager did not take the new watchdog driver, or the restart never happened (serial: $serial)"; return 1
+  fi
+  log=$(logfile "$suite" build.watchdog)
+  img=$(build_system_image "$arch" "$log" "checks=watchdog") || { record fail "$suite" watchdog "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" watchdog)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --reboot --device i6300esb --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
+    --until '^init: the last boot was reset by the watchdog' >"$serial.qemu" 2>&1
+  rc=$?
+  if ! serial_has "$serial" '^init: the watchdog resets this machine'; then
+    record fail "$suite" watchdog "the service manager never took the watchdog: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)|watchdog' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! serial_has "$serial" '^init: no more pets and no more answers'; then
+    record fail "$suite" watchdog "the service manager did not stop petting (serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^init: the last boot was reset by the watchdog'; then
+    record fail "$suite" watchdog "the hung machine was not reset by its watchdog, or the next boot did not say so (exit status $rc; serial: $serial)"
+  else record pass "$suite" watchdog; fi
 }
 
 # run_shutdown <arch> <suite>: the power button shuts the system down in
@@ -1063,9 +1612,116 @@ run_shutdown() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
     --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
   rc=$?
-  if [ $rc = 0 ] && serial_has "$serial" '^init: shutting down' && serial_has "$serial" '^init: devmgr stopped' \
+  # The services' last lines reach the console before the log service goes,
+  # with nothing waiting out a limit for them: the log service is asked to
+  # end, puts what its rings hold on the console and exits, and its exit is
+  # what the service manager waits for (before: a flush with a 2 s wait,
+  # which every shutdown waited out while the log service faulted on a ring
+  # whose drivers had ended and the service manager did not answer it).
+  if ! serial_has "$serial" '^init: logd ended in order'; then
+    record fail "$suite" shutdown "the log service did not end in order: $(tr -d '\r' <"$serial" | grep -m1 -a '^init: logd' | cut -c1-120) (serial: $serial)"
+  elif [ $rc = 0 ] && serial_has "$serial" '^init: shutting down' && serial_has "$serial" '^init: devmgr stopped' \
       && ! serial_has "$serial" '^ERROR'; then record pass "$suite" shutdown
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+}
+
+# run_shutdown_flush <arch> <suite>: turning the machine off ends the disks'
+# drivers in order (the review of 2026-11-25: every driver was destroyed where
+# it stood, a power cut for the devices' write caches). With an NVMe
+# controller beside the virtio boot disk, the power button is pressed: the
+# device manager asks its block drivers to end; virtio-blk flushes its write
+# cache; NVMe flushes and performs the controller's normal shutdown (CC.SHN,
+# until CSTS.SHST says it is done). QEMU's own trace must show the
+# controller's flush and shutdown; the drivers and the device manager must say
+# they ended in order; the machine must turn off.
+run_shutdown_flush_owner() { run_shutdown_flush "$1" "$2" owner; }
+run_shutdown_flush() {
+  local arch=$1 suite=$2 mode=${3:-power} name=shutdown_flush log img serial rc why=""
+  local -a how=(--on '^devmgr: the power button is armed$=system_powerdown')
+  # The owner's way: `shutdown` typed at the shell, the service manager then
+  # asking the device manager to end (the power button's way, the device
+  # manager ends its drivers before it asks).
+  [ "$mode" = owner ] && name=shutdown_flush_owner how=(--console-port "$(logfile "$suite" shutdown_flush_owner).port" --port-type '^console: .* and the console port=shutdown\r')
+  log=$(logfile "$suite" build.$name)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  nvme_machine "" "$img"
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" "${NVME_MACHINE[@]}" \
+    --trace pci_nvme_flush_ns --trace pci_nvme_mmio_shutdown_set \
+    "${how[@]}" >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc != 0 ] || ! serial_has "$serial" '^init: shutting down'; then why="the machine did not turn off in order (exit status $rc)"
+  elif ! grep -q '^pci_nvme_flush_ns' "$serial.trace" 2>/dev/null; then why="the NVMe controller was never told to flush (QEMU trace: $serial.trace)"
+  elif ! grep -q '^pci_nvme_mmio_shutdown_set' "$serial.trace" 2>/dev/null; then why="the NVMe controller was never shut down (CC.SHN; QEMU trace: $serial.trace)"
+  elif [ "$mode" = power ] && ! serial_has "$serial" '^nvme: the controller shut down in order'; then why="the NVMe controller did not report its shutdown complete"
+  elif [ "$mode" = power ] && [ "$(tr -d '\r' <"$serial" | grep -ac '^block: the driver ended in order, its write cache flushed')" -lt 2 ]; then why="the two disks' drivers did not both flush and end in order"
+  elif [ "$mode" = power ] && [ "$(tr -d '\r' <"$serial" | grep -ac '^devmgr: .* ended in order')" -lt 2 ]; then why="the device manager did not see both disks' drivers end in order"
+  elif [ "$mode" = owner ] && ! serial_has "$serial" '^init: devmgr ended in order'; then why="the device manager was not asked to end, or did not end in order"
+  elif serial_has "$serial" '^ERROR'; then why="$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
+  fi
+  if [ -z "$why" ]; then record pass "$suite" "$name"; else record fail "$suite" "$name" "$why (serial: $serial)"; fi
+}
+
+# run_server_image <arch> <suite>: the minimal server image (build_server_image)
+# holds what a server runs and nothing that tests it (the 2026-11-24 audit:
+# every image carried the checks, the test programs and a hostile driver,
+# any of which a service-manager holder could start). Its archive must hold
+# exactly init, the services that start at boot and the drivers; booted with
+# a network, it must come up on it, run no check, and turn off in order when
+# the power button is pressed.
+#
+# And it holds no test hook (the audit again: the kernel panicked on
+# `panic=test`, the loader and kernel wrote a debug port on `exit=port`,
+# whatever the image). Every piece of it is built without the `harness`
+# feature (lib/build.sh), which is checked two ways:
+# - HOOK_WORDS: text only a hook's code holds. None may occur in any file the
+#   image is made of.
+# - HOOK_CMDLINE: words that make a test image fail on purpose, put on this
+#   image's command line. It must come up and turn off as without them. Only
+#   words whose obeying fails this test belong here (never one that would
+#   make a broken image pass, as `checks=` would).
+# A package that gains a hook adds its words to both.
+HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ')
+# The kernel's panic word, and the device manager's: a fault for the
+# network driver to commit on purpose and another program in that driver's
+# place, each as a bare word and as the device manager's own option (the
+# 2026-11-24 audit: production drivers obeyed fault-injection hooks from the
+# boot string, and `driver=` gave any program in the archive a device's
+# authority).
+HOOK_CMDLINE='panic=test inject=virtio-net:reset@1 devmgr.inject=virtio-net:reset@1 driver=1af4:1041=logd devmgr.driver=1af4:1041=logd'
+run_server_image() {
+  local arch=$1 suite=$2 log img serial rc sys want got extra w f
+  log=$(logfile "$suite" build.server_image)
+  img=$(build_server_image "$arch" "$log" "$HOOK_CMDLINE") || { record fail "$suite" server_image "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  for w in "${HOOK_WORDS[@]}"; do
+    while read -r f; do
+      if grep -qaF -e "$w" "$f"; then record fail "$suite" server_image "a test hook is in the server image: '$w' occurs in its ${f##*/}"; return 1; fi
+    done <"$img.packed"
+  done
+  sys=${img%/*}
+  want=$( { echo root; echo drivers; echo services; grep -vx init "$img.programs"; } | LC_ALL=C sort -u)
+  got=$(LC_ALL=C sort -u "$img.entries")
+  extra=$(comm -13 <(echo "$want") <(echo "$got") | tr '\n' ' ')
+  if [ "$want" != "$got" ]; then
+    record fail "$suite" server_image "the server image's archive is not init, the boot services and the drivers: extra [${extra}] missing [$(comm -23 <(echo "$want") <(echo "$got") | tr '\n' ' ')]"; return 1
+  fi
+  if grep -qE '^(systest|stress|virtio-rogue|hello|blkcheck|svcload|httpd)$' <<<"$got" || grep -q 'start=check:' "$img.services"; then
+    record fail "$suite" server_image "a test program or check service is in the server image"; return 1
+  fi
+  # No debug-exit device: this image knows of none, and turns the machine off itself.
+  serial=$(logfile "$suite" server_image)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user --no-exit-device \
+    --on '^netd: the router 10\.0\.2\.2 answers a ping=system_powerdown' >"$serial.qemu" 2>&1
+  rc=$?
+  if serial_has "$serial" '^inject: '; then
+    record fail "$suite" server_image "a driver of the server image armed a fault the boot command line named: $(tr -d '\r' <"$serial" | grep -m1 -a '^inject: ' | cut -c1-100) (serial: $serial)"
+  elif ! serial_has "$serial" '^devmgr: [0-9a-f:.]* 1af4:1041 .*: virtio-net$'; then
+    record fail "$suite" server_image "the boot command line chose the network card's driver: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: [0-9a-f:.]* 1af4:1041 ' | cut -c1-120) (serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping' || ! serial_has "$serial" '^init: shutting down'; then
+    record fail "$suite" server_image "it did not come up on the network and turn off in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif serial_has "$serial" '^init: hello|passed$'; then record fail "$suite" server_image "a check ran on the server image (serial: $serial)"
+  elif serial_has "$serial" '^ERROR'; then record fail "$suite" server_image "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
+  else record pass "$suite" server_image; fi
 }
 
 # run_console <arch> <suite>: someone at the machine. It boots with a
@@ -1193,8 +1849,10 @@ run_power() {
 }
 
 # run_rogue <arch> <suite>: what a driver cannot do. The system image boots
-# with a hostile driver in place of the disk's (driver=...=virtio-rogue), on
-# the machine with an IOMMU. One result per check: the driver's own `TEST
+# with a hostile driver in place of the disk's (its image is built with the
+# line `pci <ids> virtio-rogue` first in its drivers list, SYSTEM_DRIVERS:
+# which program gets a device is the checked archive's to say, never the
+# boot command line's), on the machine with an IOMMU. One result per check: the driver's own `TEST
 # <name> PASS` lines, and three it cannot see for itself, taken from who
 # enforces them: the kernel's line for each access and each interrupt
 # message the IOMMU refused, and
@@ -1253,15 +1911,23 @@ rogue_on() {
   local arch=$1 suite=$2 sfx=$3 id=$4 at=$5 log img serial rc name text want
   shift 5
   log=$(logfile "$suite" "build.rogue$sfx")
-  img=$(build_system_image "$arch" "$log" "driver=$id=virtio-rogue checks=") || { record fail "$suite" "rogue$sfx" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(SYSTEM_DRIVERS="pci $id virtio-rogue" build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "rogue$sfx" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "rogue$sfx")
   # The system stays up; the run ends when the driver's second run is over.
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
     --until "^devmgr: virtio-rogue for $at ended with status 0" "$@" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
+  # The write to the driver's read-only page: the driver's PASS says its
+  # bytes did not change; the kernel's line says the device tried and was
+  # refused (without it the request may have failed for any other reason).
+  local ro
+  ro=$(sed -n 's/^virtio-rogue: told the device to write its read-only page at \(0x[0-9a-f]*\):.*/\1/p' <<<"$text" | head -1)
+  if [ -n "$ro" ] && grep -qx "TEST rogue_write_read_only PASS" <<<"$text" \
+    && grep -qE "^kernel: device $at was refused a write at $ro " <<<"$text"; then record pass "$suite" "rogue_write_read_only$sfx"
+  else record fail "$suite" "rogue_write_read_only$sfx" "no PASS, or no kernel line refusing the device's write at its read-only page ${ro:-(address not said)} (serial: $serial)"; fi
   for name in rogue_other_device rogue_other_interrupt rogue_physical_address rogue_address_above_the_top \
-              rogue_write_read_only rogue_recovers rogue_restart; do
+              rogue_recovers rogue_faults_reported rogue_restart; do
     if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name$sfx"
     else record fail "$suite" "$name$sfx" "$(grep -m1 -a "^ERROR: virtio-rogue: $name" <<<"$text" | cut -c1-160) (no PASS line; serial: $serial)"; fi
   done
@@ -1274,6 +1940,7 @@ rogue_on() {
   done <<'CHECKS'
 rogue_write_unmapped|^kernel: device % was refused a write at 0x100000 
 rogue_read_unmapped|^kernel: device % was refused a read at 0x200000 
+rogue_late_fault_reported|^kernel: device % was refused a write at 0x3f0000 
 rogue_log_ring|^logd: the log ring of devmgr/virtio-rogue@% made no sense; what it held is skipped$
 rogue_config_space|^devmgr: virtio-rogue for % touched memory it may not \(page fault\)
 rogue_interrupt_other_entry_refused|^kernel: device % was refused interrupt entry 9 \(IOMMU fault reason 0x26\)$
@@ -1329,4 +1996,102 @@ run_systest() {
   [ -x "$TOOLS/symbolize.sh" ] && "$TOOLS/symbolize.sh" --arch "$arch" "$serial" >"$serial.symbolized" 2>&1
   record fail "$suite" systest "the run did not end with SYSTEST OK: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   return 1
+}
+
+# run_nvme_admin_missed <arch> <suite>: an NVMe controller whose first admin
+# command completes without the driver hearing its interrupt
+# (devmgr.inject=nvme:admin_missed@1). The driver must find the completion by
+# looking at the queue itself, within 100 ms (it slept out the whole 5 s
+# admin timeout before), bring the controller up and pass blkcheck, without
+# being started again.
+run_nvme_admin_missed() {
+  local arch=$1 suite=$2 log img serial rc text us name=nvme_admin_missed
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=block devmgr.inject=nvme:admin_missed@1") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  nvme_machine "" "$(build_system_image "$arch" "$(logfile "$suite" build.$name.disk)")"
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" "${NVME_MACHINE[@]}" >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  us=$(sed -n 's/^nvme: .*its completion came without its interrupt; found by polling after \([0-9]*\) us$/\1/p' <<<"$text" | head -1)
+  if [ $rc != 0 ] || ! grep -qx 'BOOT OK' <<<"$text"; then record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! grep -Fxq "inject: AdminMissed committed" <<<"$text"; then record fail "$suite" "$name" "the driver never lost the admin interrupt (serial: $serial)"
+  elif [ -z "$us" ] || [ "$us" -ge 100000 ]; then record fail "$suite" "$name" "the admin completion was not found by polling within 100 ms (${us:-never}; serial: $serial)"
+  elif [ "$(grep -c '^TEST nvme\.[a-z_]* PASS' <<<"$text")" != 5 ]; then record fail "$suite" "$name" "blkcheck did not pass every check on the disk (serial: $serial)"
+  elif grep -q "^devmgr: nvme for .* started again" <<<"$text"; then record fail "$suite" "$name" "the driver was started again (serial: $serial)"
+  else record pass "$suite" "$name"; fi
+}
+
+# run_hostile_clients <arch> <suite>: clients that attack the drivers and
+# the device manager with what any client holds (blkcheck's `hostile`, after
+# its disk checks), on a machine with a display, a keyboard and a console
+# port the console is using: a second client taking any of them over, a
+# client opening and watching 9000 times with a fresh notification each,
+# registering and withdrawing memory 5000 times, and breaking its ring with
+# 32 requests on the device. Each must fail; and the kernel must never have
+# refused the disk a DMA write (the memory of the broken ring's requests
+# was not pulled from under the device).
+run_hostile_clients() {
+  local arch=$1 suite=$2 log img serial rc text name port
+  log=$(logfile "$suite" build.hostile_clients)
+  img=$(build_system_image "$arch" "$log" "checks=block blkcheck.churn=120000") || { record fail "$suite" hostile_clients "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" hostile_clients)
+  port=${serial%.log}.port
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --no-exit-device \
+    --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --console-port "$port" \
+    --until '^init: blkcheck (passed|ended with status)' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  for name in device_manager_bounded dma_churn broken_ring_in_flight takeover_input takeover_port takeover_display; do
+    if grep -qx "TEST hostile.$name PASS" <<<"$text"; then record pass "$suite" "hostile_$name"
+    else record fail "$suite" "hostile_$name" "no PASS line: $(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+  done
+  if grep -qE '^kernel: device 00:01\.0 was refused' <<<"$text"; then
+    record fail "$suite" hostile_no_dma_fault "the disk was refused a DMA access: $(grep -m1 -E '^kernel: device 00:01\.0 was refused' <<<"$text") (serial: $serial)"
+  elif grep -q '^blkcheck: a client broke its ring' <<<"$text"; then record pass "$suite" hostile_no_dma_fault
+  else record fail "$suite" hostile_no_dma_fault "the ring was never broken (serial: $serial)"; fi
+}
+
+
+# run_unstartable_driver <arch> <suite>: a device whose driver cannot be
+# started (its image's drivers list names the boot archive's services list
+# as its program, SYSTEM_DRIVERS). The
+# device manager enables memory decoding, bus mastering and MSI-X just
+# before the start; when the start fails, the device must be left unable to
+# reach memory (bus mastering off, read back from its command register) and
+# the system must come up.
+# (The device manager says so after the system's BOOT OK, so the run waits
+# for its line, not for BOOT OK: stopping at BOOT OK raced it.)
+run_unstartable_driver() {
+  local arch=$1 suite=$2 log img serial rc text port name=unstartable_driver
+  log=$(logfile "$suite" "build.$name")
+  img=$(SYSTEM_DRIVERS="pci 1af4:1043 services" build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  port=${serial%.log}.port
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --console-port "$port" \
+    --until '^devmgr: cannot start services' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if grep -qE '^devmgr: cannot start services: .* left with bus mastering off ' <<<"$text" && grep -qx 'BOOT OK' <<<"$text"; then record pass "$suite" "$name"
+  else record fail "$suite" "$name" "the device was not left with bus mastering off: $(grep -m1 -a '^devmgr: cannot start' <<<"$text" | cut -c1-160) (exit status $rc; serial: $serial)"; fi
+}
+
+# run_entropy_broken_device <arch> <suite>: a machine with no source of
+# randomness the loader trusts (no RDRAND or RDSEED; its owner accepts the
+# boot: entropy=accept) and a virtio entropy device that gives only zeros
+# (a broken or hostile device). The entropy service mixes the zeros in but
+# must not count them: it refuses to answer (`not_seeded`) rather than give
+# guessable bytes, and says why.
+run_entropy_broken_device() {
+  local arch=$1 suite=$2 log img serial rc text name=entropy_broken_device
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=entropy entropy=accept entropycheck.expect=unseeded") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --cpu EPYC,+x2apic,+tsc-deadline,+invtsc,+xsave,+xgetbv1,-rdrand,-rdseed \
+    --object rng-random,id=zero,filename=/dev/zero --device virtio-rng-pci,rng=zero,disable-legacy=on,iommu_platform=on >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if grep -qx 'TEST entropy.a_broken_device_does_not_seed PASS' <<<"$text" && grep -q "^entropy: device .*failed a health test" <<<"$text"; then record pass "$suite" "$name"
+  else record fail "$suite" "$name" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-160) (exit status $rc; serial: $serial)"; fi
 }
