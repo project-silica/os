@@ -830,6 +830,7 @@ run_http() {
   else record pass "$suite" "$name"; fi
 }
 
+
 # run_remote <arch> <suite>: remote management (M4: "accepts a remote
 # management session that can inspect, restart and update any service").
 # The image is provisioned as an installer would: a machine key and one
@@ -843,14 +844,14 @@ run_http() {
 # reverts it to the boot archive's; a stranger's key and a wrong machine key
 # get nothing. Then it shuts the machine down. Each step's failure is said.
 run_remote() {
-  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i
+  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i probe watcher prober n0
   log=$(logfile "$suite" build.remote)
-  rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
+  rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") && probe=$(host_tool remoteprobe "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
   dir=${UNIT_DIR:-$RUN}/remote; rm -rf "$dir"; mkdir -p "$dir"
-  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") \
+  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") \
     || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
-  printf '# who may manage this machine\n%s test-owner\n' "$owner" >"$dir/owners"
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed") \
+  printf '# who may manage this machine\n%s test-owner\n%s watcher observe\n' "$owner" "$watcher" >"$dir/owners"
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed remote.idle=6") \
     && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   # Two new programs for httpd: the same code with bytes after it (an ELF
   # file's loader reads only what its headers name), and one whose entry
@@ -862,7 +863,8 @@ run_remote() {
   port=$(host_ports 2) || { record fail "$suite" remote "no free host ports below the ephemeral range"; return 1; }
   web=$((port + 1))
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
-    --net "user:$port-22,$web-80" --nic "${NIC:-virtio}" >"$serial.qemu" 2>&1 &
+    --net "user:$port-22,$web-80" --nic "${NIC:-virtio}" --console-port "$serial.port" \
+    --port-type '^remote: test-owner asks the service manager to start httpd=log remote\r' >"$serial.qemu" 2>&1 &
   qemu=$!
   for i in $(seq 600); do
     serial_has "$serial" '^remote: listening on port 22' && break
@@ -880,6 +882,9 @@ run_remote() {
   until_seen() { local k; for k in $(seq 300); do [ "$(tr -d '\r' <"$serial" | grep -acE "$1")" -ge "${2:-1}" ] && return 0; sleep 0.1; done; return 1; }
   step() { [ -n "$why" ] || why=$1; }
   hash_of() { "$rmt" hash "$1" | cut -c1-16; }
+  # lone_cr <text>: whether a carriage return in it ends no line (a command's
+  # output lost its last line end to $(...)).
+  lone_cr() { local t="$1"$'\n'; t=${t//$'\r\n'/}; [[ $t == *$'\r'* ]]; }
   out=$(R services); printf '%s\n' "$out" >"$dir/services.1"
   grep -qE '^remote +running' <<<"$out" && grep -qE '^netd +running .* silica.net.Tcp' <<<"$out" || step "services did not list remote and netd running: $(head -3 <<<"$out" | tr '\n' ' ')"
   grep -qE "^httpd +stopped .* $(hash_of "$httpd")\$" <<<"$out" || step "services did not show httpd stopped with the boot archive's program $(hash_of "$httpd")"
@@ -895,6 +900,57 @@ run_remote() {
   until_seen "is no owner's" || step "the machine did not say that it closed on a stranger's key"
   out=$("$rmt" -i "$dir/owner.key" -m "$stranger" "127.0.0.1:$port" services 2>&1) && step "a session to a wrong machine key was served: $out"
   until_seen 'its handshake did not open' || step "the machine did not say that a handshake for another key did not open"
+  # Someone who recorded an owner's first message replays it on nine
+  # connections, each then trickling a frame that never ends: the owner is
+  # still served, nobody is said to have connected but the owner, and the
+  # machine answers no replay with a byte, closing each at once: as a
+  # replay (its time is no later than the last taken from the owner), or as
+  # a stranger making room for newer ones (before: each replay was answered
+  # and an open session, held an hour by any byte, eight of them locking
+  # the owners out).
+  n0=$(tr -d '\r' <"$serial" | grep -ac '^remote: test-owner connected from')
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" replay 9 14 >"$dir/replay.out" 2>&1 &
+  prober=$!
+  sleep 1
+  out=$(R services) || step "the owner was not served while nine replayed handshakes were held: $out"
+  wait $prober || step "replayed handshakes: $(tail -1 "$dir/replay.out")"
+  [ "$(tr -d '\r' <"$serial" | grep -ac 'made no later than the last taken from them')" -ge 1 ] \
+    || step "the machine did not refuse the replayed handshakes as replays: $(tail -1 "$dir/replay.out")"
+  [ "$(tr -d '\r' <"$serial" | grep -ac '^remote: test-owner connected from')" = $((n0 + 1)) ] \
+    || step "a replayed handshake was taken for the owner connecting (the log says so more than once)"
+  # An owner the owners file gives `observe` alone sees, and changes nothing.
+  W() { "$rmt" -i "$dir/watcher.key" -m "$machine" "127.0.0.1:$port" "$@" 2>&1; }
+  out=$(W services); grep -qE '^logd +running' <<<"$out" || step "an owner who may observe did not see the services: $(head -1 <<<"$out")"
+  out=$(W log remote); grep -q "may not make call\\|test-owner connected" <<<"$out" || step "an owner who may observe did not read a log: $(head -1 <<<"$out" | cat -v)"
+  out=$(W restart logd) && step "an owner who may only observe restarted logd: $out"
+  grep -q 'Refused' <<<"$out" || step "an owner who may only observe was refused a restart, but not as refused: $out"
+  until_seen '^remote: watcher may not make call' || step "the machine did not say it refused the watcher's call"
+  # Connections that never say a word, nine of them, and an owner's own
+  # session that, once proven, starts a frame it never finishes: the owner
+  # is still served, and the machine closes each (the silent ones within the
+  # 10 s to prove an owner, the trickling session at its idle limit, 6 s on
+  # this machine's command line: bytes are not messages).
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" silent 9 14 >"$dir/silent.out" 2>&1 &
+  prober=$!
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" trickle-session 10 >"$dir/trickle.out" 2>&1 &
+  local trickler=$!
+  sleep 1
+  out=$(R memory) || step "the owner was not served while nine silent connections were held: $out"
+  wait $prober || step "silent connections: $(tail -1 "$dir/silent.out")"
+  wait $trickler || step "an owner's session trickling a frame: $(tail -1 "$dir/trickle.out")"
+  until_seen "^remote: test-owner's session from .* closed: no message for 6 s" || step "the machine did not say it closed the trickling session"
+  # A service's name with a terminal's escapes, an OSC title and a carriage
+  # return in it: what the machine logs of it reaches no terminal as
+  # anything but text, checked on the bytes each sends: the serial console
+  # (logd), the console port (the shell's `log remote`, typed there when the
+  # line is logged, through the console) and the owner's terminal (the host
+  # tool's `log`).
+  out=$(R start $'httpd\e]0;owned\a\rforged line') && step "a service named with escapes was started: $out"
+  until_seen 'asks the service manager to start httpd\?\]0;owned\?\?forged line' || step "the machine did not log the escaped name as text"
+  [ "$(grep -a 'service manager to start httpd' "$serial" | sed 's/\r$//' | grep -ac $'\e\|\a\|\r')" = 0 ] \
+    || step "an escape or a carriage return a session sent reached the machine's serial console"
+  out=$(R log remote); grep -qF 'start httpd?]0;owned??forged line' <<<"$out" && ! grep -q $'\e\|\a' <<<"$out" && ! lone_cr "$out" \
+    || step "the remote log reached the owner's terminal with its escapes: $(grep -a 'owned' <<<"$out" | cat -v | head -1)"
   # httpd: started, then updated while it serves.
   R start httpd >/dev/null && until_seen '^httpd: listening on port 80' || step "start httpd: it never listened"
   out=$(R update httpd "$dir/httpd-new.elf") || step "update httpd: $out"
@@ -902,9 +958,17 @@ run_remote() {
   out=$("$httpload" "$web" 64 4 2>&1) || step "the updated httpd did not serve: $out"
   until_seen '^init: httpd ended' || step "the updated httpd did not end in order"
   out=$(R services); grep -qE "^httpd +stopped .* $(hash_of "$dir/httpd-new.elf") \(updated\)\$" <<<"$out" || step "services did not show httpd on its new program: $(grep '^httpd' <<<"$out")"
-  # Bytes that are no program: refused, nothing changes.
+  # Bytes that are no program: refused, nothing changes. Sent while another
+  # session holds on after a piece of its own was refused: a refused piece
+  # takes no staging lock (before, it kept every other owner from sending
+  # a program until its session ended).
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" stage-hold 20 >"$dir/stage.out" 2>&1 &
+  prober=$!
+  for i in $(seq 100); do grep -q 'was refused' "$dir/stage.out" && break; kill -0 $prober 2>/dev/null || break; sleep 0.1; done
+  grep -q 'was refused' "$dir/stage.out" || step "a piece past the largest program: $(tail -1 "$dir/stage.out")"
   out=$(R update httpd "$dir/notes.txt") && step "a text file was installed as httpd"
   grep -q 'NotAProgram' <<<"$out" || step "a text file as httpd was refused, but not as no program: $out"
+  kill $prober 2>/dev/null; wait $prober 2>/dev/null
   # A program that faults at once: the one before it comes back.
   R update httpd "$dir/httpd-faults.elf" >/dev/null || step "update httpd to the faulting program was refused"
   R start httpd >/dev/null
@@ -922,6 +986,12 @@ run_remote() {
   until_seen '^init: remote started on its new program' || step "remote was not started on its new program"
   R shutdown >/dev/null
   wait $qemu; rc=$?
+  # What the shell's `log remote` sent to the console port: the escaped
+  # name as text, and from the command on no escape, bell or lone carriage
+  # return (the firmware's own escapes come before it).
+  out=$(tr -d '\0' <"$serial.port"); out=${out#*silica> log remote}
+  [[ $out == *'start httpd?]0;owned??forged line'* && $out != *$'\e'* && $out != *$'\a'* ]] && ! lone_cr "$out" \
+    || step "the shell's log reached the console port with its escapes: $(grep -a 'owned' <<<"$out" | cat -v | head -1) (port: $serial.port)"
   if [ -n "$why" ]; then record fail "$suite" remote "$why (serial: $serial)"
   elif [ $rc != 0 ] || ! serial_has "$serial" '^init: shutting down' || ! serial_has "$serial" '^remote: test-owner asks the service manager to shut down the machine'; then
     record fail "$suite" remote "the machine was not shut down from the session (exit status $rc; serial: $serial)"
