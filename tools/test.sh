@@ -87,6 +87,15 @@ gin() {
   [ -z "${2:-}" ] || GIN+=(repo+:system env:SILICA_SYSTEST_TIMEOUT)
 }
 
+# panic_reset_unit <arch>: the panic_reset guest test. Its root task is the
+# system's init where there is a checkout of it (run_panic_reset), so what
+# it reads is the system's too.
+panic_reset_unit() {
+  if [ -f "$(checkout_of system)/Cargo.toml" ] && [ -f "$(checkout_of kernel)/targets/$1-silica-user.json" ]; then gin "$1" system; fi
+  unit any "inos.$1/panic_reset" "${GIN[@]}" -- run_panic_reset "$1" "inos.$1"
+  gin "$1"
+}
+
 if [ -n "$repo" ]; then
   all_repos | grep -xF "$repo" >/dev/null || die "unknown repo $repo"
   [ -d "$(checkout_of "$repo")" ] || die "no checkout of $repo"
@@ -334,7 +343,7 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path; [n
   [ -n "$only" ] && [[ $only != cpu.* ]] || suite_cpu_models "$only"
   if [ -z "$only" ]; then
     unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
-    unit any inos.x86_64/panic_reset "${GIN[@]}" -- run_panic_reset x86_64 inos.x86_64
+    panic_reset_unit x86_64
     unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
     unit any inos.x86_64/stall_named "${GIN[@]}" -- run_panic x86_64 inos.x86_64 park
     unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64
@@ -702,7 +711,7 @@ guests() {
       gin aarch64
       unit any entry.aarch64/entry "${GIN[@]}" -- suite_arch_entry aarch64
       unit any inos.aarch64/panic_backtrace "${GIN[@]}" -- run_panic aarch64 inos.aarch64
-      unit any inos.aarch64/panic_reset "${GIN[@]}" -- run_panic_reset aarch64 inos.aarch64
+      panic_reset_unit aarch64
       unit any inos.aarch64/panic_backtrace_secondary "${GIN[@]}" -- run_panic aarch64 inos.aarch64 secondary
       unit any inos.aarch64/null_object_faults "${GIN[@]}" -- run_panic aarch64 inos.aarch64 null
       suite_inos aarch64
@@ -763,7 +772,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
             gin x86_64
             case "$guest" in
               panic_backtrace) unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64 ;;
-              panic_reset) unit any inos.x86_64/panic_reset "${GIN[@]}" -- run_panic_reset x86_64 inos.x86_64 ;;
+              panic_reset) panic_reset_unit x86_64 ;;
               null_object_faults) unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null ;;
               stall_named) unit any inos.x86_64/stall_named "${GIN[@]}" -- run_panic x86_64 inos.x86_64 park ;;
               panic_screen) unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64 ;;

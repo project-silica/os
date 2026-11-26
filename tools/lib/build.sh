@@ -143,6 +143,7 @@ build_system() {
       + (if $s.seed then ["seed"] else [] end)
       + (if $s.keeps then ["keeps"] else [] end)
       + (if $s.ends then ["ends"] else [] end)
+      + (if $s.logs then ["logs=\($s.logs)"] else [] end)
       + (if $s.sets_time then ["sets_time"] else [] end)
       + (if $s.secrets then ["secrets"] else [] end)
       + (if ($s.files // []) != [] then ["files=\($s.files | join(","))"] else [] end)

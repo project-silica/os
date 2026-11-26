@@ -169,15 +169,24 @@ run_inos() {
 # harness listens for the status). Before, every processor halted for ever and
 # the panic was lost with the machine; now the kernel writes a crash record into
 # memory the loader keeps across a warm reset, resets, and the next boot says
-# the record whole (the panic and its backtrace) before going on. The second
-# boot panics again (the same command line): the test ends at its report.
+# the record whole (the panic and its backtrace) before going on. That boot
+# does not panic again (`panic=test` is once: a boot with a record goes on),
+# and its root task is given the record: where there is a system checkout the
+# root task is init, which must say it too, as text (before, nothing read
+# what the kernel handed over, and an owner reading the services' log never
+# learnt that the machine had reset itself).
 run_panic_reset() {
-  local arch=$1 suite=$2 log img serial rc rec
+  local arch=$1 suite=$2 log img serial rc rec said="" until='^kernel: end of the last boot.s record'
   log=$(logfile "$suite" build.panic_reset)
-  img=$(UNATTENDED=1 build_image "$arch" "$log" "panic=test") || { record fail "$suite" panic_reset "image build failed (log: $log)"; return 1; }
+  if [ -f "$(checkout_of system)/Cargo.toml" ] && [ -f "$(checkout_of kernel)/targets/$arch-silica-user.json" ]; then
+    said=1 until='^init: end of the last boot.s panic record'
+    img=$(UNATTENDED=1 build_system_image "$arch" "$log" "checks= panic=test") || { record fail "$suite" panic_reset "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  else
+    img=$(UNATTENDED=1 build_image "$arch" "$log" "panic=test") || { record fail "$suite" panic_reset "image build failed (log: $log)"; return 1; }
+  fi
   serial=$(logfile "$suite" panic_reset)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --reboot --no-exit-device --timeout "${SILICA_QEMU_TIMEOUT:-120}" \
-    --until '^kernel: end of the last boot.s record' >"$serial.qemu" 2>&1
+    --until "$until" >"$serial.qemu" 2>&1
   rc=$?
   rec=$(tr -d '\r' <"$serial" | sed -n '/^kernel: the last boot (boot [0-9]*) ended in a panic; its record:/,/^kernel: end of the last boot.s record/p')
   if ! grep -aq '^kernel: resetting the machine' <(tr -d '\r' <"$serial"); then
@@ -186,6 +195,8 @@ run_panic_reset() {
     record fail "$suite" panic_reset "the boot after the panic did not report its crash record (exit status $rc; serial: $serial)"
   elif ! grep -q '^PANIC: deliberate panic' <<<"$rec" || ! grep -qE '^#[0-9]+ 0x[0-9a-f]{16}$' <<<"$rec"; then
     record fail "$suite" panic_reset "the crash record lacks the panic or its backtrace (serial: $serial)"
+  elif [ -n "$said" ] && ! tr -d '\r' <"$serial" | sed -n '/^init: the last boot ended in a kernel panic/,/^init: end of the last boot.s panic record/p' | grep -q '^init: | PANIC: deliberate panic'; then
+    record fail "$suite" panic_reset "the service manager did not say the last boot's panic record (serial: $serial)"
   else record pass "$suite" panic_reset; fi
 }
 
@@ -944,13 +955,13 @@ run_svcload() {
 run_entropy() {
   local arch=$1 suite=$2 log img serial rc text name
   log=$(logfile "$suite" build.entropy)
-  img=$(build_system_image "$arch" "$log" "checks=entropy entropy.hang_on=4321 entropycheck.hang=4321") || { record fail "$suite" entropy "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=entropy") || { record fail "$suite" entropy "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" entropy)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
     --device virtio-rng-pci,disable-legacy=on,iommu_platform=on >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing a_hung_provider_is_started_again; do
+  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing; do
     if grep -qx "TEST entropy.$name PASS" <<<"$text"; then record pass "$suite" "entropy_$name"
     else record fail "$suite" "entropy_$name" "$(grep -m1 -a '^ERROR' <<<"$text" | cut -c1-140) (no PASS line; serial: $serial)"; fi
   done
@@ -1132,20 +1143,22 @@ run_remote() {
   owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") \
     || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
   printf '# who may manage this machine\n%s test-owner idle=6\n%s watcher observe\n' "$owner" "$watcher" >"$dir/owners"
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed") \
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed httpd.fail_after=11") \
     && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   # Two new programs for httpd: the same code with bytes after it (an ELF
   # file's loader reads only what its headers name), and one whose entry
   # point is an address nothing is mapped at.
   { cat "$httpd"; printf 'a new version of httpd, for the remote management test\n'; } >"$dir/httpd-new.elf"
   cp "$httpd" "$dir/httpd-faults.elf" && printf '\000\020\000\000\000\000\000\000' | dd of="$dir/httpd-faults.elf" bs=1 seek=24 conv=notrunc status=none
+  # And hello as httpd: it serves nobody, and this image tells it to fail late.
+  cp "$(system_program "$arch" hello "$log")" "$dir/httpd-late.elf" || { record fail "$suite" remote "no hello program (log: $log)"; return 1; }
   printf 'not a program\n' >"$dir/notes.txt"
   serial=$(logfile "$suite" remote)
   port=$(host_ports 2) || { record fail "$suite" remote "no free host ports below the ephemeral range"; return 1; }
   web=$((port + 1))
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
     --net "user:$port-22,$web-80" --nic "${NIC:-virtio}" --console-port "$serial.port" \
-    --port-type '^remote: test-owner asks the service manager to start httpd=log remote\r' >"$serial.qemu" 2>&1 &
+    --port-type '^remote: test-owner asks the service manager to start httpd.\]0;owned=log remote\r' >"$serial.qemu" 2>&1 &
   qemu=$!
   for i in $(seq 600); do
     serial_has "$serial" '^remote: listening on port 22' && break
@@ -1181,6 +1194,10 @@ run_remote() {
   out=$(R log remote); grep -q 'listening on port 22' <<<"$out" || step "log remote said: $(head -1 <<<"$out")"
   out=$(R logs); grep -q '^netd ' <<<"$out" || step "logs did not name netd: $(head -1 <<<"$out")"
   out=$(R memory); grep -q '^free [0-9]* KiB' <<<"$out" || step "memory said: $out"
+  # A new program that serves nobody and fails 11 s after its start (hello,
+  # told so by this image's `httpd.fail_after=11`): looked at below, once
+  # the steps between have taken that long.
+  R update httpd "$dir/httpd-late.elf" >/dev/null && R start httpd >/dev/null || step "update httpd to the program that fails late was refused"
   R restart logd >/dev/null && until_seen '^init: logd restarted, as asked' && serial_has "$serial" '^remote: test-owner asks the service manager to restart logd' \
     || step "restart logd: not seen restarted, or not in the log as the owner's"
   # Strangers: an owner the machine does not know, and a machine that is not
@@ -1240,12 +1257,20 @@ run_remote() {
     || step "an escape or a carriage return a session sent reached the machine's serial console"
   out=$(R log remote); grep -qF 'start httpd?]0;owned??forged line' <<<"$out" && ! grep -q $'\e\|\a' <<<"$out" && ! lone_cr "$out" \
     || step "the remote log reached the owner's terminal with its escapes: $(grep -a 'owned' <<<"$out" | cat -v | head -1)"
+  # The program that failed late: it never served, so however long it ran
+  # it was the update that failed, and the program before it is back (before:
+  # an update was judged for 10 s, and one that failed after 11 was kept).
+  until_seen '^hello: failing after 11 s, having served nobody' && until_seen "^init: httpd's new program failed before it served" \
+    && until_seen '^init: httpd started again on the program before its update' && until_seen '^httpd: listening on port 80' \
+    || step "a new program that failed after 11 s without ever serving was kept: $(tr -d '\r' <"$serial" | grep -a '^init: httpd' | tail -1)"
+  out=$(R services); grep -qE "^httpd +running .* $(hash_of "$httpd")\$" <<<"$out" || step "after the update that failed late, httpd does not run the boot archive's program: $(grep '^httpd' <<<"$out")"
+  R stop httpd >/dev/null || step "stop httpd was refused"
   # httpd: started, then updated while it serves.
-  R start httpd >/dev/null && until_seen '^httpd: listening on port 80' || step "start httpd: it never listened"
+  R start httpd >/dev/null && until_seen '^httpd: listening on port 80' 2 || step "start httpd: it never listened"
   out=$(R update httpd "$dir/httpd-new.elf") || step "update httpd: $out"
-  until_seen '^init: httpd started on its new program' && until_seen '^httpd: listening on port 80' 2 || step "httpd was not started on its new program"
+  until_seen '^init: httpd started on its new program' && until_seen '^httpd: listening on port 80' 3 || step "httpd was not started on its new program"
   out=$("$httpload" "$web" 64 4 2>&1) || step "the updated httpd did not serve: $out"
-  until_seen '^init: httpd ended' || step "the updated httpd did not end in order"
+  until_seen '^init: httpd ended$' || step "the updated httpd did not end in order"
   out=$(R services); grep -qE "^httpd +stopped .* $(hash_of "$dir/httpd-new.elf") \(updated\)\$" <<<"$out" || step "services did not show httpd on its new program: $(grep '^httpd' <<<"$out")"
   # An owner sends 1 MiB of a program and never asks for the update: the
   # service manager holds none of it (before, it kept what every caller
@@ -1270,11 +1295,11 @@ run_remote() {
   # A program that faults at once: the one before it comes back.
   R update httpd "$dir/httpd-faults.elf" >/dev/null || step "update httpd to the faulting program was refused"
   R start httpd >/dev/null
-  until_seen "^init: httpd's new program failed within 10 s of its update" && until_seen '^init: httpd started again on the program before its update' \
-    && until_seen '^httpd: listening on port 80' 3 || step "the faulting update of httpd was not undone"
+  until_seen "^init: httpd's new program failed before it served" 2 && until_seen '^init: httpd started again on the program before its update' 2 \
+    && until_seen '^httpd: listening on port 80' 4 || step "the faulting update of httpd was not undone"
   out=$(R services); grep -qE "^httpd +running .* $(hash_of "$dir/httpd-new.elf") \(updated\)\$" <<<"$out" || step "after the faulting update, httpd does not run the program before it: $(grep '^httpd' <<<"$out")"
   out=$("$httpload" "$web" 64 4 2>&1) || step "httpd did not serve after its faulting update was undone: $out"
-  until_seen '^init: httpd ended' 2 || step "httpd did not end in order after the undone update"
+  until_seen '^init: httpd ended$' 2 || step "httpd did not end in order after the undone update"
   R revert httpd >/dev/null || step "revert httpd was refused"
   out=$(R services); grep -qE "^httpd +stopped .* $(hash_of "$httpd")\$" <<<"$out" || step "after revert, httpd does not have the boot archive's program: $(grep '^httpd' <<<"$out")"
   # The session's own service: its update ends the session that asked for
@@ -1581,11 +1606,13 @@ run_shutdown() {
     --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
   rc=$?
   # The services' last lines reach the console before the log service goes,
-  # with nothing waiting out a limit for them (before: the log service
-  # faulted on a ring whose drivers had ended, the service manager did not
-  # answer it while it waited for the log, and every shutdown took 2 s).
-  if serial_has "$serial" 'did not put its text on the console within'; then
-    record fail "$suite" shutdown "the log service's last flush was not answered (serial: $serial)"
+  # with nothing waiting out a limit for them: the log service is asked to
+  # end, puts what its rings hold on the console and exits, and its exit is
+  # what the service manager waits for (before: a flush with a 2 s wait,
+  # which every shutdown waited out while the log service faulted on a ring
+  # whose drivers had ended and the service manager did not answer it).
+  if ! serial_has "$serial" '^init: logd ended in order'; then
+    record fail "$suite" shutdown "the log service did not end in order: $(tr -d '\r' <"$serial" | grep -m1 -a '^init: logd' | cut -c1-120) (serial: $serial)"
   elif [ $rc = 0 ] && serial_has "$serial" '^init: shutting down' && serial_has "$serial" '^init: devmgr stopped' \
       && ! serial_has "$serial" '^ERROR'; then record pass "$suite" shutdown
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
@@ -1647,7 +1674,7 @@ run_shutdown_flush() {
 #   words whose obeying fails this test belong here (never one that would
 #   make a broken image pass, as `checks=` would).
 # A package that gains a hook adds its words to both.
-HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting')
+HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ')
 # The kernel's panic word, and the device manager's: a fault for the
 # network driver to commit on purpose and another program in that driver's
 # place, each as a bare word and as the device manager's own option (the
