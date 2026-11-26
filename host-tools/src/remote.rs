@@ -42,7 +42,7 @@ use silica_protocols::log::reader;
 use silica_protocols::remote::session;
 use silica_protocols::system::manager;
 
-/// The bytes of one piece of a program sent with `stage`.
+/// The bytes of one piece of a program sent with the session's `send`.
 const PIECE: usize = 3900;
 
 fn usage() -> ! {
@@ -218,8 +218,9 @@ fn main() {
         ["revert", name] => drop(or_fail("revert", mgr.revert(name))),
         ["update", name, path] => {
             let program = std::fs::read(path).unwrap_or_else(|e| fail(format!("{path}: {e}")));
+            let mut session = session::Client::<Channel, NoCap>::from(channel(silica_remote::SESSION));
             for (k, piece) in program.chunks(PIECE).enumerate() {
-                or_fail("stage", mgr.stage((k * PIECE) as u64, piece));
+                or_fail("send", session.send((k * PIECE) as u64, piece));
             }
             match mgr.update(name, program.len() as u64) {
                 Ok(_) => {}

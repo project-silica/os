@@ -1118,14 +1118,14 @@ run_http_quit() {
 # reverts it to the boot archive's; a stranger's key and a wrong machine key
 # get nothing. Then it shuts the machine down. Each step's failure is said.
 run_remote() {
-  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i probe watcher prober n0
+  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i probe watcher prober n0 free0 free1
   log=$(logfile "$suite" build.remote)
   rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") && probe=$(host_tool remoteprobe "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
   dir=${UNIT_DIR:-$RUN}/remote; rm -rf "$dir"; mkdir -p "$dir"
   owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") \
     || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
-  printf '# who may manage this machine\n%s test-owner\n%s watcher observe\n' "$owner" "$watcher" >"$dir/owners"
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed remote.idle=6") \
+  printf '# who may manage this machine\n%s test-owner idle=6\n%s watcher observe\n' "$owner" "$watcher" >"$dir/owners"
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed") \
     && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   # Two new programs for httpd: the same code with bytes after it (an ELF
   # file's loader reads only what its headers name), and one whose entry
@@ -1210,8 +1210,8 @@ run_remote() {
   # Connections that never say a word, nine of them, and an owner's own
   # session that, once proven, starts a frame it never finishes: the owner
   # is still served, and the machine closes each (the silent ones within the
-  # 10 s to prove an owner, the trickling session at its idle limit, 6 s on
-  # this machine's command line: bytes are not messages).
+  # 10 s to prove an owner, the trickling session at its idle limit, 6 s in
+  # this owner's line of the owners file: bytes are not messages).
   "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" silent 9 14 >"$dir/silent.out" 2>&1 &
   prober=$!
   "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" trickle-session 10 >"$dir/trickle.out" 2>&1 &
@@ -1240,14 +1240,23 @@ run_remote() {
   out=$("$httpload" "$web" 64 4 2>&1) || step "the updated httpd did not serve: $out"
   until_seen '^init: httpd ended' || step "the updated httpd did not end in order"
   out=$(R services); grep -qE "^httpd +stopped .* $(hash_of "$dir/httpd-new.elf") \(updated\)\$" <<<"$out" || step "services did not show httpd on its new program: $(grep '^httpd' <<<"$out")"
-  # Bytes that are no program: refused, nothing changes. Sent while another
-  # session holds on after a piece of its own was refused: a refused piece
-  # takes no staging lock (before, it kept every other owner from sending
-  # a program until its session ended).
-  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" stage-hold 20 >"$dir/stage.out" 2>&1 &
+  # An owner sends 1 MiB of a program and never asks for the update: the
+  # service manager holds none of it (before, it kept what every caller
+  # staged in its own memory, 32 MiB of it for all callers together: one
+  # caller's pieces were another's refusal, and the remote service kept
+  # its sessions apart with a lock and a minute's timer). The remote
+  # service holds it, in its own memory, for that owner; a piece past
+  # the largest program and one sent to the service manager are refused.
+  free0=$(R memory | sed -n 's/^free \([0-9]*\) KiB.*/\1/p')
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" send-hold 1048576 20 >"$dir/send.out" 2>&1 &
   prober=$!
-  for i in $(seq 100); do grep -q 'was refused' "$dir/stage.out" && break; kill -0 $prober 2>/dev/null || break; sleep 0.1; done
-  grep -q 'was refused' "$dir/stage.out" || step "a piece past the largest program: $(tail -1 "$dir/stage.out")"
+  for i in $(seq 200); do grep -q 'and holds them' "$dir/send.out" && break; kill -0 $prober 2>/dev/null || break; sleep 0.1; done
+  grep -q 'and holds them' "$dir/send.out" || step "an owner sending 1 MiB of a program: $(tail -1 "$dir/send.out")"
+  free1=$(R memory | sed -n 's/^free \([0-9]*\) KiB.*/\1/p')
+  [ -n "$free0" ] && [ -n "$free1" ] && [ $((free0 - free1)) -lt 256 ] \
+    || step "the service manager held $((free0 - free1)) KiB more once an owner had sent 1 MiB of a program it never asked to run"
+  # Bytes that are no program: refused, nothing changes. Sent while that
+  # session holds on: nobody's update waits for another's.
   out=$(R update httpd "$dir/notes.txt") && step "a text file was installed as httpd"
   grep -q 'NotAProgram' <<<"$out" || step "a text file as httpd was refused, but not as no program: $out"
   kill $prober 2>/dev/null; wait $prober 2>/dev/null

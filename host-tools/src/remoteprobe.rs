@@ -19,10 +19,12 @@
 //!     as an owner, opens a session and makes one call, then starts a frame
 //!     that never ends, a byte a second; succeeds if the machine closed the
 //!     session within <seconds> (bytes are not messages)
-//! remoteprobe -i <owner key> -m <machine key> <host>:<port> stage-hold <seconds>
-//!     as an owner, sends a piece of a program the service manager refuses
-//!     (`stage` past the largest program), then keeps the session, idle,
-//!     for <seconds>; succeeds if the piece was refused
+//! remoteprobe -i <owner key> -m <machine key> <host>:<port> send-hold <bytes> <seconds>
+//!     as an owner, sends a piece of a program past the largest one and a
+//!     piece with the service manager's retired `stage` (both must be
+//!     refused), then <bytes> bytes of a program it never asks to run, and
+//!     keeps the session, idle, for <seconds>; succeeds if the pieces
+//!     were refused and the bytes taken
 //! ```
 //!
 //! Exit status: 0 the machine held, 1 it did not (said on stderr), 2 usage.
@@ -46,7 +48,7 @@ use silica_remote::{Frames, MAX_FRAME, PROLOGUE, STAMP, stamp};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: remoteprobe -i <owner key> -m <machine key> <host>:<port> replay <n> <seconds> | old-first <seconds> | silent <n> <seconds> | trickle-session <seconds> | stage-hold <seconds>"
+        "usage: remoteprobe -i <owner key> -m <machine key> <host>:<port> replay <n> <seconds> | old-first <seconds> | silent <n> <seconds> | trickle-session <seconds> | send-hold <bytes> <seconds>"
     );
     std::process::exit(2)
 }
@@ -62,7 +64,7 @@ fn main() {
     let num = |i: usize| a.get(i).and_then(|s| s.parse::<u64>().ok()).unwrap_or_else(|| usage());
     match a[5].as_str() {
         "replay" => replay(host, &owner, &machine, num(6) as usize, num(7)),
-        "stage-hold" => stage_hold(host, &owner, &machine, num(6)),
+        "send-hold" => send_hold(host, &owner, &machine, num(6), num(7)),
         "old-first" => old_first(host, &owner, &machine, num(6)),
         "silent" => silent(host, num(6) as usize, num(7)),
         "trickle-session" => trickle_session(host, &owner, &machine, num(6)),
@@ -208,7 +210,7 @@ fn hold(mut conns: Vec<TcpStream>, seconds: u64, what: &str, trickle: bool) {
 }
 
 /// See the module's documentation.
-fn stage_hold(host: &str, owner: &Keypair, machine: &[u8; 32], seconds: u64) {
+fn send_hold(host: &str, owner: &Keypair, machine: &[u8; 32], bytes: u64, seconds: u64) {
     let conn = Rc::new(RefCell::new(Conn::connect(host, owner, machine)));
     let channel = |channel| Channel {
         conn: conn.clone(),
@@ -227,10 +229,28 @@ fn stage_hold(host: &str, owner: &Keypair, machine: &[u8; 32], seconds: u64) {
         .unwrap_or_else(|| fail("the session does not carry the service manager")) as u8
         + 1;
     let mut mgr = manager::Client::<Channel, NoCap>::from(channel(on));
-    match mgr.stage(1 << 40, b"past the largest program") {
+    let mut session = session::Client::<Channel, NoCap>::from(channel(silica_remote::SESSION));
+    match session.send(1 << 40, b"past the largest program") {
         Err(CallError::Error(e)) => println!("remoteprobe: a piece past the largest program was refused: {e:?}"),
         Ok(_) => fail("a piece past the largest program was taken"),
+        Err(e) => fail(format!("send: {e:?}")),
+    }
+    match mgr.stage(0, b"\x7fELF") {
+        Err(CallError::Error(manager::Error::Refused)) => {
+            println!("remoteprobe: the service manager keeps no piece: stage was refused")
+        }
+        Ok(_) => fail("the service manager took a piece of a program with stage, which it keeps none of"),
         Err(e) => fail(format!("stage: {e:?}")),
     }
+    let piece = [0x5au8; 3900];
+    let mut at = 0u64;
+    while at < bytes {
+        let n = piece.len().min((bytes - at) as usize);
+        if let Err(e) = session.send(at, &piece[..n]) {
+            fail(format!("the piece at byte {at} was not taken: {e:?}"));
+        }
+        at += n as u64;
+    }
+    println!("remoteprobe: sent {bytes} bytes of a program and holds them");
     std::thread::sleep(Duration::from_secs(seconds));
 }
