@@ -61,7 +61,7 @@ evidence_init
 
 # The system image's guest tests (run_<name> in lib/tests.sh), and those of
 # them that judge a time.
-SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http http_quit power recovery entropy console_port shutdown shutdown_flush shutdown_flush_owner server_image watchdog console typeahead nvme net net_mac net_e1000e net_unplug_e1000e
+SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http http_quit power recovery entropy console_port shutdown shutdown_flush shutdown_flush_owner server_image console typeahead nvme net net_mac net_e1000e net_unplug_e1000e
   dhcp_e1000e ntp_e1000e http_e1000e net_recovery net_recovery_e1000e hotplug hotplug_cycle partitions partitions_full_table partitions_backup_gpt partitions_small_transfer
   recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable nvme_admin_missed hostile_clients unstartable_driver entropy_broken_device hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces
   remote)
@@ -671,6 +671,9 @@ guests() {
       # TCP against the host's Linux stack, three paths of eight cases:
       # some 40 s, most of it 16 MiB through loss.
       system_test interop
+      # A machine petted past its watchdog's 30 s, then one let go of
+      # until the watchdog resets it: some two minutes, all waiting.
+      system_test watchdog
       system_test idle
       system_test http_restart
       unit any systest.x86_64/systest "${GIN[@]}" -- run_systest x86_64 systest.x86_64
@@ -722,7 +725,7 @@ if [ "${#guests[@]}" -gt 0 ]; then
         done
       fi
       # The system image's own tests, by name.
-      case " ${SYSTEM_TESTS[*]} faults systest svcload http_load http_load_e1000e http_restart idle interop " in
+      case " ${SYSTEM_TESTS[*]} faults systest svcload http_load http_load_e1000e http_restart idle interop watchdog " in
         *" $guest "*)
           if [ "$guest" = faults ]; then for t in "${FAULT_DRIVERS[@]}"; do system_test "faults.$t"; done
           elif [ "$guest" = systest ]; then

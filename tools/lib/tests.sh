@@ -1257,11 +1257,17 @@ run_remote() {
   # instance wrote there is trusted by the program put in its place (the
   # 2026-11-24 audit: the page survived updates). The session's connection
   # ends with the stack it runs on; the next command connects anew.
+  # Nothing resets that connection yet (spec/MILESTONES.md: the stack's
+  # peers are not reset when its program is replaced), so the tool would
+  # wait out its two minutes for an answer: what the update did is read
+  # from the machine, and the tool let go of.
   { cat "$(system_program "$arch" netd "$log")"; printf 'a new version of netd\n'; } >"$dir/netd-new.elf"
-  R update netd "$dir/netd-new.elf" >/dev/null 2>&1
+  R update netd "$dir/netd-new.elf" >/dev/null 2>&1 &
+  local updater=$!
   { until_seen "^init: netd's kept page starts empty for its new program" && until_seen '^init: netd started on its new program'; } \
     || step "netd's new program was not given an empty kept page"
   until_seen '^netd: [0-9.]+/[0-9]+ from DHCP server' 2 || step "netd's new program did not take a lease of its own"
+  kill $updater 2>/dev/null; wait $updater 2>/dev/null
   R shutdown >/dev/null
   wait $qemu; rc=$?
   # What the shell's `log remote` sent to the console port: the escaped
@@ -1501,7 +1507,13 @@ run_shutdown() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
     --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
   rc=$?
-  if [ $rc = 0 ] && serial_has "$serial" '^init: shutting down' && serial_has "$serial" '^init: devmgr stopped' \
+  # The services' last lines reach the console before the log service goes,
+  # with nothing waiting out a limit for them (before: the log service
+  # faulted on a ring whose drivers had ended, the service manager did not
+  # answer it while it waited for the log, and every shutdown took 2 s).
+  if serial_has "$serial" 'did not put its text on the console within'; then
+    record fail "$suite" shutdown "the log service's last flush was not answered (serial: $serial)"
+  elif [ $rc = 0 ] && serial_has "$serial" '^init: shutting down' && serial_has "$serial" '^init: devmgr stopped' \
       && ! serial_has "$serial" '^ERROR'; then record pass "$suite" shutdown
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
