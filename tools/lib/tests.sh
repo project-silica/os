@@ -1585,10 +1585,29 @@ run_shutdown_flush() {
 # exactly init, the services that start at boot and the drivers; booted with
 # a network, it must come up on it, run no check, and turn off in order when
 # the power button is pressed.
+#
+# And it holds no test hook (the audit again: the kernel panicked on
+# `panic=test`, the loader and kernel wrote a debug port on `exit=port`,
+# whatever the image). Every piece of it is built without the `harness`
+# feature (lib/build.sh), which is checked two ways:
+# - HOOK_WORDS: text only a hook's code holds. None may occur in any file the
+#   image is made of.
+# - HOOK_CMDLINE: words that make a test image fail on purpose, put on this
+#   image's command line. It must come up and turn off as without them. Only
+#   words whose obeying fails this test belong here (never one that would
+#   make a broken image pass, as `checks=` would).
+# A package that gains a hook adds its words to both.
+HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting')
+HOOK_CMDLINE='panic=test'
 run_server_image() {
-  local arch=$1 suite=$2 log img serial rc sys want got extra
+  local arch=$1 suite=$2 log img serial rc sys want got extra w f
   log=$(logfile "$suite" build.server_image)
-  img=$(build_server_image "$arch" "$log") || { record fail "$suite" server_image "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_server_image "$arch" "$log" "$HOOK_CMDLINE") || { record fail "$suite" server_image "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  for w in "${HOOK_WORDS[@]}"; do
+    while read -r f; do
+      if grep -qaF -e "$w" "$f"; then record fail "$suite" server_image "a test hook is in the server image: '$w' occurs in its ${f##*/}"; return 1; fi
+    done <"$img.packed"
+  done
   sys=${img%/*}
   want=$( { echo root; echo drivers; echo services; grep -vx init "$img.programs"; } | LC_ALL=C sort -u)
   got=$(LC_ALL=C sort -u "$img.entries")
@@ -1599,8 +1618,9 @@ run_server_image() {
   if grep -qE '^(systest|stress|virtio-rogue|hello|blkcheck|svcload|httpd)$' <<<"$got" || grep -q 'start=check:' "$img.services"; then
     record fail "$suite" server_image "a test program or check service is in the server image"; return 1
   fi
+  # No debug-exit device: this image knows of none, and turns the machine off itself.
   serial=$(logfile "$suite" server_image)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user \
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user --no-exit-device \
     --on '^netd: the router 10\.0\.2\.2 answers a ping=system_powerdown' >"$serial.qemu" 2>&1
   rc=$?
   if [ $rc != 0 ] || ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping' || ! serial_has "$serial" '^init: shutting down'; then

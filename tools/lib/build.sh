@@ -9,6 +9,15 @@
 #                             as SILICA/CMDLINE.TXT and the image is disk-cmdline.img
 # Each prints the artifact path on success. Artifacts live in the kernel
 # checkout's private cache, never in a source tree.
+#
+# Two builds of everything. A test image is built with the `harness` feature
+# of every package that defines one: what a test drives the system with (the
+# kernel's and loader's `exit=` and `panic=` words, fault injection, check
+# programs run at boot) exists only there. An image a machine runs
+# (IMAGE_PROFILE=server: build_server_image) is built without it, in a target
+# directory and an artifact directory of its own, so no hook is in any file
+# of it and neither build rebuilds the other's. A package gains a hook by
+# defining a feature named exactly `harness`; nothing here names packages.
 
 BUILD_STD=(-Zbuild-std=core,compiler_builtins -Zbuild-std-features=compiler-builtins-mem)
 # Programs have a heap (silica_rt::heap), so they also get Rust's alloc.
@@ -37,7 +46,30 @@ strip_debug() {
   LD_LIBRARY_PATH="$STRIP_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$STRIP_TOOL" --strip-debug "$1" "$2.new.$BASHPID" >>"$3" 2>&1 && mv "$2.new.$BASHPID" "$2"
 }
 
-art_dir() { local d; d=$(cache_of kernel)/artifacts/$1; mkdir -p "$d"; echo "$d"; }
+production() { [ "${IMAGE_PROFILE:-}" = server ]; }
+art_dir() { local d; d=$(cache_of kernel)/artifacts/$1; production && d+=/production; mkdir -p "$d"; echo "$d"; }
+# target_of <repo>: the Cargo target directory of this profile's build.
+target_of() { local d; d=$(cache_of "$1")/target; production && d+=-production; echo "$d"; }
+# harness_features <repo> [<package>...]: the Cargo arguments that turn the
+# `harness` feature on in every package of <repo>'s workspace that defines
+# one (of the packages named, when any are): one word, or nothing for a
+# production build or when no package has it.
+harness_features() {
+  local repo=$1 meta; shift
+  production && return 0
+  meta=$(cd "$(checkout_of "$repo")" && cargo metadata --no-deps --format-version 1 --offline 2>/dev/null) || return 1
+  jq -r --args '[.packages[] | select(.features.harness) | .name | select(($ARGS.positional | length) == 0 or (. as $n | $ARGS.positional | index($n)))]
+    | if length > 0 then "--features=" + (map(. + "/harness") | join(",")) else empty end' "$@" <<<"$meta"
+}
+# cargo_piece <repo> <log> <package or ""> <cargo arguments>: cargo_run for a
+# piece of an image, in this profile's target directory and with this
+# profile's features (of <package>, or of the whole workspace).
+cargo_piece() {
+  local repo=$1 log=$2 pkg=$3 feat; shift 3
+  feat=$(harness_features "$repo" ${pkg:+"$pkg"}) || { echo "cargo metadata failed in $(checkout_of "$repo")" >"$log"; return 1; }
+  local -a CARGO_ENV=("${CARGO_ENV[@]+"${CARGO_ENV[@]}"}" "CARGO_TARGET_DIR=$(target_of "$repo")")
+  cargo_run "$repo" "$log" "$@" ${feat:+"$feat"}
+}
 # put <from> <to>: copy an artifact into place whole (see strip_debug).
 put() { cp "$1" "$2.new.$BASHPID" && mv "$2.new.$BASHPID" "$2"; }
 
@@ -45,11 +77,11 @@ build_kernel() {
   local arch=$1 log=$2 dir vend out
   dir=$(checkout_of kernel); vend=$(merged_vendor kernel) || return 1; out=$(art_dir "$arch")
   [ -f "$dir/targets/$arch-silica.json" ] || { echo "no target spec targets/$arch-silica.json" >"$log"; return 1; }
-  cargo_run kernel "$log" build --release -p kernel --target "$dir/targets/$arch-silica.json" \
+  cargo_piece kernel "$log" kernel build --release -p kernel --target "$dir/targets/$arch-silica.json" \
     -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
   # A kernel cargo did not rebuild is already in place, stripped. (The copy
   # with debug information goes last: when it matches, so does the other.)
-  local built=$(cache_of kernel)/target/$arch-silica/release/kernel
+  local built=$(target_of kernel)/$arch-silica/release/kernel
   if ! { [ -f "$out/kernel.stripped" ] && cmp -s "$built" "$out/kernel.elf"; }; then
     strip_debug "$built" "$out/kernel.stripped" "$log" || return 1
     put "$built" "$out/kernel.elf" || return 1
@@ -61,9 +93,9 @@ build_root() { # the root task the kernel starts: the in-OS test program until t
   local arch=$1 log=$2 dir vend out
   dir=$(checkout_of kernel); vend=$(merged_vendor kernel) || return 1; out=$(art_dir "$arch")
   [ -f "$dir/targets/$arch-silica-user.json" ] || { echo "no target spec targets/$arch-silica-user.json" >"$log"; return 1; }
-  cargo_run kernel "$log" build --release -p roottest --target "$dir/targets/$arch-silica-user.json" \
+  cargo_piece kernel "$log" roottest build --release -p roottest --target "$dir/targets/$arch-silica-user.json" \
     -Zjson-target-spec "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
-  put "$(cache_of kernel)/target/$arch-silica-user/release/roottest" "$out/root.debug.elf" || return 1
+  put "$(target_of kernel)/$arch-silica-user/release/roottest" "$out/root.debug.elf" || return 1
   strip_debug "$out/root.debug.elf" "$out/root.elf" "$log" || return 1
   echo "$out/root.elf"
 }
@@ -76,12 +108,12 @@ build_system() {
   k=$(checkout_of kernel); s=$(checkout_of system); out=$(art_dir "$arch")/system
   [ -f "$s/Cargo.toml" ] || { echo "no checkout of the system repository" >"$log"; return 1; }
   mkdir -p "$out"; vend=$(merged_vendor system) || return 1
-  cargo_run system "$log" build --release --workspace --bins --target "$k/targets/$arch-silica-user.json" \
+  cargo_piece system "$log" "" build --release --workspace --bins --target "$k/targets/$arch-silica-user.json" \
     -Zjson-target-spec "${BUILD_STD_USER[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
   local meta; meta=$(cd "$s" && cargo metadata --no-deps --format-version 1 --offline 2>/dev/null) || { echo "cargo metadata failed in $s" >>"$log"; return 1; }
   local built
   for n in $(jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' <<<"$meta"); do
-    built=$(cache_of system)/target/$arch-silica-user/release/$n
+    built=$(target_of system)/$arch-silica-user/release/$n
     # A program cargo did not rebuild is already in place, stripped. (The
     # copy with debug information goes last: when it matches, so does the
     # other.)
@@ -138,9 +170,9 @@ build_loader() {
   done
   local -a CARGO_ENV=("${keep[@]+"${keep[@]}"}" "RUSTFLAGS=${rf:+$rf }-C link-arg=/debug:none -C link-arg=/timestamp:1")
   vend=$(merged_vendor kernel) || return 1; out=$(art_dir "$arch")
-  cargo_run kernel "$log" build --release -p boot-uefi --target "$arch-unknown-uefi" \
+  cargo_piece kernel "$log" boot-uefi build --release -p boot-uefi --target "$arch-unknown-uefi" \
     "${BUILD_STD[@]}" --config "source.vendored-sources.directory=\"$vend\"" || return 1
-  put "$(cache_of kernel)/target/$arch-unknown-uefi/release/boot-uefi.efi" "$out/$name" || return 1
+  put "$(target_of kernel)/$arch-unknown-uefi/release/boot-uefi.efi" "$out/$name" || return 1
   echo "$out/$name"
 }
 
@@ -173,7 +205,7 @@ run_pieces() {
   local kind=$1 arch=$2 log=$3 d
   # ($PIECES_DIR: a tool that builds several kernels in one run, each for a
   # while, names a directory per kernel.)
-  d=${PIECES_DIR:-$RUN}/pieces-$kind-$arch
+  d=${PIECES_DIR:-$RUN}/pieces-$kind-$arch; production && d+=-production
   (
     flock 9
     [ -f "$d/.ok" ] && exit 0
@@ -218,6 +250,8 @@ build_system_image_locked() {
   # As for build_image: the harness hears the status through semihosting on
   # aarch64, through QEMU's debug-exit port on x86_64.
   # UNATTENDED=1: no harness listens, as on a machine nobody watches (a panic resets it).
+  # A server image is told of none: nothing in it knows the word.
+  production && local UNATTENDED=1
   [ -z "${UNATTENDED:-}" ] && [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
   [ -z "${UNATTENDED:-}" ] && [ "$arch" = x86_64 ] && cmdline="exit=port${cmdline:+ $cmdline}"
   out=$(art_dir "$arch")
@@ -257,21 +291,28 @@ build_system_image_locked() {
     extra=("SILICA/CMDLINE.TXT=$out/SYSTEM-CMDLINE.TXT")
   fi
   "$t" --out "$out/$n" "$lp=$l" "SILICA/KERNEL.ELF=$k" "${entries[@]}" "${extra[@]+"${extra[@]}"}" >"$log" 2>&1 || return 1
-  # The archive's entry names beside the image, for whoever checks what it holds.
+  # The archive's entry names beside the image, for whoever checks what it
+  # holds, and the files it was made of (the loader, the kernel and each
+  # entry's; not the command line), for whoever reads them.
   printf '%s\n' "${entries[@]}" | grep -v '^--ramdisk-entry$' | sed 's/=.*//' >"$out/$n.entries" || return 1
+  { printf '%s\n' "$l" "$k"; printf '%s\n' "${entries[@]}" | grep -v '^--ramdisk-entry$' | sed 's/^[^=]*=//'; } >"$out/$n.packed" || return 1
   if [ -n "$server" ]; then cp "$sys/server.programs" "$out/$n.programs" && cp "$services" "$out/$n.services" || return 1; fi
   echo "$out/$n"
 }
 
-# build_server_image <arch> <log>: the minimal server image (ARCHITECTURE.md
-# section 2's budget): init, the services that start at boot and the
-# drivers, no checks run and none in it. Kept as server.img in the kernel's
-# artifacts, where size.sh measures it. Prints its path.
+# build_server_image <arch> <log> [words]: the minimal server image
+# (ARCHITECTURE.md section 2's budget): init, the services that start at boot
+# and the drivers, no checks run and none in it, every piece built without
+# `harness` (above). Kept as server.img in the kernel's artifacts, where
+# size.sh measures it. <words> go on its command line as well (a test that
+# a machine's image obeys no test word); such an image is the caller's own
+# and is not kept. Prints its path.
 build_server_image() {
-  local arch=$1 log=$2 img out
-  img=$(IMAGE_PROFILE=server build_system_image "$arch" "$log" "checks=") || return 1
+  local arch=$1 log=$2 words=${3:-} img out
+  img=$(IMAGE_PROFILE=server build_system_image "$arch" "$log" "checks=${words:+ $words}") || return 1
+  [ -z "$words" ] || { echo "$img"; return 0; }
   out=$(art_dir "$arch")
-  [ "$img" = "$out/server.img" ] || { put "$img" "$out/server.img" && put "$img.entries" "$out/server.img.entries" && put "$img.files" "$out/server.img.files" && put "$img.programs" "$out/server.img.programs" && put "$img.services" "$out/server.img.services"; } || return 1
+  [ "$img" = "$out/server.img" ] || { put "$img" "$out/server.img" && put "$img.entries" "$out/server.img.entries" && put "$img.files" "$out/server.img.files" && put "$img.programs" "$out/server.img.programs" && put "$img.services" "$out/server.img.services" && put "$img.packed" "$out/server.img.packed"; } || return 1
   echo "$out/server.img"
 }
 

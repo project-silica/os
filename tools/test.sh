@@ -195,16 +195,23 @@ suite_host() { # every host test of the repo's default members
   done < <(packages "$r")
 }
 
-suite_builds() { # the kernel for all three targets and the UEFI loader
-  local s=kernel.build a log
+# suite_builds [server]: the kernel for all three targets and the UEFI loader,
+# as a test image has them (with `harness`, lib/build.sh). With `server`: as
+# a machine runs them (without), the aarch64 loader too. Only the x86_64
+# server image is booted, and a build that no check makes can stop building
+# unnoticed.
+suite_builds() {
+  local p=${1:-} s=kernel.build${1:+.$1} a log
   for a in x86_64 aarch64 riscv64; do
     log=$(logfile "$s" "$a")
-    if build_kernel "$a" "$log" >/dev/null; then record pass "$s" "$a"
+    if IMAGE_PROFILE=$p build_kernel "$a" "$log" >/dev/null; then record pass "$s" "$a"
     else record fail "$s" "$a" "build failed: $(first_error "$log")"; fi
   done
-  log=$(logfile "$s" loader)
-  if build_loader "$log" >/dev/null; then record pass "$s" loader
-  else record fail "$s" loader "build failed: $(first_error "$log")"; fi
+  for a in x86_64 ${p:+aarch64}; do
+    log=$(logfile "$s" "loader${p:+.$a}")
+    if IMAGE_PROFILE=$p build_loader "$log" "$a" >/dev/null; then record pass "$s" "loader${p:+.$a}"
+    else record fail "$s" "loader${p:+.$a}" "build failed: $(first_error "$log")"; fi
+  done
 }
 
 # inos_machine <arch> <test> <options> <manifest>: set INOS_QEMU to the
@@ -791,6 +798,7 @@ else
   fi
   if { in_scope kernel || in_scope os; } && [ -n "$have_kernel" ]; then
     held kernel.build repo+:kernel "${LIB[@]}" -- suite_builds
+    [ "$tier" = fast ] || held kernel.build.server repo+:kernel "${LIB[@]}" -- suite_builds server
     in_scope kernel && held kernel.kani/build crate:kernel:kernel-core host:kani "ms:$ms" -- suite_kani_build
   fi
   # The guest tests that judge a time, with the host to themselves.
