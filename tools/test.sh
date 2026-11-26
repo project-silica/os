@@ -61,7 +61,7 @@ evidence_init
 
 # The system image's guest tests (run_<name> in lib/tests.sh), and those of
 # them that judge a time.
-SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http http_quit power recovery entropy console_port shutdown server_image console typeahead nvme net net_e1000e
+SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http http_quit power recovery entropy console_port shutdown shutdown_flush shutdown_flush_owner server_image console typeahead nvme net net_e1000e
   dhcp_e1000e ntp_e1000e http_e1000e net_recovery net_recovery_e1000e hotplug hotplug_cycle partitions partitions_full_table partitions_backup_gpt partitions_small_transfer
   recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable nvme_admin_missed hostile_clients unstartable_driver entropy_broken_device hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces
   remote)
@@ -601,6 +601,26 @@ suite_bench() {
   if [ $rc != 0 ] && ! grep -q "^fail"$'\t'"$s"$'\t' "$RES"; then record fail "$s" run "bench.sh exited $rc (log: $log)"; fi
 }
 
+# uses_host_tools <function>: whether a test function, or a run_ function it
+# calls, runs a program of os/host-tools (`host_tool`). Read from the
+# functions themselves: a hand-kept list of such tests once missed one
+# (partitions_full_table, gptdisk), and its result outlived changes to the
+# tool it runs.
+uses_host_tools() {
+  local seen=" " todo=("$1") f body w
+  while [ ${#todo[@]} -gt 0 ]; do
+    f=${todo[0]}; todo=("${todo[@]:1}")
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    body=$(declare -f "$f") || continue
+    [[ ${body#*\{} == *host_tool* ]] && return 0
+    for w in $(grep -oE '\brun_[a-z0-9_]+' <<<"$body" | sort -u); do
+      [ "$w" != "$f" ] && declare -F "$w" >/dev/null && todo+=("$w")
+    done
+  done
+  return 1
+}
+
 # system_test <name>: one of the system image's guest tests (or the faults
 # of one driver, "faults.<driver>"), a unit: each boots its own machine.
 system_test() {
@@ -609,8 +629,9 @@ system_test() {
   gin x86_64 system
   case "$QUIET_SYSTEM" in *" $t "*) q=quiet ;; esac
   # The checks that run a program of os/host-tools beside the guest (theirs
-  # alone: GIN is shared by the units declared after this one).
-  case "$t" in http | http_quit | http_load | http_restart | ntp | console | http_e1000e | http_load_e1000e | ntp_e1000e | remote | interop | partitions_full_table | partitions_backup_gpt) host=(crate:os:silica-host) ;; esac
+  # alone: GIN is shared by the units declared after this one), found from
+  # what the test's function calls, so no test can be left off a list.
+  case "$t" in faults.*) ;; *) uses_host_tools "run_$t" && host=(crate:os:silica-host) ;; esac
   case "$t" in
     faults.*) unit any "system.x86_64/$t" "${GIN[@]}" -- run_faults x86_64 system.x86_64 "${t#faults.}" ;;
     *) unit "$q" "system.x86_64/$t" "${GIN[@]}" "${host[@]+"${host[@]}"}" -- "run_$t" x86_64 system.x86_64 ;;
