@@ -165,6 +165,30 @@ run_inos() {
   return 1
 }
 
+# run_panic_reset <arch> <suite>: a panic on a machine nobody watches (no
+# harness listens for the status). Before, every processor halted for ever and
+# the panic was lost with the machine; now the kernel writes a crash record into
+# memory the loader keeps across a warm reset, resets, and the next boot says
+# the record whole (the panic and its backtrace) before going on. The second
+# boot panics again (the same command line): the test ends at its report.
+run_panic_reset() {
+  local arch=$1 suite=$2 log img serial rc rec
+  log=$(logfile "$suite" build.panic_reset)
+  img=$(UNATTENDED=1 build_image "$arch" "$log" "panic=test") || { record fail "$suite" panic_reset "image build failed (log: $log)"; return 1; }
+  serial=$(logfile "$suite" panic_reset)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --reboot --no-exit-device --timeout "${SILICA_QEMU_TIMEOUT:-120}" \
+    --until '^kernel: end of the last boot.s record' >"$serial.qemu" 2>&1
+  rc=$?
+  rec=$(tr -d '\r' <"$serial" | sed -n '/^kernel: the last boot (boot [0-9]*) ended in a panic; its record:/,/^kernel: end of the last boot.s record/p')
+  if ! grep -aq '^kernel: resetting the machine' <(tr -d '\r' <"$serial"); then
+    record fail "$suite" panic_reset "the panic did not reset the machine (exit status $rc; serial: $serial)"
+  elif [ -z "$rec" ]; then
+    record fail "$suite" panic_reset "the boot after the panic did not report its crash record (exit status $rc; serial: $serial)"
+  elif ! grep -q '^PANIC: deliberate panic' <<<"$rec" || ! grep -qE '^#[0-9]+ 0x[0-9a-f]{16}$' <<<"$rec"; then
+    record fail "$suite" panic_reset "the crash record lacks the panic or its backtrace (serial: $serial)"
+  else record pass "$suite" panic_reset; fi
+}
+
 # run_panic <arch> <suite>: the kernel is asked to panic (panic=test). The
 # boot must fail through the debug-exit device, the serial log must carry the
 # panic message and a backtrace, and symbolize.sh must decode the frame of the
@@ -1407,6 +1431,39 @@ run_ntp() {
     record fail "$suite" "$name" "two questions came from the same port: a spoofer knows where to send (server: ${serial%.log}.sntpd)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" "$name" "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
   else record pass "$suite" "$name"; fi
+}
+
+# run_watchdog <arch> <suite>: a machine whose service manager hangs is reset
+# by its hardware watchdog (QEMU's 6300ESB). The service manager pets it from
+# its own loop; booted with checks=watchdog it stops petting and answering
+# once the watchdog is found, as a hung one would. The watchdog must reset the
+# machine and the next boot must say the watchdog did it. Before, nothing
+# drove the device and the hung machine stayed hung.
+run_watchdog() {
+  local arch=$1 suite=$2 log img serial rc boots
+  # First, a machine that runs as usual for 75 s, past the watchdog's 30 s:
+  # petted, it is never reset.
+  log=$(logfile "$suite" build.watchdog_petted)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" watchdog "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" watchdog_petted)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --reboot --device i6300esb --timeout 75 >"$serial.qemu" 2>&1
+  boots=$(tr -d '\r' <"$serial" | grep -ac '^init: the wall clock')
+  if ! serial_has "$serial" '^init: the watchdog resets this machine' || [ "$boots" != 1 ]; then
+    record fail "$suite" watchdog "a machine whose service manager pets its watchdog booted $boots times in 75 s, or never took the watchdog (serial: $serial)"; return 1
+  fi
+  log=$(logfile "$suite" build.watchdog)
+  img=$(build_system_image "$arch" "$log" "checks=watchdog") || { record fail "$suite" watchdog "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" watchdog)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --reboot --device i6300esb --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
+    --until '^init: the last boot was reset by the watchdog' >"$serial.qemu" 2>&1
+  rc=$?
+  if ! serial_has "$serial" '^init: the watchdog resets this machine'; then
+    record fail "$suite" watchdog "the service manager never took the watchdog: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)|watchdog' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! serial_has "$serial" '^init: no more pets and no more answers'; then
+    record fail "$suite" watchdog "the service manager did not stop petting (serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^init: the last boot was reset by the watchdog'; then
+    record fail "$suite" watchdog "the hung machine was not reset by its watchdog, or the next boot did not say so (exit status $rc; serial: $serial)"
+  else record pass "$suite" watchdog; fi
 }
 
 # run_shutdown <arch> <suite>: the power button shuts the system down in
