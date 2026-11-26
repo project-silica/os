@@ -520,6 +520,50 @@ run_hotplug() {
   else record fail "$suite" "$test" "$bad (serial: $serial)"; fi
 }
 run_hotplug_nvme_one_vector() { run_hotplug "$1" "$2" nvme_one_vector; }
+
+# run_hotplug_cycle <arch> <suite>: one slot, three devices in one boot: a
+# virtio disk put in and taken out, then an NVMe controller (registers laid
+# out otherwise), then a virtio disk again. Each must be driven, the third
+# must get the interrupt lines the first had, and the machine must have as
+# many lines free after the last departure as after the first (the
+# 2026-11-24 audit: interrupt lines never came back, a slot worked once for
+# each line the machine had, and the frames of one device's registers
+# blocked a device laid out otherwise in the same slot).
+run_hotplug_cycle() {
+  local arch=$1 suite=$2 test=hotplug_cycle log img serial rc text bad="" d2 d3 l1 l3 f1 f3 vb
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  d2=$(dirname "$serial")/$test.2.img; d3=$(dirname "$serial")/$test.3.img
+  cp "$img" "$(dirname "$serial")/$test.img" && cp "$img" "$d2" && cp "$img" "$d3" || { record fail "$suite" "$test" "cannot copy the disks"; return 1; }
+  vb='disable-legacy=on,iommu_platform=on'
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" \
+    --hotplug "$(dirname "$serial")/$test.img" \
+    --on "^devmgr: the power button is armed\$=drive_add 0 if=none,id=hot2,format=raw,file=$d2" \
+    --on "^devmgr: 00:02\\.0 [0-9a-f]{4}:[0-9a-f]{4} class 06\\.04\\.00=drive_add 0 if=none,id=hot3,format=raw,file=$d3" \
+    --on "^devmgr: 00:02\\.0 takes devices while the system runs\$=device_add virtio-blk-pci,id=hot1,bus=hp0,drive=hot,$vb" \
+    --on "^devmgr: 00:02\\.0: arrival 1 in the slot=device_del hot1" \
+    --on "^devmgr: 00:02\\.0: departure 1 from the slot=device_add nvme,id=hot2dev,bus=hp0,drive=hot2,serial=hot2" \
+    --on "^devmgr: 00:02\\.0: arrival 2 in the slot=device_del hot2dev" \
+    --on "^devmgr: 00:02\\.0: departure 2 from the slot=device_add virtio-blk-pci,id=hot3dev,bus=hp0,drive=hot3,$vb" \
+    --on "^devmgr: 00:02\\.0: arrival 3 in the slot=device_del hot3dev" \
+    --until '^devmgr: 00:02\.0: departure 3 from the slot' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  [ $rc = 0 ] || bad="three devices did not come and go (exit status $rc; the last slot line: $(grep -a 'devmgr: 00:02\.0' <<<"$text" | tail -1 | cut -c1-120))"
+  [ -n "$bad" ] || [ "$(grep -c '^devmgr: 01:00\.0 1af4:1042 class 01\.00\.00 arrived: virtio-blk$' <<<"$text")" = 2 ] || bad="the virtio disk was not found and driven both times"
+  [ -n "$bad" ] || grep -q '^devmgr: 01:00\.0 1b36:0010 class 01\.08\.02 arrived: nvme$' <<<"$text" || bad="the NVMe controller put in after the virtio disk was not found"
+  [ -n "$bad" ] || ! grep -q 'is not driven' <<<"$text" || bad="$(grep -m1 'is not driven' <<<"$text" | cut -c1-140)"
+  l1=$(sed -nE 's/^devmgr: 00:02\.0: arrival 1 in the slot, (interrupt lines [0-9]+ to [0-9]+),.*/\1/p' <<<"$text")
+  l3=$(sed -nE 's/^devmgr: 00:02\.0: arrival 3 in the slot, (interrupt lines [0-9]+ to [0-9]+),.*/\1/p' <<<"$text")
+  [ -n "$bad" ] || { [ -n "$l1" ] && [ "$l1" = "$l3" ]; } || bad="the third device got $l3, the first $l1: lines were not given back"
+  f1=$(sed -nE 's/^devmgr: 00:02\.0: departure 1 from the slot, ([0-9]+) lines free.*/\1/p' <<<"$text")
+  f3=$(sed -nE 's/^devmgr: 00:02\.0: departure 3 from the slot, ([0-9]+) lines free.*/\1/p' <<<"$text")
+  [ -n "$bad" ] || { [ -n "$f1" ] && [ "$f1" = "$f3" ]; } || bad="$f1 lines were free after the first departure, $f3 after the third"
+  [ -n "$bad" ] || ! grep -q '^ERROR' <<<"$text" || bad="$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140)"
+  if [ -z "$bad" ]; then record pass "$suite" "$test"
+  else record fail "$suite" "$test" "$bad (serial: $serial)"; fi
+}
 run_hotplug_nvme_4k() { run_hotplug "$1" "$2" nvme_4k; }
 run_hotplug_nvme_namespaces() { run_hotplug "$1" "$2" nvme_namespaces; }
 

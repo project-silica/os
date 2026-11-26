@@ -395,7 +395,9 @@ while kill -0 "$pid" 2>/dev/null; do
   for k in "${!on[@]}"; do
     rule=${on[$k]}
     if serial_has "$serial" -E "${rule%%=*}"; then
-      (cd "$RUN" && printf '%s\n' "${rule#*=}" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon") >/dev/null 2>&1
+      # What the monitor answered, beside the serial log: a refused
+      # command is otherwise seen only as what did not happen.
+      { printf '>>> %s\n' "${rule#*=}"; (cd "$RUN" && printf '%s\n' "${rule#*=}" | timeout 5 socat -t1 - "UNIX-CONNECT:$mon"); } >>"$serial.on" 2>&1
       unset "on[$k]"
     fi
   done
