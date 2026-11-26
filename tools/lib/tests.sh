@@ -732,9 +732,12 @@ run_entropy() {
 # run_console_port <arch> <suite>: the shell through a virtual machine's
 # console port (virtio-console, port 0, behind the IOMMU). The host types
 # into the port once the console says it uses it (`echo through the port`,
-# then `shutdown`); what the port sends back must hold the shell's prompt and
-# the echo, line ends as a terminal wants them, and the machine must turn
-# itself off when told to there.
+# then twenty more lines in one burst while the shell is busy, then
+# `shutdown`); what the port sends back must hold the shell's prompt and
+# the echo, line ends as a terminal wants them; of the burst at most 16
+# lines wait for the shell (the rest are dropped, and said: before, every
+# line typed ahead was kept, without bound, and later run); and the machine
+# must turn itself off when told to there.
 run_console_port() {
   local arch=$1 suite=$2 log img serial rc port out
   log=$(logfile "$suite" build.console_port)
@@ -742,13 +745,14 @@ run_console_port() {
   serial=$(logfile "$suite" console_port)
   port=${serial%.log}.port
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --console-port "$port" \
-    --port-type '^console: .* and the console port=\recho through the port\rshu' \
-    --port-type '^through the port$=tdown\r' >"$serial.qemu" 2>&1
+    --port-type '^console: .* and the console port=\recho through the port\recho ta' \
+    --port-type '^through the port$=01\recho ta02\recho ta03\recho ta04\recho ta05\recho ta06\recho ta07\recho ta08\recho ta09\recho ta10\recho ta11\recho ta12\recho ta13\recho ta14\recho ta15\recho ta16\recho ta17\recho ta18\recho ta19\recho ta20\r' --port-type '^ta16$=shutdown\r' >"$serial.qemu" 2>&1
   rc=$?
   out=$(tr -d '\0' <"$port")
   if [ $rc != 0 ]; then record fail "$suite" console_port "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   elif ! grep -q '^virtio-console: port 0, DMA confined by the IOMMU' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "the driver did not say it runs confined (serial: $serial)"
-  elif [[ "$out" != *$'silica> \r\nsilica> echo through the port\r\nthrough the port\r\nsilica> shutdown\r\n'* ]]; then record fail "$suite" console_port "the empty line or queued command did not follow its prompt (port output: $port)"
+  elif [[ "$out" != *$'silica> \r\nsilica> echo through the port\r\nthrough the port\r\nsilica> echo ta01\r\n'* ]]; then record fail "$suite" console_port "the empty line or queued command did not follow its prompt (port output: $port)"
+  elif [[ "$out" != *$'\r\nta16\r\n'* || "$out" == *$'\r\nta18\r\n'* || "$out" != *"a line typed ahead was dropped"* ]]; then record fail "$suite" console_port "of twenty lines typed ahead, more than 16 waited for the shell, or none was said dropped (port output: $port)"
   elif ! grep -q '^init: shutting down' <(tr -d '\r' <"$serial"); then record fail "$suite" console_port "shutdown typed at the port did not shut down (serial: $serial)"
   else record pass "$suite" console_port; fi
 }
