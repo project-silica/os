@@ -275,7 +275,10 @@ run_boot_error() {
   dir=$(art_dir "$arch"); k=$dir/kernel.stripped l=$dir/BOOTX64.EFI r=$dir/root.elf tool=$dir/silica-image
   if [ -n "${PIECES_ONCE:-}" ]; then dir=${PIECES_DIR:-$RUN}/pieces-kernel-$arch; k=$dir/kernel.stripped l=$dir/loader.efi r=$dir/root.elf tool=$dir/silica-image; fi
   out=${UNIT_DIR:-$dir}/error.img
-  local -a args=()
+  # The harness says it listens (QEMU's debug-exit device), as every test
+  # image does: the loader and the kernel write the port only when told.
+  printf 'exit=port\n' >"${UNIT_DIR:-$dir}/error-cmdline.txt" || return 1
+  local -a args=("SILICA/CMDLINE.TXT=${UNIT_DIR:-$dir}/error-cmdline.txt")
   for a in "$@"; do
     a=${a//\$K/$k}; a=${a//\$L/$l}; a=${a//\$R/$r}
     args+=("$a")

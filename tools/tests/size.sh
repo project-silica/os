@@ -128,16 +128,16 @@ fresh 1; mkelf 1000 1000 0 alloc
 expect_fail "linked-allocator" 'kernel heap.*allocator'
 
 # ---- 6. images: required-from milestones and sizes ----------------------------------
-img() { truncate -s "$2" "$ART/$1"; }   # img <file> <bytes> (sparse)
+img() { truncate -s "$2" "$ART/$1"; [ "$1" != server.img ] || echo "$2" >"$ART/server.img.files"; }   # img <file> <bytes> (sparse; the server image with its files' size)
 for spec in "core-text.bin:2097152:5:kernel \+ core servers" "server.img:16777216:4:minimal server image" "desktop.img:134217728:6:desktop image"; do
   IFS=: read -r f lim from name <<<"$spec"
   fresh $((from - 1)); good
-  img core-text.bin 1000; img server.img 1000; img desktop.img 1000; rm -f "${ART:?}/$f"
+  img core-text.bin 1000; img server.img 1000; img desktop.img 1000; rm -f "${ART:?}/$f" "${ART:?}/$f.files"
   run
   [ "$RC" = 0 ] && [ "$(errs)" = 0 ] || bad "$f-missing-before-m$from: want no ERROR, exit 0: $OUT"
   has "^SKIP: size: $name.*required from M$from" || bad "$f-missing-before-m$from: no SKIP naming M$from: $OUT"
   fresh "$from"; good
-  img core-text.bin 1000; img server.img 1000; img desktop.img 1000; rm -f "${ART:?}/$f"
+  img core-text.bin 1000; img server.img 1000; img desktop.img 1000; rm -f "${ART:?}/$f" "${ART:?}/$f.files"
   expect_fail "$f-missing-at-m$from" "$name.*artifact missing \(required from M$from\)"
   img "$f" "$lim"
   expect_pass "$f-at-budget"
