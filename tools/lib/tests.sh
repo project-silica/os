@@ -611,6 +611,37 @@ run_partitions_full_table() {
   rm -f "$disk"
 }
 
+# run_partitions_backup_gpt <arch> <suite>: a disk (host-tools' gptdisk,
+# four partitions) whose primary GPT header is damaged (its checksum zeroed),
+# put in while the system runs (the firmware repairs a primary GPT it finds
+# at boot, from the backup: only a disk that arrives later shows what the
+# block server does). It reads the backup at the disk's last block and lists
+# all four, saying so. Before, it read the primary alone and offered the
+# disk whole, its partitions unreachable.
+run_partitions_backup_gpt() {
+  local arch=$1 suite=$2 name=partitions_backup_gpt log img serial disk gptdisk text
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  gptdisk=$(host_tool gptdisk "$log") || { record fail "$suite" "$name" "gptdisk did not build: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  disk=${serial%.log}.gpt4.img
+  "$gptdisk" "$disk" 4 || { record fail "$suite" "$name" "gptdisk failed"; return 1; }
+  # The primary header's CRC32 (block 1, offset 16) zeroed.
+  dd if=/dev/zero of="$disk" bs=1 count=4 seek=$((512 + 16)) conv=notrunc status=none || { record fail "$suite" "$name" "cannot damage the disk"; return 1; }
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --hotplug "$disk" \
+    --on '^devmgr: 00:02\.0 takes devices while the system runs$=device_add virtio-blk-pci,id=hotdisk,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on' \
+    --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on --type '^devmgr: 01:00\.0 1af4:1042 class 01\.00\.00 arrived: virtio-blk$=trace\n' \
+    --until '^partitions: disk 0x100: [0-9]+ partitions$' >"$serial.qemu" 2>&1
+  text=$(tr -d '\r\0' <"$serial")
+  if grep -q '^partitions: disk 0x100: its GPT header.s checksum is wrong; its backup GPT is used$' <<<"$text" \
+      && grep -q '^partitions: disk 0x100: 4 partitions$' <<<"$text"; then
+    record pass "$suite" "$name"
+  else
+    record fail "$suite" "$name" "a disk whose primary GPT is damaged did not list its partitions from the backup: $(grep -m1 -aE "^(ERROR|PANIC|partitions: disk 0x100)" <<<"$text" | cut -c1-140) (serial: $serial)"
+  fi
+  rm -f "$disk"
+}
+
 # The system image has a 16 KiB GPT entry array. MDTS=1 on this NVMe
 # controller permits 8 KiB per transfer. Give it a fixed PCI slot so
 # finding the same partition on the virtio boot disk cannot pass the test.
