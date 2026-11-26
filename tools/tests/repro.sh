@@ -196,19 +196,25 @@ for args in "--bogus" "extra"; do
   [ ! -s "$CALLS" ] || bad "usage '$args': something was built"
 done
 
-# ---- 9. build_loader: reproducible PE header, caller's flags kept -----------------------------------
+# ---- 9. build_loader: reproducible PE header, caller's flags kept; `harness` in test images only ----
+# The workspace the probe's cargo describes: boot-uefi and kernel define a
+# `harness` feature, another package does not. A test image's loader is built
+# with boot-uefi's (and no other package's); a server image's
+# (IMAGE_PROFILE=server) with none, in a target directory of its own.
 cp "$SRC/lib/build.sh" "$OS/tools/lib/build.sh"
 cat >"$OS/tools/probe-loader.sh" <<'EOF2'
 #!/usr/bin/env bash
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 . "$TOOLS/lib/build.sh"
 cargo_run() { shift 2; printf 'ENV %s\n' "${CARGO_ENV[@]+"${CARGO_ENV[@]}"}"; printf 'ARG %s\n' "$@"; return 1; }
+cargo() { [ "$1" = metadata ] && echo '{"packages":[{"name":"boot-uefi","features":{"harness":[]}},{"name":"kernel","features":{"harness":[]}},{"name":"other","features":{}}]}'; }
+[ "${1:-}" = server ] && export IMAGE_PROFILE=server
 [ "${1:-}" = caller ] && CARGO_ENV=("RUSTFLAGS=-C foo=bar" "KEEP=me")
 before=${#CARGO_ENV[@]}
 build_loader "$SILICA_RUN/loader.log" 2>&1
 echo "BEFORE=$before AFTER=${#CARGO_ENV[@]} OWN=${CARGO_ENV[*]:-}"
 EOF2
-for mode in none caller; do
+for mode in none caller server; do
   PL=$(cd "$FX" && env -i PATH="$FX/bin:${PATH:-/usr/bin:/bin}" HOME="$FX/home" TMPDIR="$FX" SILICA_WS="$WS" SILICA_RUN="$FX" \
     bash "$OS/tools/probe-loader.sh" $mode 2>&1)
   rf=$(printf '%s\n' "$PL" | sed -n 's/^ENV RUSTFLAGS=//p')
@@ -217,6 +223,14 @@ for mode in none caller; do
   grep -q 'ARG boot-uefi' <<<"$PL" || bad "build_loader ($mode): cargo was not asked for boot-uefi: $PL"
   after=$(printf '%s\n' "$PL" | sed -n 's/^BEFORE=\([0-9]*\) AFTER=\([0-9]*\).*/\1 \2/p')
   [ "${after% *}" = "${after#* }" ] && [ -n "$after" ] || bad "build_loader ($mode): the caller's CARGO_ENV changed ($after)"
+  td=$(printf '%s\n' "$PL" | sed -n 's/^ENV CARGO_TARGET_DIR=//p')
+  if [ $mode = server ]; then
+    grep -q '^ARG --features' <<<"$PL" && bad "build_loader (server): a server image's loader was built with a feature: $PL"
+    case "$td" in */target-production) ;; *) bad "build_loader (server): not built in a target directory of its own: $PL" ;; esac
+  else
+    grep -qx 'ARG --features=boot-uefi/harness' <<<"$PL" || bad "build_loader ($mode): a test image's loader was not built with boot-uefi's harness feature alone: $PL"
+    case "$td" in */target) ;; *) bad "build_loader ($mode): not built in the checkout's target directory: $PL" ;; esac
+  fi
   if [ $mode = caller ]; then
     grep -q -- '-C foo=bar' <<<"$rf" || bad "build_loader: the caller's RUSTFLAGS were dropped: $PL"
     printf '%s\n' "$PL" | grep -q '^ENV KEEP=me$' || bad "build_loader: the caller's other variables were dropped: $PL"

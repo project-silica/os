@@ -27,7 +27,16 @@ sections() { # sum of section sizes in ELF $1 whose names match regex $2
   size -A "$1" 2>/dev/null | awk -v re="$2" '$1 ~ re { s += $2 } END { print s + 0 }'
 }
 
-elf=$ART/x86_64/kernel.elf
+# The server image is built here, from the checkouts measured: a copy left
+# from another tree would measure that one. Its kernel is the one a machine
+# runs (built without `harness`, lib/build.sh), and the one measured; where
+# no server image is built yet, the test images' kernel is (the larger).
+if [ -f "$(checkout_of system)/Cargo.toml" ]; then
+  mkdir -p "$OUTBASE"
+  build_server_image x86_64 "$OUTBASE/size.server-image.log" >/dev/null || bad "minimal server image: the build failed (log: $OUTBASE/size.server-image.log)"
+fi
+elf=$ART/x86_64/production/kernel.elf
+[ -f "$elf" ] || elf=$ART/x86_64/kernel.elf
 if [ -f "$elf" ]; then
   check "kernel text+rodata (x86_64)" "$(sections "$elf" '^[.](text|rodata)')" 262144 1 " bytes"
   fast=$(sections "$elf" '^[.]text[.]fast')
@@ -45,12 +54,6 @@ missing_or_measure() { # <name> <file> <budget> <from>
   if [ -f "$2" ]; then check "$1" "$(stat -c %s "$2")" "$3" "$4" " bytes"; else missing "$1" "$4"; fi
 }
 missing_or_measure "kernel + core servers resident text" "$ART/x86_64/core-text.bin" 2097152 5
-# The server image is built here, from the checkouts measured: a copy left
-# from another tree would measure that one.
-if [ -f "$(checkout_of system)/Cargo.toml" ]; then
-  mkdir -p "$OUTBASE"
-  build_server_image x86_64 "$OUTBASE/size.server-image.log" >/dev/null || bad "minimal server image: the build failed (log: $OUTBASE/size.server-image.log)"
-fi
 if [ -f "$ART/x86_64/server.img.files" ]; then check "minimal server image (its files)" "$(cat "$ART/x86_64/server.img.files")" 16777216 4 " bytes"; else missing "minimal server image" 4; fi
 missing_or_measure "desktop image" "$ART/x86_64/desktop.img" 134217728 6
 
