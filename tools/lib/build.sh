@@ -105,6 +105,7 @@ build_system() {
       + (if $s.machine then ["machine"] else [] end)
       + (if $s.start then ["start=\($s.start)"] else [] end)
       + (if $s.restart then ["restart=\($s.restart)"] else [] end)
+      + (if $s.cpu != null then ["cpu=\($s.cpu)"] else [] end)
       + (if $s.seed then ["seed"] else [] end)
       + (if $s.keeps then ["keeps"] else [] end)
       + (if $s.sets_time then ["sets_time"] else [] end)
