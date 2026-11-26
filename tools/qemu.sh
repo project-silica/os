@@ -4,7 +4,7 @@
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
 #           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
-#           [--net user[:<host port>-<guest port>,...]|tap:<interface>] [--nic virtio|e1000e] [--hotplug <disk image>] [--emulator <host cpu list>] [--disk-props <k=v,...>]
+#           [--net user[:<host port>-<guest port>,...]|tap:<interface>] [--nic virtio|e1000e[,<prop>=<v>...]] [--hotplug <disk image>] [--emulator <host cpu list>] [--disk-props <k=v,...>]
 #           [--nvme-disk <disk image>] [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 #           [--console-port <file>] [--port-type '<extended regex>=<text>']...
@@ -157,11 +157,15 @@ for k in "${!drives[@]}"; do
   d=${drives[$k]#*=}; [ -f "$d" ] || die "--drive: image $d not found"
   case "$d" in /*) ;; *) drives[$k]="${drives[$k]%%=*}=$PWD/$d" ;; esac
 done
+# --nic <model>,<property>=<value>...: the model, with properties of its own
+# (a test's MAC address).
+nicprops=""; case "$nic" in *,*) nicprops=,${nic#*,}; nic=${nic%%,*} ;; esac
 case "$nic" in
   virtio) nicdev=virtio-net-pci,netdev=net0,disable-legacy=on,iommu_platform=on ;;
   e1000e) nicdev=e1000e,netdev=net0 ;;
   *) die "--nic: virtio or e1000e, not $nic" ;;
 esac
+nicdev=$nicdev$nicprops
 case "$arch" in
   x86_64)
     bin=qemu-system-x86_64
