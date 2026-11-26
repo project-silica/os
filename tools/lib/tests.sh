@@ -792,13 +792,13 @@ run_svcload() {
 run_entropy() {
   local arch=$1 suite=$2 log img serial rc text name
   log=$(logfile "$suite" build.entropy)
-  img=$(build_system_image "$arch" "$log" "checks=entropy") || { record fail "$suite" entropy "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=entropy entropy.hang_on=4321 entropycheck.hang=4321") || { record fail "$suite" entropy "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" entropy)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
     --device virtio-rng-pci,disable-legacy=on,iommu_platform=on >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing; do
+  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing a_hung_provider_is_started_again; do
     if grep -qx "TEST entropy.$name PASS" <<<"$text"; then record pass "$suite" "entropy_$name"
     else record fail "$suite" "entropy_$name" "$(grep -m1 -a '^ERROR' <<<"$text" | cut -c1-140) (no PASS line; serial: $serial)"; fi
   done
