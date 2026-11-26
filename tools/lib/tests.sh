@@ -453,6 +453,50 @@ run_net() {
   else record fail "$suite" "$test" "$(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_net_mac <arch> <suite>: a virtio NIC that reports a multicast address
+# (QEMU's `mac=01:00:5e:00:00:01`). The driver must not take it as the
+# interface's own: it says so and uses a locally administered one, with which
+# the gateway answers ARP.
+run_net_mac() {
+  local arch=$1 suite=$2 log img serial rc text test=net_mac
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
+    --nic virtio,mac=01:00:5e:00:00:01 >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if [ $rc != 0 ] || ! grep -qx 'TEST virtio-net.arp PASS' <<<"$text"; then
+    record fail "$suite" "$test" "$(grep -m1 -aE '^(ERROR|PANIC)' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! grep -q "^virtio-net: the device's address 01:00:5e:00:00:01 is multicast or zero" <<<"$text"; then
+    record fail "$suite" "$test" "the driver took a multicast address for the interface's own (serial: $serial)"
+  else record pass "$suite" "$test"; fi
+}
+
+# run_net_unplug_e1000e <arch> <suite>: the cable pulled during traffic on an
+# Intel 82574 whose device holds transmits while its link is down, as the
+# real one does (`inject=e1000e:unplugged@1`; QEMU's model would send them
+# nowhere at once). netcheck sends eight frames with the link down and waits
+# past the driver's transmit limit: every one must be answered, the driver
+# must not be started again or say ERROR, and the gateway must answer once
+# the link is back.
+run_net_unplug_e1000e() {
+  local arch=$1 suite=$2 log img serial rc text test=net_unplug_e1000e
+  log=$(logfile "$suite" "build.$test")
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.unplug=1 inject=e1000e:unplugged@1") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$test")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user --nic e1000e \
+    --on '^netcheck: ready for unplug$=set_link net0 off' --on '^netcheck: ready for link up$=set_link net0 on' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  if [ $rc != 0 ] || ! grep -qx 'TEST e1000e.unplug PASS' <<<"$text"; then
+    record fail "$suite" "$test" "$(grep -m1 -aE '^(ERROR|PANIC)|^netcheck: unplugged' <<<"$text" | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! grep -Fxq 'inject: Unplugged committed' <<<"$text"; then record fail "$suite" "$test" "the device never held transmits (serial: $serial)"
+  elif grep -q '^devmgr: e1000e for .* started again' <<<"$text"; then record fail "$suite" "$test" "the driver was started again: a pulled cable was taken for a dead device (serial: $serial)"
+  elif grep -q '^ERROR' <<<"$text"; then record fail "$suite" "$test" "$(grep -m1 '^ERROR' <<<"$text" | cut -c1-140) (serial: $serial)"
+  else record pass "$suite" "$test"; fi
+}
+
 # run_net_recovery <arch> <suite>: the network interface's driver
 # restarted under load (spec/MILESTONES.md M3). netload pings the user-mode
 # gateway with eight requests in flight while the device manager restarts
@@ -693,11 +737,15 @@ run_faults() {
       nvme_machine "$config" "$(build_system_image "$arch" "$(logfile "$suite" build.faults_disk)")"
       machine=("${NVME_MACHINE[@]}") says=("${NVME_SAYS[@]}")
     fi
-    fl=("${faults[@]}"); if [ -z "${4:-}" ] && [[ $driver == virtio-* ]]; then fl+=(broken); [ "$driver" = virtio-blk ] && fl+=(tiny); fi
+    fl=("${faults[@]}"); if [ -z "${4:-}" ] && [[ $driver == virtio-* ]]; then fl+=(broken generation); [ "$driver" = virtio-blk ] && fl+=(tiny short); fi
+    local -a machine_says=("${says[@]+"${says[@]}"}")
     for fault in "${fl[@]}"; do
+      # What the machine says every time, and what this fault adds (not
+      # what the faults before it added).
+      says=("${machine_says[@]+"${machine_says[@]}"}")
       name=fault_${token//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
-      local at=50; [ $fault = tiny ] && at=1   # a queue is offered once, at bring-up
+      local at=50; case $fault in tiny|generation) at=1 ;; esac   # a queue is offered and the configuration read once, at bring-up
       img=$(build_system_image "$arch" "$log" "checks=block inject=$driver:$fault@$at") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
       serial=$(logfile "$suite" "$name")
       "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" "${machine[@]}" >"$serial.qemu" 2>&1
@@ -705,7 +753,11 @@ run_faults() {
       text=$(tr -d '\r\0' <"$serial")
       restarts=$(grep -c "^devmgr: $driver for .* started again" <<<"$text")
       other=$(grep '^ERROR' <<<"$text" | grep -v "^ERROR: $driver: " | head -1 | cut -c1-140)
-      case $fault in garbage|stuck|reset|broken|tiny) want=1 ;; *) want=0 ;; esac
+      case $fault in garbage|stuck|reset|broken|tiny|generation|short) want=1 ;; *) want=0 ;; esac
+      # A configuration that never settles is refused at bring-up, and a
+      # read the device did not write is not believed: each says why.
+      [ $fault = generation ] && says=("${says[@]+"${says[@]}"}" "^ERROR: $driver: Protocol\(\"the configuration changes on every read\"\)")
+      [ $fault = short ] && says=("${says[@]+"${says[@]}"}" "^ERROR: $driver: Protocol\(\"the device completed a read without writing its data\"\)")
       # A queue too small for one request is refused at once, saying why.
       [ $fault = tiny ] && says=("${says[@]+"${says[@]}"}" "^ERROR: $driver: Protocol\(\"a queue too small for one request\"\)")
       # A device that asks to be reset is seen asking, not timed out on.
@@ -730,11 +782,12 @@ run_faults() {
   local nic
   for driver in "${network[@]+"${network[@]}"}"; do
     nic=virtio; [ "$driver" = e1000e ] && nic=e1000e
-    fl=("${faults[@]}"); if [ -z "${4:-}" ] && [[ $driver == virtio-* ]]; then fl+=(broken); [ "$driver" = virtio-blk ] && fl+=(tiny); fi
+    fl=("${faults[@]}"); if [ -z "${4:-}" ] && [[ $driver == virtio-* ]]; then fl+=(broken generation); [ "$driver" = virtio-blk ] && fl+=(tiny short); fi
     for fault in "${fl[@]}"; do
       name=fault_${driver//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
-      img=$(build_system_image "$arch" "$log" "checks=netfault off=netd inject=$driver:$fault@50") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+      local nat=50; [ $fault = generation ] && nat=1
+      img=$(build_system_image "$arch" "$log" "checks=netfault off=netd inject=$driver:$fault@$nat") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
       serial=$(logfile "$suite" "$name")
       "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" >"$serial.qemu" 2>&1
       rc=$?
@@ -746,6 +799,7 @@ run_faults() {
       elif [ -n "$other" ]; then record fail "$suite" "$name" "outside the driver: $other (serial: $serial)"
       elif [ $fault = broken ] && ! grep -qE "^ERROR: $driver: .*the device asks to be reset" <<<"$text"; then record fail "$suite" "$name" "the driver never saw the device ask to be reset (serial: $serial)"
       elif [ "$restarts" -gt 1 ]; then record fail "$suite" "$name" "the driver was started again $restarts times (serial: $serial)"
+      elif [ $fault = generation ] && ! grep -qE "^ERROR: $driver: Protocol\(\"the configuration changes on every read\"\)" <<<"$text"; then record fail "$suite" "$name" "the driver never refused a configuration that never settles (serial: $serial)"
       else record pass "$suite" "$name"; fi
     done
   done
