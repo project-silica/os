@@ -327,6 +327,7 @@ suite_matrix() { # the boot matrix of spec/MILESTONES.md, and the panic path; [n
   [ -n "$only" ] && [[ $only != cpu.* ]] || suite_cpu_models "$only"
   if [ -z "$only" ]; then
     unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64
+    unit any inos.x86_64/panic_reset "${GIN[@]}" -- run_panic_reset x86_64 inos.x86_64
     unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null
     unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64
   fi
@@ -669,6 +670,7 @@ guests() {
       gin aarch64
       unit any entry.aarch64/entry "${GIN[@]}" -- suite_arch_entry aarch64
       unit any inos.aarch64/panic_backtrace "${GIN[@]}" -- run_panic aarch64 inos.aarch64
+      unit any inos.aarch64/panic_reset "${GIN[@]}" -- run_panic_reset aarch64 inos.aarch64
       unit any inos.aarch64/panic_backtrace_secondary "${GIN[@]}" -- run_panic aarch64 inos.aarch64 secondary
       unit any inos.aarch64/null_object_faults "${GIN[@]}" -- run_panic aarch64 inos.aarch64 null
       suite_inos aarch64
@@ -717,11 +719,12 @@ if [ "${#guests[@]}" -gt 0 ]; then
       esac
       # The kernel's panic tests, by name.
       case "$guest" in
-        panic_backtrace | null_object_faults | panic_screen)
+        panic_backtrace | panic_reset | null_object_faults | panic_screen)
           if [ "$PHASE" = rest ]; then
             gin x86_64
             case "$guest" in
               panic_backtrace) unit any inos.x86_64/panic_backtrace "${GIN[@]}" -- run_panic x86_64 inos.x86_64 ;;
+              panic_reset) unit any inos.x86_64/panic_reset "${GIN[@]}" -- run_panic_reset x86_64 inos.x86_64 ;;
               null_object_faults) unit any inos.x86_64/null_object_faults "${GIN[@]}" -- run_panic x86_64 inos.x86_64 null ;;
               panic_screen) unit any inos.x86_64/panic_screen "${GIN[@]}" crate:os:silica-host -- run_panic_screen x86_64 inos.x86_64 ;;
             esac

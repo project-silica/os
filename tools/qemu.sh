@@ -3,7 +3,7 @@
 #   qemu.sh --image <disk.img> [--arch x86_64|aarch64] [--el2] [--cpu <model>] [--serial <file>] [--timeout <s>] [--quiet <s>]
 #           [--screendump <file.ppm> [--screendump-after <s>]] [--smp <n>] [--mem <MiB>]
 #           [--pin <host cpu list>] [--stamp <file>] [--no-iommu] [--device <qemu -device argument>]...
-#           [--until <extended regex>] [--no-exit-device] [--nvme <disk image>] [--disk <disk image>]
+#           [--until <extended regex>] [--no-exit-device] [--reboot] [--nvme <disk image>] [--disk <disk image>]
 #           [--net user[:<host port>-<guest port>,...]|tap:<interface>] [--nic virtio|e1000e] [--hotplug <disk image>] [--emulator <host cpu list>] [--disk-props <k=v,...>]
 #           [--nvme-disk <disk image>] [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
@@ -35,6 +35,8 @@
 # hot-added there: `--on '<regex>=device_add virtio-blk-pci,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on'`.
 # --disk adds a second virtio disk that
 # is written for real (not a snapshot): the host reads it afterwards.
+# --reboot lets a reset start the machine again (a guest that resets after a
+# panic boots once more), where normally a reset ends the emulator.
 # --no-exit-device leaves out the debug-exit device (x86_64): the guest
 # must turn the machine off itself (ACPI), and exit status 0 then means the
 # emulator stopped because the guest turned it off or reset it.
@@ -87,7 +89,7 @@ user_forwards() {
 
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
-cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
+cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 noreboot=-no-reboot nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--object|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu|--maxcpus)
@@ -111,6 +113,7 @@ while [ $# -gt 0 ]; do
     --stamp) stamp=$2; shift 2 ;;
     --no-iommu) iommu=""; shift ;;
     --no-exit-device) exitdev=""; shift ;;
+    --reboot) noreboot=""; shift ;;
     --device) devices+=(-device "$2"); shift 2 ;;
     --object) devices+=(-object "$2"); shift 2 ;;
     --until) until=$2; shift 2 ;;
@@ -274,7 +277,7 @@ why_stopped=(-trace enable=qemu_system_shutdown_request -trace enable=runstate_s
 # the emulator when its parent (this script) exits, by any signal.
 command -v setpriv >/dev/null || die "setpriv (util-linux) is needed: the guest must die with its harness"
 ( cd "$RUN" && [ -z "$stamp" ] || exec >"$RUN/serial.fifo"
-  cd "$RUN" && TMPDIR=$RUN exec setpriv --pdeathsig KILL "${run[@]+"${run[@]}"}" "$bin" -nodefaults -no-reboot -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp${maxcpus:+,maxcpus=$maxcpus}" -m "$mem" \
+  cd "$RUN" && TMPDIR=$RUN exec setpriv --pdeathsig KILL "${run[@]+"${run[@]}"}" "$bin" -nodefaults ${noreboot} -display none -d cpu_reset -D "$RUN/qemu-reset.log" "${why_stopped[@]}" "${accel[@]}" -smp "$smp${maxcpus:+,maxcpus=$maxcpus}" -m "$mem" \
   "${serial_dev[@]}" -monitor "unix:$mon,server,nowait" \
   -drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$RUN/vars.fd" \
   -drive "format=raw,file=$image,if=none,id=boot,snapshot=on,aio=io_uring" "${disk[@]}" "${vga[@]}" "${extra[@]}" "${devices[@]+"${devices[@]}"}" ) 2>"$RUN/qemu.out" &

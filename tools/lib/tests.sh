@@ -165,6 +165,30 @@ run_inos() {
   return 1
 }
 
+# run_panic_reset <arch> <suite>: a panic on a machine nobody watches (no
+# harness listens for the status). Before, every processor halted for ever and
+# the panic was lost with the machine; now the kernel writes a crash record into
+# memory the loader keeps across a warm reset, resets, and the next boot says
+# the record whole (the panic and its backtrace) before going on. The second
+# boot panics again (the same command line): the test ends at its report.
+run_panic_reset() {
+  local arch=$1 suite=$2 log img serial rc rec
+  log=$(logfile "$suite" build.panic_reset)
+  img=$(UNATTENDED=1 build_image "$arch" "$log" "panic=test") || { record fail "$suite" panic_reset "image build failed (log: $log)"; return 1; }
+  serial=$(logfile "$suite" panic_reset)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --reboot --no-exit-device --timeout "${SILICA_QEMU_TIMEOUT:-120}" \
+    --until '^kernel: end of the last boot.s record' >"$serial.qemu" 2>&1
+  rc=$?
+  rec=$(tr -d '\r' <"$serial" | sed -n '/^kernel: the last boot (boot [0-9]*) ended in a panic; its record:/,/^kernel: end of the last boot.s record/p')
+  if ! grep -aq '^kernel: resetting the machine' <(tr -d '\r' <"$serial"); then
+    record fail "$suite" panic_reset "the panic did not reset the machine (exit status $rc; serial: $serial)"
+  elif [ -z "$rec" ]; then
+    record fail "$suite" panic_reset "the boot after the panic did not report its crash record (exit status $rc; serial: $serial)"
+  elif ! grep -q '^PANIC: deliberate panic' <<<"$rec" || ! grep -qE '^#[0-9]+ 0x[0-9a-f]{16}$' <<<"$rec"; then
+    record fail "$suite" panic_reset "the crash record lacks the panic or its backtrace (serial: $serial)"
+  else record pass "$suite" panic_reset; fi
+}
+
 # run_panic <arch> <suite>: the kernel is asked to panic (panic=test). The
 # boot must fail through the debug-exit device, the serial log must carry the
 # panic message and a backtrace, and symbolize.sh must decode the frame of the

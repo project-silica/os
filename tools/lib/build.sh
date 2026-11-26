@@ -213,8 +213,9 @@ build_system_image_locked() {
   lp=$(loader_path "$arch") || { echo "no image layout for $arch (no UEFI loader)" >"$log"; return 1; }
   # As for build_image: the harness hears the status through semihosting on
   # aarch64, through QEMU's debug-exit port on x86_64.
-  [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
-  [ "$arch" = x86_64 ] && cmdline="exit=port${cmdline:+ $cmdline}"
+  # UNATTENDED=1: no harness listens, as on a machine nobody watches (a panic resets it).
+  [ -z "${UNATTENDED:-}" ] && [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
+  [ -z "${UNATTENDED:-}" ] && [ "$arch" = x86_64 ] && cmdline="exit=port${cmdline:+ $cmdline}"
   out=$(art_dir "$arch")
   if [ -n "${PIECES_ONCE:-}" ]; then
     p=$(run_pieces system "$arch" "$log") || return 1
@@ -292,8 +293,9 @@ build_image() {
   # and QEMU's debug-exit port on x86_64, which the loader and kernel use
   # only when told to (on hardware without a debugger the semihosting call
   # is an exception, and port 0xF4 is nobody's to write).
-  [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
-  [ "$arch" = x86_64 ] && cmdline="exit=port${cmdline:+ $cmdline}"
+  # UNATTENDED=1: no harness listens, as on a machine nobody watches (a panic resets it).
+  [ -z "${UNATTENDED:-}" ] && [ "$arch" = aarch64 ] && cmdline="exit=semihosting${cmdline:+ $cmdline}"
+  [ -z "${UNATTENDED:-}" ] && [ "$arch" = x86_64 ] && cmdline="exit=port${cmdline:+ $cmdline}"
   out=$(art_dir "$arch")
   local -a root=() extra=()
   if [ -n "${PIECES_ONCE:-}" ]; then
