@@ -8,6 +8,7 @@
 #           [--nvme-disk <disk image>] [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 #           [--console-port <file>] [--port-type '<extended regex>=<text>']...
+#           [--trace <QEMU trace event>]...
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device, --object
@@ -35,6 +36,9 @@
 # hot-added there: `--on '<regex>=device_add virtio-blk-pci,bus=hp0,drive=hot,disable-legacy=on,iommu_platform=on'`.
 # --disk adds a second virtio disk that
 # is written for real (not a snapshot): the host reads it afterwards.
+# --trace <event> records a QEMU trace event: its lines, as the emulator
+# printed them, land in <serial>.trace once it has stopped (what a device
+# was told to do, seen from the device's side).
 # --no-exit-device leaves out the debug-exit device (x86_64): the guest
 # must turn the machine off itself (ACPI), and exit status 0 then means the
 # emulator stopped because the guest turned it off or reset it.
@@ -87,6 +91,7 @@ user_forwards() {
 
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
+traced=()
 cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -128,6 +133,7 @@ while [ $# -gt 0 ]; do
     --nvme-ns) [ $# -ge 2 ] || die "$1 needs a value"; nvme_ns+=("$2"); shift 2 ;;
     --drive) [ $# -ge 2 ] && [[ $2 == ?*=?* ]] || die "--drive needs <id>=<disk image>"; drives+=("$2"); shift 2 ;;
     --on) on+=("$2"); shift 2 ;;
+    --trace) traced+=("$2"); shift 2 ;;
     --type) typing+=("$2"); shift 2 ;;
     *) die "unknown argument $1" ;;
   esac
@@ -267,6 +273,7 @@ if [ -n "$cport" ]; then
   cport_copy=$!
 fi
 why_stopped=(-trace enable=qemu_system_shutdown_request -trace enable=runstate_set -trace enable=watchdog_perform_action -trace enable=tco_timer_expired)
+for t in "${traced[@]+"${traced[@]}"}"; do why_stopped+=(-trace "enable=$t"); done
 # The guest dies with this script, however it ends: the timeout below is
 # this script's to enforce, and a harness killed mid-run (an interrupted
 # test, a lost terminal) once left a guest running for nine hours, taking
@@ -443,6 +450,7 @@ while kill -0 "$pid" 2>/dev/null; do
   sleep 0.1; waited=$((waited + 1))
 done
 wait "$pid"; rc=$?
+for t in "${traced[@]+"${traced[@]}"}"; do grep -a "^$t" "$RUN/qemu-reset.log" 2>/dev/null; done >"$serial.trace"
 stop_shot
 [ -z "$stamper" ] || wait "$stamper" 2>/dev/null
 stop_shot

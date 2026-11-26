@@ -8,6 +8,10 @@
 //!     can), then opens <n> connections that each send it again and then a
 //!     frame that never ends, a byte a second; succeeds if the machine
 //!     closed every one of them within <seconds>
+//! remoteprobe -i <owner key> -m <machine key> <host>:<port> old-first <seconds>
+//!     sends one owner's first handshake message made <seconds> ago (as one
+//!     recorded then and sent now); succeeds if the machine closes the
+//!     connection without answering it
 //! remoteprobe -i <owner key> -m <machine key> <host>:<port> silent <n> <seconds>
 //!     opens <n> connections that send nothing; succeeds if the machine
 //!     closed every one of them within <seconds>
@@ -42,7 +46,7 @@ use silica_remote::{Frames, MAX_FRAME, PROLOGUE, STAMP, stamp};
 
 fn usage() -> ! {
     eprintln!(
-        "usage: remoteprobe -i <owner key> -m <machine key> <host>:<port> replay <n> <seconds> | silent <n> <seconds> | trickle-session <seconds> | stage-hold <seconds>"
+        "usage: remoteprobe -i <owner key> -m <machine key> <host>:<port> replay <n> <seconds> | old-first <seconds> | silent <n> <seconds> | trickle-session <seconds> | stage-hold <seconds>"
     );
     std::process::exit(2)
 }
@@ -59,9 +63,35 @@ fn main() {
     match a[5].as_str() {
         "replay" => replay(host, &owner, &machine, num(6) as usize, num(7)),
         "stage-hold" => stage_hold(host, &owner, &machine, num(6)),
+        "old-first" => old_first(host, &owner, &machine, num(6)),
         "silent" => silent(host, num(6) as usize, num(7)),
         "trickle-session" => trickle_session(host, &owner, &machine, num(6)),
         _ => usage(),
+    }
+}
+
+/// See the module's documentation.
+fn old_first(host: &str, owner: &Keypair, machine: &[u8; 32], ago: u64) {
+    let mut e = [0u8; 32];
+    random(&mut e);
+    let mut first = [0u8; noise::FIRST + STAMP];
+    let made = now_ns().saturating_sub(ago.saturating_mul(1_000_000_000));
+    let (_, len) = Initiator::start(PROLOGUE, owner, machine, e, &stamp(made), &mut first)
+        .unwrap_or_else(|e| fail(format!("handshake: {e:?}")));
+    let mut tcp = TcpStream::connect(host).unwrap_or_else(|e| fail(format!("{host}: {e}")));
+    write_frame(&mut tcp, &first[..len]).unwrap_or_else(|e| fail(format!("{host}: {e}")));
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    let mut len2 = [0u8; 2];
+    match tcp.read_exact(&mut len2) {
+        Ok(()) => {
+            eprintln!("the machine answered a first message made {ago} s ago");
+            std::process::exit(1)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof || e.kind() == std::io::ErrorKind::ConnectionReset => {}
+        Err(e) => {
+            eprintln!("the machine neither answered nor closed: {e}");
+            std::process::exit(1)
+        }
     }
 }
 

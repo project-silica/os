@@ -1104,8 +1104,17 @@ run_remote() {
   # The session's own service: its update ends the session that asked for
   # it, and the client asks a new one what runs.
   { cat "$(system_program "$arch" remote "$log")"; printf 'a new version of remote\n'; } >"$dir/remote-new.elf"
+  listening=$(tr -d '\r' <"$serial" | grep -ac '^remote: listening on port 22')
   out=$(R update remote "$dir/remote-new.elf") && grep -q '^remote runs the program sent' <<<"$out" || step "update remote (the session's own service): $out"
   until_seen '^init: remote started on its new program' || step "remote was not started on its new program"
+  # Its program changed, so its kept page (each owner's newest first message)
+  # is empty, as after any boot: a first message of the watcher's (who has
+  # not connected since) recorded an hour ago is refused by the machine's
+  # clock all the same (the review of 2026-11-25: before, it was answered).
+  until_seen '^remote: listening on port 22' $((listening + 1)) || step "remote did not listen again after its update"
+  "$probe" -i "$dir/watcher.key" -m "$machine" "127.0.0.1:$port" old-first 3600 >"$dir/old-first.out" 2>&1 \
+    || step "a first message made an hour ago was answered once the newest times were lost: $(tail -1 "$dir/old-first.out")"
+  until_seen "made [0-9]* s before this machine's clock" || step "the machine did not say it refused a first message made an hour ago"
   # A service that keeps a page across restarts (the network stack: its
   # lease, its connections) gets an empty one with a new program: nothing an
   # instance wrote there is trusted by the program put in its place (the
@@ -1325,6 +1334,43 @@ run_shutdown() {
   if [ $rc = 0 ] && serial_has "$serial" '^init: shutting down' && serial_has "$serial" '^init: devmgr stopped' \
       && ! serial_has "$serial" '^ERROR'; then record pass "$suite" shutdown
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
+}
+
+# run_shutdown_flush <arch> <suite>: turning the machine off ends the disks'
+# drivers in order (the review of 2026-11-25: every driver was destroyed where
+# it stood, a power cut for the devices' write caches). With an NVMe
+# controller beside the virtio boot disk, the power button is pressed: the
+# device manager asks its block drivers to end; virtio-blk flushes its write
+# cache; NVMe flushes and performs the controller's normal shutdown (CC.SHN,
+# until CSTS.SHST says it is done). QEMU's own trace must show the
+# controller's flush and shutdown; the drivers and the device manager must say
+# they ended in order; the machine must turn off.
+run_shutdown_flush_owner() { run_shutdown_flush "$1" "$2" owner; }
+run_shutdown_flush() {
+  local arch=$1 suite=$2 mode=${3:-power} name=shutdown_flush log img serial rc why=""
+  local -a how=(--on '^devmgr: the power button is armed$=system_powerdown')
+  # The owner's way: `shutdown` typed at the shell, the service manager then
+  # asking the device manager to end (the power button's way, the device
+  # manager ends its drivers before it asks).
+  [ "$mode" = owner ] && name=shutdown_flush_owner how=(--console-port "$(logfile "$suite" shutdown_flush_owner).port" --port-type '^console: .* and the console port=shutdown\r')
+  log=$(logfile "$suite" build.$name)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  nvme_machine "" "$img"
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" "${NVME_MACHINE[@]}" \
+    --trace pci_nvme_flush_ns --trace pci_nvme_mmio_shutdown_set \
+    "${how[@]}" >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc != 0 ] || ! serial_has "$serial" '^init: shutting down'; then why="the machine did not turn off in order (exit status $rc)"
+  elif ! grep -q '^pci_nvme_flush_ns' "$serial.trace" 2>/dev/null; then why="the NVMe controller was never told to flush (QEMU trace: $serial.trace)"
+  elif ! grep -q '^pci_nvme_mmio_shutdown_set' "$serial.trace" 2>/dev/null; then why="the NVMe controller was never shut down (CC.SHN; QEMU trace: $serial.trace)"
+  elif [ "$mode" = power ] && ! serial_has "$serial" '^nvme: the controller shut down in order'; then why="the NVMe controller did not report its shutdown complete"
+  elif [ "$mode" = power ] && [ "$(tr -d '\r' <"$serial" | grep -ac '^block: the driver ended in order, its write cache flushed')" -lt 2 ]; then why="the two disks' drivers did not both flush and end in order"
+  elif [ "$mode" = power ] && [ "$(tr -d '\r' <"$serial" | grep -ac '^devmgr: .* ended in order')" -lt 2 ]; then why="the device manager did not see both disks' drivers end in order"
+  elif [ "$mode" = owner ] && ! serial_has "$serial" '^init: devmgr ended in order'; then why="the device manager was not asked to end, or did not end in order"
+  elif serial_has "$serial" '^ERROR'; then why="$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
+  fi
+  if [ -z "$why" ]; then record pass "$suite" "$name"; else record fail "$suite" "$name" "$why (serial: $serial)"; fi
 }
 
 # run_server_image <arch> <suite>: the minimal server image (build_server_image)
