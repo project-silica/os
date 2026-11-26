@@ -491,34 +491,26 @@ run_nvme_namespaces() { run_nvme "$1" "$2" namespaces; }
 # over an e1000e interface"), its driver e1000e.
 run_net_e1000e() { run_net "$1" "$2" e1000e; }
 
-# run_net_crowd <arch> <suite>: a network client at full queue depth while
-# its link changes (netcheck.crowd): every completion must arrive and the
-# link's news after them (the 2026-11-24 audit: the news took the
-# completion ring's place of a transmit's completion, which was lost).
-run_net_crowd() {
-  local arch=$1 suite=$2 test=net_crowd log img serial rc text
-  log=$(logfile "$suite" "build.$test")
-  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.crowd=1") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" "$test")
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user \
-    --on '^netcheck: crowd: ready for the link to change$=set_link net0 off' \
-    --on '^netcheck: crowd: [0-9]+ transmits in flight$=set_link net0 on' >"$serial.qemu" 2>&1
-  rc=$?
-  text=$(tr -d '\r\0' <"$serial")
-  if [ $rc = 0 ] && grep -qx 'TEST crowd PASS' <<<"$text" && ! grep -q '^ERROR' <<<"$text"; then record pass "$suite" "$test"
-  else record fail "$suite" "$test" "$(grep -m1 -aE '^(ERROR|PANIC|netcheck: crowd: [0-9]+ of)' <<<"$text" | cut -c1-160) (exit status $rc; serial: $serial)"; fi
-}
+# run_net <arch> <suite> [nic]: the interface's checks (netcheck, the stack
+# off): its link cycled, ARP and a ping; on virtio-net, in the same boot, a
+# client at full queue depth while its link changes (netcheck.crowd): every
+# completion must arrive and the link's news after them (the 2026-11-24
+# audit: the news took the completion ring's place of a transmit's
+# completion, which was lost). One boot for both: they need the same image.
 run_net() {
-  local arch=$1 suite=$2 nic=${3:-virtio} log img serial rc text name driver=virtio-net test=net
+  local arch=$1 suite=$2 nic=${3:-virtio} log img serial rc text name driver=virtio-net test=net crowd=() words="" names
   [ "$nic" = e1000e ] && driver=e1000e test=net_e1000e
+  [ "$nic" = virtio ] && words=" netcheck.crowd=1" crowd=(--on '^netcheck: crowd: ready for the link to change$=set_link net0 off' --on '^netcheck: crowd: [0-9]+ transmits in flight$=set_link net0 on')
   log=$(logfile "$suite" "build.$test")
-  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.link=cycle") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.link=cycle$words") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$test")
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" \
-    --on '^netcheck: ready for link down$=set_link net0 off' --on '^netcheck: confirmed link down$=set_link net0 on' >"$serial.qemu" 2>&1
+    --on '^netcheck: ready for link down$=set_link net0 off' --on '^netcheck: confirmed link down$=set_link net0 on' "${crowd[@]}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in "$driver.link_cycle" "$driver.arp" "$driver.ping"; do
+  names=("$driver.link_cycle" "$driver.arp" "$driver.ping")
+  [ "$nic" = virtio ] && names+=(crowd)
+  for name in "${names[@]}"; do
     if grep -qx "TEST $name PASS" <<<"$text"; then record pass "$suite" "$name"
     else record fail "$suite" "$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
