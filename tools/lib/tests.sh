@@ -1326,18 +1326,23 @@ run_remote() {
   # the page of the program before it is handed to the new one read-only,
   # as another program's, and the stack takes from it only the connections
   # to reset, as it does after it was killed. The owner's tool, which holds
-  # the session the update was asked on, is reset within 1 s of the new
-  # stack holding its address (before: nothing reset it, and the tool
-  # waited out its two minutes); the next command connects anew.
+  # the session the update was asked on, is reset once the new stack holds
+  # its address and reaches the router, which the stack says, and the tool
+  # has ended 1 s after that (before: nothing reset it, and the tool waited
+  # out its two minutes); the next command connects anew. Not 1 s from the
+  # lease: the router's answer between is the guest's own progress, which a
+  # loaded host delays (a --fast run on 2026-11-26, and hosted runners).
   { cat "$(system_program "$arch" netd "$log")"; printf 'a new version of netd\n'; } >"$dir/netd-new.elf"
+  local resets; resets=$(tr -d '\r' <"$serial" | grep -ac '^netd: the connections of the stack before it are reset')
   R update netd "$dir/netd-new.elf" >"$dir/update-netd.out" 2>&1 &
   local updater=$!
   { until_seen "^init: netd's kept page starts empty for its new program" && until_seen '^init: netd started on its new program'; } \
     || step "netd's new program was not given an empty kept page"
   until_seen '^netd: [0-9.]+/[0-9]+ from DHCP server' 2 || step "netd's new program did not take a lease of its own"
+  until_seen '^netd: the connections of the stack before it are reset' $((resets + 1)) || step "the new stack did not say it reset the connections of the one before it"
   for i in $(seq 10); do kill -0 $updater 2>/dev/null || break; sleep 0.1; done
   if kill -0 $updater 2>/dev/null; then
-    step "the session netd's update was asked on was not reset within 1 s of the new stack holding its address: the owner's tool still waits"
+    step "the session netd's update was asked on was not reset within 1 s of the new stack saying it reset the old one's connections: the owner's tool still waits"
     kill $updater 2>/dev/null
   fi
   wait $updater 2>/dev/null
