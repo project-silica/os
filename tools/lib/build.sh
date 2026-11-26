@@ -276,13 +276,24 @@ build_system_image_locked() {
     [ -n "$server" ] && ! grep -qx "$n" "$sys/server.programs" && continue
     entries+=(--ramdisk-entry "$n=$f")
   done
-  entries+=(--ramdisk-entry "drivers=$sys/drivers.list" --ramdisk-entry "services=$services")
+  # Which program drives a device is the archive's drivers list to say and
+  # nothing else's (the device manager takes the first line that names a
+  # device). An image built to put another program in a driver's place (a
+  # test's hostile driver) says so there, ahead of the drivers' own lines:
+  # $SYSTEM_DRIVERS, "<match> <program>" lines. Never a server image.
+  local drivers=$sys/drivers.list
+  if [ -n "${SYSTEM_DRIVERS:-}" ]; then
+    [ -z "$server" ] || { echo "a server image's drivers are its own: SYSTEM_DRIVERS is for test images" >"$log"; return 1; }
+    drivers=$out/drivers-$(printf '%s' "$SYSTEM_DRIVERS" | cksum | cut -d' ' -f1).list
+    { printf '%s\n' "$SYSTEM_DRIVERS"; cat "$sys/drivers.list"; } >"$drivers.$$" && mv "$drivers.$$" "$drivers" || return 1
+  fi
+  entries+=(--ramdisk-entry "drivers=$drivers" --ramdisk-entry "services=$services")
   # Files provisioned for this machine ($SYSTEM_FILES: "<name>=<host file>"
   # words), as an installer would put them in its archive: a service
   # declared with `files=` is given them (the remote service's keys).
   for f in ${SYSTEM_FILES:-}; do entries+=(--ramdisk-entry "$f"); done
   n=system.img; [ "$root" = init ] || n=system-$root.img; [ -n "$server" ] && n=server.img
-  tag=$(printf '%s %s %s' "$cmdline" "${SYSTEM_FILES:-}" "$server" | cksum | cut -d' ' -f1)
+  tag=$(printf '%s %s %s' "$cmdline" "${SYSTEM_FILES:-}${SYSTEM_DRIVERS:+ drivers: $SYSTEM_DRIVERS}" "$server" | cksum | cut -d' ' -f1)
   if [ -n "${UNIT_DIR:-}" ]; then out=$UNIT_DIR/image-$tag
   elif [ -n "$cmdline" ] && [ -n "${RUN:-}" ]; then out=$RUN/image-$tag; fi
   mkdir -p "$out" || return 1

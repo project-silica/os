@@ -537,7 +537,7 @@ run_net_mac() {
 
 # run_net_unplug_e1000e <arch> <suite>: the cable pulled during traffic on an
 # Intel 82574 whose device holds transmits while its link is down, as the
-# real one does (`inject=e1000e:unplugged@1`; QEMU's model would send them
+# real one does (`devmgr.inject=e1000e:unplugged@1`; QEMU's model would send them
 # nowhere at once). netcheck sends eight frames with the link down and waits
 # past the driver's transmit limit: every one must be answered, the driver
 # must not be started again or say ERROR, and the gateway must answer once
@@ -545,7 +545,7 @@ run_net_mac() {
 run_net_unplug_e1000e() {
   local arch=$1 suite=$2 log img serial rc text test=net_unplug_e1000e
   log=$(logfile "$suite" "build.$test")
-  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.unplug=1 inject=e1000e:unplugged@1") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=net off=netd netcheck.unplug=1 devmgr.inject=e1000e:unplugged@1") || { record fail "$suite" "$test" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$test")
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user --nic e1000e \
     --on '^netcheck: ready for unplug$=set_link net0 off' --on '^netcheck: ready for link up$=set_link net0 on' >"$serial.qemu" 2>&1
@@ -773,7 +773,7 @@ run_partitions_small_transfer() {
 
 # run_faults <arch> <suite>: a device that misbehaves (spec/MILESTONES.md
 # M3, fault injection). One boot per fault and block driver, the driver
-# committing the fault at its 50th request (inject=<driver>:<fault>@50,
+# committing the fault at its 50th request (devmgr.inject=<driver>:<fault>@50,
 # silica_driver::inject): for virtio-blk in the middle of blkcheck's 128
 # reads in flight. Every check of blkcheck's on that disk must still pass
 # (its requests are sent again to the driver started in place of one that
@@ -813,7 +813,7 @@ run_faults() {
       name=fault_${token//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
       local at=50; case $fault in tiny|generation) at=1 ;; esac   # a queue is offered and the configuration read once, at bring-up
-      img=$(build_system_image "$arch" "$log" "checks=block inject=$driver:$fault@$at") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+      img=$(build_system_image "$arch" "$log" "checks=block devmgr.inject=$driver:$fault@$at") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
       serial=$(logfile "$suite" "$name")
       "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" "${machine[@]}" >"$serial.qemu" 2>&1
       rc=$?
@@ -854,7 +854,7 @@ run_faults() {
       name=fault_${driver//-/_}_$fault
       log=$(logfile "$suite" "build.$name")
       local nat=50; [ $fault = generation ] && nat=1
-      img=$(build_system_image "$arch" "$log" "checks=netfault off=netd inject=$driver:$fault@$nat") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
+      img=$(build_system_image "$arch" "$log" "checks=netfault off=netd devmgr.inject=$driver:$fault@$nat") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; continue; }
       serial=$(logfile "$suite" "$name")
       "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --nic "$nic" >"$serial.qemu" 2>&1
       rc=$?
@@ -1530,14 +1530,25 @@ run_ntp() {
 run_watchdog() {
   local arch=$1 suite=$2 log img serial rc boots
   # First, a machine that runs as usual for 75 s, past the watchdog's 30 s:
-  # petted, it is never reset.
+  # petted, it is never reset. Its owner restarts the device manager on the
+  # way (the shell's `restart devmgr`): the watchdog's driver ends with it
+  # and a new one starts, which the service manager must take and pet as it
+  # did the first. (Before, the service manager asked the device manager
+  # once, at boot, to be told of watchdogs; the new device manager had
+  # never been asked, nobody petted the new driver's watchdog, and the
+  # machine was reset 30 s after any restart of the device manager.)
   log=$(logfile "$suite" build.watchdog_petted)
   img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" watchdog "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" watchdog_petted)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --reboot --device i6300esb --timeout 75 >"$serial.qemu" 2>&1
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --reboot --device i6300esb --timeout 75 \
+    --device VGA --device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
+    --type '^init: the watchdog resets this machine=restart devmgr\n' >"$serial.qemu" 2>&1
   boots=$(tr -d '\r' <"$serial" | grep -ac '^init: the wall clock')
   if ! serial_has "$serial" '^init: the watchdog resets this machine' || [ "$boots" != 1 ]; then
     record fail "$suite" watchdog "a machine whose service manager pets its watchdog booted $boots times in 75 s, or never took the watchdog (serial: $serial)"; return 1
+  fi
+  if ! serial_has "$serial" '^init: devmgr restarted, as asked' || [ "$(tr -d '\r' <"$serial" | grep -ac '^init: the watchdog resets this machine')" != 2 ]; then
+    record fail "$suite" watchdog "the device manager was restarted and the service manager did not take the new watchdog driver, or the restart never happened (serial: $serial)"; return 1
   fi
   log=$(logfile "$suite" build.watchdog)
   img=$(build_system_image "$arch" "$log" "checks=watchdog") || { record fail "$suite" watchdog "image build failed: $(first_error "$log") (log: $log)"; return 1; }
@@ -1637,7 +1648,13 @@ run_shutdown_flush() {
 #   make a broken image pass, as `checks=` would).
 # A package that gains a hook adds its words to both.
 HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting')
-HOOK_CMDLINE='panic=test'
+# The kernel's panic word, and the device manager's: a fault for the
+# network driver to commit on purpose and another program in that driver's
+# place, each as a bare word and as the device manager's own option (the
+# 2026-11-24 audit: production drivers obeyed fault-injection hooks from the
+# boot string, and `driver=` gave any program in the archive a device's
+# authority).
+HOOK_CMDLINE='panic=test inject=virtio-net:reset@1 devmgr.inject=virtio-net:reset@1 driver=1af4:1041=logd devmgr.driver=1af4:1041=logd'
 run_server_image() {
   local arch=$1 suite=$2 log img serial rc sys want got extra w f
   log=$(logfile "$suite" build.server_image)
@@ -1662,7 +1679,11 @@ run_server_image() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user --no-exit-device \
     --on '^netd: the router 10\.0\.2\.2 answers a ping=system_powerdown' >"$serial.qemu" 2>&1
   rc=$?
-  if [ $rc != 0 ] || ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping' || ! serial_has "$serial" '^init: shutting down'; then
+  if serial_has "$serial" '^inject: '; then
+    record fail "$suite" server_image "a driver of the server image armed a fault the boot command line named: $(tr -d '\r' <"$serial" | grep -m1 -a '^inject: ' | cut -c1-100) (serial: $serial)"
+  elif ! serial_has "$serial" '^devmgr: [0-9a-f:.]* 1af4:1041 .*: virtio-net$'; then
+    record fail "$suite" server_image "the boot command line chose the network card's driver: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: [0-9a-f:.]* 1af4:1041 ' | cut -c1-120) (serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping' || ! serial_has "$serial" '^init: shutting down'; then
     record fail "$suite" server_image "it did not come up on the network and turn off in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   elif serial_has "$serial" '^init: hello|passed$'; then record fail "$suite" server_image "a check ran on the server image (serial: $serial)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" server_image "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
@@ -1794,8 +1815,10 @@ run_power() {
 }
 
 # run_rogue <arch> <suite>: what a driver cannot do. The system image boots
-# with a hostile driver in place of the disk's (driver=...=virtio-rogue), on
-# the machine with an IOMMU. One result per check: the driver's own `TEST
+# with a hostile driver in place of the disk's (its image is built with the
+# line `pci <ids> virtio-rogue` first in its drivers list, SYSTEM_DRIVERS:
+# which program gets a device is the checked archive's to say, never the
+# boot command line's), on the machine with an IOMMU. One result per check: the driver's own `TEST
 # <name> PASS` lines, and three it cannot see for itself, taken from who
 # enforces them: the kernel's line for each access and each interrupt
 # message the IOMMU refused, and
@@ -1854,7 +1877,7 @@ rogue_on() {
   local arch=$1 suite=$2 sfx=$3 id=$4 at=$5 log img serial rc name text want
   shift 5
   log=$(logfile "$suite" "build.rogue$sfx")
-  img=$(build_system_image "$arch" "$log" "driver=$id=virtio-rogue checks=") || { record fail "$suite" "rogue$sfx" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(SYSTEM_DRIVERS="pci $id virtio-rogue" build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "rogue$sfx" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "rogue$sfx")
   # The system stays up; the run ends when the driver's second run is over.
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
@@ -1943,14 +1966,14 @@ run_systest() {
 
 # run_nvme_admin_missed <arch> <suite>: an NVMe controller whose first admin
 # command completes without the driver hearing its interrupt
-# (inject=nvme:admin_missed@1). The driver must find the completion by
+# (devmgr.inject=nvme:admin_missed@1). The driver must find the completion by
 # looking at the queue itself, within 100 ms (it slept out the whole 5 s
 # admin timeout before), bring the controller up and pass blkcheck, without
 # being started again.
 run_nvme_admin_missed() {
   local arch=$1 suite=$2 log img serial rc text us name=nvme_admin_missed
   log=$(logfile "$suite" "build.$name")
-  img=$(build_system_image "$arch" "$log" "checks=block inject=nvme:admin_missed@1") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(build_system_image "$arch" "$log" "checks=block devmgr.inject=nvme:admin_missed@1") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   nvme_machine "" "$(build_system_image "$arch" "$(logfile "$suite" build.$name.disk)")"
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" "${NVME_MACHINE[@]}" >"$serial.qemu" 2>&1
@@ -1997,7 +2020,8 @@ run_hostile_clients() {
 
 
 # run_unstartable_driver <arch> <suite>: a device whose driver cannot be
-# started (the boot archive's services list named as its program). The
+# started (its image's drivers list names the boot archive's services list
+# as its program, SYSTEM_DRIVERS). The
 # device manager enables memory decoding, bus mastering and MSI-X just
 # before the start; when the start fails, the device must be left unable to
 # reach memory (bus mastering off, read back from its command register) and
@@ -2007,7 +2031,7 @@ run_hostile_clients() {
 run_unstartable_driver() {
   local arch=$1 suite=$2 log img serial rc text port name=unstartable_driver
   log=$(logfile "$suite" "build.$name")
-  img=$(build_system_image "$arch" "$log" "checks= driver=1af4:1043=services") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  img=$(SYSTEM_DRIVERS="pci 1af4:1043 services" build_system_image "$arch" "$log" "checks=") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" "$name")
   port=${serial%.log}.port
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --console-port "$port" \
