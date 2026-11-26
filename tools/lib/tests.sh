@@ -1331,6 +1331,39 @@ run_ntp() {
   else record pass "$suite" "$name"; fi
 }
 
+# run_watchdog <arch> <suite>: a machine whose service manager hangs is reset
+# by its hardware watchdog (QEMU's 6300ESB). The service manager pets it from
+# its own loop; booted with checks=watchdog it stops petting and answering
+# once the watchdog is found, as a hung one would. The watchdog must reset the
+# machine and the next boot must say the watchdog did it. Before, nothing
+# drove the device and the hung machine stayed hung.
+run_watchdog() {
+  local arch=$1 suite=$2 log img serial rc boots
+  # First, a machine that runs as usual for 75 s, past the watchdog's 30 s:
+  # petted, it is never reset.
+  log=$(logfile "$suite" build.watchdog_petted)
+  img=$(build_system_image "$arch" "$log" "checks=") || { record fail "$suite" watchdog "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" watchdog_petted)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --reboot --device i6300esb --timeout 75 >"$serial.qemu" 2>&1
+  boots=$(tr -d '\r' <"$serial" | grep -ac '^init: the wall clock')
+  if ! serial_has "$serial" '^init: the watchdog resets this machine' || [ "$boots" != 1 ]; then
+    record fail "$suite" watchdog "a machine whose service manager pets its watchdog booted $boots times in 75 s, or never took the watchdog (serial: $serial)"; return 1
+  fi
+  log=$(logfile "$suite" build.watchdog)
+  img=$(build_system_image "$arch" "$log" "checks=watchdog") || { record fail "$suite" watchdog "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" watchdog)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --reboot --device i6300esb --timeout "${SILICA_QEMU_TIMEOUT:-180}" \
+    --until '^init: the last boot was reset by the watchdog' >"$serial.qemu" 2>&1
+  rc=$?
+  if ! serial_has "$serial" '^init: the watchdog resets this machine'; then
+    record fail "$suite" watchdog "the service manager never took the watchdog: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)|watchdog' | cut -c1-140) (exit status $rc; serial: $serial)"
+  elif ! serial_has "$serial" '^init: no more pets and no more answers'; then
+    record fail "$suite" watchdog "the service manager did not stop petting (serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^init: the last boot was reset by the watchdog'; then
+    record fail "$suite" watchdog "the hung machine was not reset by its watchdog, or the next boot did not say so (exit status $rc; serial: $serial)"
+  else record pass "$suite" watchdog; fi
+}
+
 # run_shutdown <arch> <suite>: the power button shuts the system down in
 # order. The system stays up (no checks); once the device manager says the
 # button is armed the host presses it (QEMU's system_powerdown, an ACPI

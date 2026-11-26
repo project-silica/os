@@ -90,10 +90,12 @@ build_system() {
     put "$built" "$out/$n.debug.elf" || return 1
   done
   # The drivers list the device manager reads: "<match> <program>" for each
-  # match a package declares ([package.metadata.silica] drivers), its
-  # program being the package's binary.
+  # match a package declares ([package.metadata.silica] drivers), its program
+  # being the package's binary, then "config=<offset>:<bytes>:<value>,..." when
+  # the package declares configuration writes (`config`, hexadecimal).
   jq -r '.packages[] | select(.metadata.silica.drivers) | . as $p
-    | ($p.targets[] | select(.kind[] == "bin") | .name) as $bin | $p.metadata.silica.drivers[] | "\(.) \($bin)"' <<<"$meta" >"$out/drivers.list" || return 1
+    | ($p.targets[] | select(.kind[] == "bin") | .name) as $bin | $p.metadata.silica.drivers[]
+    | "\(.) \($bin)" + (if $p.metadata.silica.config then " config=" + ($p.metadata.silica.config | join(",")) else "" end)' <<<"$meta" >"$out/drivers.list" || return 1
   # The services list the service manager reads (init's manifest module):
   # one line per package declaring [package.metadata.silica.service].
   jq -r '.packages[] | select(.metadata.silica.service) | . as $p | .metadata.silica.service as $s
