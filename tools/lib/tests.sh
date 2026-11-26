@@ -1227,14 +1227,24 @@ run_remote() {
   # session that, once proven, starts a frame it never finishes: the owner
   # is still served, and the machine closes each (the silent ones within the
   # 10 s to prove an owner, the trickling session at its idle limit, 6 s in
-  # this owner's line of the owners file: bytes are not messages).
-  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" silent 9 14 >"$dir/silent.out" 2>&1 &
+  # this owner's line of the owners file: bytes are not messages). The
+  # 10 s count from when the machine took the connection, which the host
+  # cannot see: QEMU's user-mode network completes the host's connect at
+  # once and sends the guest its SYN on its own, again at 3 s and at 9 s
+  # when the listener has no room (nine silent connections and the owner's
+  # two are more than its eight). So the probe waits 10 s past the last of
+  # those, and the machine must say that it closed the two it kept for want
+  # of a proof (before: 14 s from the host's connect, and on a hosted
+  # runner, whose guest took the last two after a retried SYN, they were
+  # closed after it gave up).
+  "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" silent 9 20 >"$dir/silent.out" 2>&1 &
   prober=$!
   "$probe" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" trickle-session 10 >"$dir/trickle.out" 2>&1 &
   local trickler=$!
   sleep 1
   out=$(R memory) || step "the owner was not served while nine silent connections were held: $out"
   wait $prober || step "silent connections: $(tail -1 "$dir/silent.out")"
+  until_seen 'closed: no owner proven within 10 s' 2 || step "the machine did not say it closed two silent connections for want of an owner's proof"
   wait $trickler || step "an owner's session trickling a frame: $(tail -1 "$dir/trickle.out")"
   until_seen "^remote: test-owner's session from .* closed: no message for 6 s" || step "the machine did not say it closed the trickling session"
   # A service's name with a terminal's escapes, an OSC title and a carriage
