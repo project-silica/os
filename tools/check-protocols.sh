@@ -5,9 +5,12 @@
 # 9) protocols are provisional and a removal is allowed in stages
 # (spec/ARCHITECTURE.md section 4): each file is checked with
 # `check-compat --retire`, which accepts a method retired into `reserved` at
-# its ordinal and nothing else that is not additive, and a published file
-# that is gone is said and accepted. From M9 every file is checked additive
-# only, and a published file must still be there.
+# its ordinal and nothing else that is not additive. From M9 every file is
+# checked additive only. A published file must always still be there: a
+# protocol is retired whole by keeping its file with every method reserved,
+# so its ordinals are never given to other methods (with the file gone, a
+# protocol of the same name could reuse them, and an old client would call
+# something else).
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
 set -e
 idl=$(checkout_of idl)
@@ -30,18 +33,14 @@ current=("$idl"/protocols/silica/**/*.idl)
 for pin in "${pins[@]}"; do
   [[ $pin =~ ^[0-9a-f]{40}$ ]] || die "missing or invalid IDL pin: $pin"
   git -C "$idl" ls-tree -rz --name-only "$pin" -- protocols/silica >"$scratch/paths"
-  count=0 retired=0
+  count=0
   while IFS= read -r -d '' path; do
     [[ $path == *.idl ]] || continue
-    if [[ ! -e $idl/$path && ${#mode[@]} -gt 0 ]]; then
-      echo "protocols: $path retired since $pin (provisional until M9)"
-      retired=$((retired + 1))
-      continue
-    fi
+    [[ -e $idl/$path ]] || die "$path, published at $pin, is gone: retire a protocol by keeping its file with every method reserved at its ordinal"
     git -C "$idl" show "$pin:$path" >"$scratch/old.idl"
     "$compiler" check-compat "${mode[@]}" "$scratch/old.idl" "$idl/$path" >/dev/null
     count=$((count + 1))
   done <"$scratch/paths"
-  (( count + retired > 0 )) || die "no published protocols at $pin"
+  (( count > 0 )) || die "no published protocols at $pin"
   echo "protocols: $count compatible with $pin${mode[*]:+ (retirements allowed until M9)}"
 done
