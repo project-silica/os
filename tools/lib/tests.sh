@@ -953,7 +953,7 @@ run_entropy() {
     --device virtio-rng-pci,disable-legacy=on,iommu_platform=on >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing control_reaches_only_the_services_declared; do
+  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing control_reaches_only_the_services_declared the_machine_is_never_updated; do
     if grep -qx "TEST entropy.$name PASS" <<<"$text"; then record pass "$suite" "entropy_$name"
     else record fail "$suite" "entropy_$name" "$(grep -m1 -a '^ERROR' <<<"$text" | cut -c1-140) (no PASS line; serial: $serial)"; fi
   done
@@ -1128,13 +1128,13 @@ run_http_quit() {
 # reverts it to the boot archive's; a stranger's key and a wrong machine key
 # get nothing. Then it shuts the machine down. Each step's failure is said.
 run_remote() {
-  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i probe watcher scoped prober n0 free0 free1
+  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i probe watcher scoped upd prober n0 free0 free1
   log=$(logfile "$suite" build.remote)
   rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") && probe=$(host_tool remoteprobe "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
   dir=${UNIT_DIR:-$RUN}/remote; rm -rf "$dir"; mkdir -p "$dir"
-  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") && scoped=$("$rmt" keygen "$dir/scoped.key") \
+  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") && scoped=$("$rmt" keygen "$dir/scoped.key") && upd=$("$rmt" keygen "$dir/updater.key") \
     || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
-  printf '# who may manage this machine\n%s test-owner observe+control+update+power controls=* idle=6\n%s watcher observe\n%s scoped observe+control controls=httpd\n' "$owner" "$watcher" "$scoped" >"$dir/owners"
+  printf '# who may manage this machine\n%s test-owner observe+control+update+power controls=*,remote idle=6\n%s watcher observe\n%s scoped observe+control controls=httpd\n%s updater observe+update controls=*\n' "$owner" "$watcher" "$scoped" "$upd" >"$dir/owners"
   img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed httpd.fail_after=11") \
     && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   # Two new programs for httpd: the same code with bytes after it (an ELF
@@ -1218,6 +1218,14 @@ run_remote() {
     || step "a replayed handshake was taken for the owner connecting (the log says so more than once)"
   # An owner the owners file gives `observe` alone sees, and changes nothing.
   W() { "$rmt" -i "$dir/watcher.key" -m "$machine" "127.0.0.1:$port" "$@" 2>&1; }
+  # No newest first message of the watcher's is kept yet (it has not
+  # connected since the boot, and the kept page starts empty, as after any
+  # boot or new program): one recorded an hour ago is refused by the
+  # machine's clock all the same (the review of 2026-11-25: before, it was
+  # answered).
+  "$probe" -i "$dir/watcher.key" -m "$machine" "127.0.0.1:$port" old-first 3600 >"$dir/old-first.out" 2>&1 \
+    || step "a first message made an hour ago was answered with no newest time kept: $(tail -1 "$dir/old-first.out")"
+  until_seen "made [0-9]* s before this machine's clock" || step "the machine did not say it refused a first message made an hour ago"
   out=$(W services); grep -qE '^logd +running' <<<"$out" || step "an owner who may observe did not see the services: $(head -1 <<<"$out")"
   out=$(W log remote); grep -q "may not make call\\|test-owner connected" <<<"$out" || step "an owner who may observe did not read a log: $(head -1 <<<"$out" | cat -v)"
   out=$(W restart logd) && step "an owner who may only observe restarted logd: $out"
@@ -1236,6 +1244,17 @@ run_remote() {
   grep -q 'Refused' <<<"$out" || step "update devmgr was refused, but not as refused: $out"
   out=$(R update entropy "$dir/httpd-new.elf") && step "update entropy (it holds secrets the remote service does not name) was not refused: $out"
   grep -q 'Refused' <<<"$out" || step "update entropy was refused, but not as refused: $out"
+  # An update hands the program sent everything its target holds, so `*`
+  # updates only what governs nothing beyond itself, and an owner's `*`
+  # never reaches the remote service (its machine key and every scope):
+  # an owner with update over `*` updates neither the shell (the console,
+  # device control, raw disks and every scope of the service manager) nor
+  # remote. Before (the review of audit-control), both were run.
+  U() { "$rmt" -i "$dir/updater.key" -m "$machine" "127.0.0.1:$port" "$@" 2>&1; }
+  out=$(U update shell "$dir/httpd-new.elf") && step "an owner with update over * updated the shell: $out"
+  grep -q 'Refused' <<<"$out" || step "update shell was refused, but not as refused: $out"
+  out=$(U update remote "$dir/httpd-new.elf") && step "an owner with update over * updated remote: $out"
+  until_seen '^remote: updater may not control the service remote' || step "the machine did not say it refused the updater's update of remote"
   # Connections that never say a word, nine of them, and an owner's own
   # session that, once proven, starts a frame it never finishes: the owner
   # is still served, and the machine closes each (the silent ones within the
@@ -1262,6 +1281,12 @@ run_remote() {
   # (logd), the console port (the shell's `log remote`, typed there when the
   # line is logged, through the console) and the owner's terminal (the host
   # tool's `log`).
+  # A line end in a name starts no line of the machine's log: what follows
+  # it would read as another program's (before, the log line printed the
+  # name as sent).
+  out=$(R start $'nosuch\ninit: everything stopped, as asked') && step "a service named with a line end was started: $out"
+  until_seen 'asks the service manager to start nosuch\?init: everything stopped' || step "the machine did not log the name with a line end as one line"
+  serial_has "$serial" '^init: everything stopped, as asked' && step "a line end a session sent in a name started a line of the machine's log"
   out=$(R start $'httpd\e]0;owned\a\rforged line') && step "a service named with escapes was started: $out"
   until_seen 'asks the service manager to start httpd\?\]0;owned\?\?forged line' || step "the machine did not log the escaped name as text"
   [ "$(grep -a 'service manager to start httpd' "$serial" | sed 's/\r$//' | grep -ac $'\e\|\a\|\r')" = 0 ] \
@@ -1313,20 +1338,13 @@ run_remote() {
   until_seen '^init: httpd ended$' 2 || step "httpd did not end in order after the undone update"
   R revert httpd >/dev/null || step "revert httpd was refused"
   out=$(R services); grep -qE "^httpd +stopped .* $(hash_of "$httpd")\$" <<<"$out" || step "after revert, httpd does not have the boot archive's program: $(grep '^httpd' <<<"$out")"
-  # The session's own service: its update ends the session that asked for
-  # it, and the client asks a new one what runs.
+  # The session's own service is updated by nobody, though the owner's line
+  # names it: updating it is holding its key and every scope, which the
+  # remote service's declaration gives no owner (its controls= does not name
+  # it) until each owner has a capability of its own.
   { cat "$(system_program "$arch" remote "$log")"; printf 'a new version of remote\n'; } >"$dir/remote-new.elf"
-  listening=$(tr -d '\r' <"$serial" | grep -ac '^remote: listening on port 22')
-  out=$(R update remote "$dir/remote-new.elf") && grep -q '^remote runs the program sent' <<<"$out" || step "update remote (the session's own service): $out"
-  until_seen '^init: remote started on its new program' || step "remote was not started on its new program"
-  # Its program changed, so its kept page (each owner's newest first message)
-  # is empty, as after any boot: a first message of the watcher's (who has
-  # not connected since) recorded an hour ago is refused by the machine's
-  # clock all the same (the review of 2026-11-25: before, it was answered).
-  until_seen '^remote: listening on port 22' $((listening + 1)) || step "remote did not listen again after its update"
-  "$probe" -i "$dir/watcher.key" -m "$machine" "127.0.0.1:$port" old-first 3600 >"$dir/old-first.out" 2>&1 \
-    || step "a first message made an hour ago was answered once the newest times were lost: $(tail -1 "$dir/old-first.out")"
-  until_seen "made [0-9]* s before this machine's clock" || step "the machine did not say it refused a first message made an hour ago"
+  out=$(R update remote "$dir/remote-new.elf") && step "update remote (the session's own service) was not refused: $out"
+  grep -q 'Refused' <<<"$out" || step "update remote was refused, but not as refused: $out"
   # A service that keeps a page across restarts (the network stack: its
   # lease, its connections) gets an empty one with a new program: nothing an
   # instance wrote there is trusted by the program put in its place (the
