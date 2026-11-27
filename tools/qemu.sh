@@ -8,7 +8,7 @@
 #           [--nvme-disk <disk image>] [--nvme-props <k=v,...>] [--nvme-ns <k=v,...>]... [--drive <id>=<disk image>]...
 #           [--on '<extended regex>=<monitor command>']... [--type '<extended regex>=<text>']...
 #           [--console-port <file>] [--port-type '<extended regex>=<text>']...
-#           [--trace <QEMU trace event>]...
+#           [--trace <QEMU trace event>]... [--vars <file>]
 # The x86_64 machine has an IOMMU (Intel VT-d) and its boot disk does its
 # DMA through it, which is the machine Silica confines drivers on;
 # --no-iommu boots the machine without one. --device adds a device, --object
@@ -94,10 +94,10 @@ user_forwards() {
 orig_args=("$@")
 nvme_props="" nvme_ns=() drives=() nvme_snapshot=on
 traced=()
-cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 noreboot=-no-reboot nvme="" disk2="" on=() typing=() port_typing=()
+varsfile="" cport="" maxcpus="" cpu_model="" disk_props="" emulator="" hotplug="" net="" capture="" arch=x86_64 el2="" image="" serial="" timeout=60 quiet=0 nic=virtio shot="" shot_after=5 smp=1 mem=256 pin="" stamp="" iommu=1 devices=() until="" exitdev=1 noreboot=-no-reboot nvme="" disk2="" on=() typing=() port_typing=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--object|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu|--maxcpus)
+    --arch|--image|--serial|--timeout|--quiet|--nic|--screendump|--screendump-after|--smp|--mem|--pin|--stamp|--device|--object|--until|--nvme|--disk|--on|--type|--net|--capture|--hotplug|--emulator|--disk-props|--console-port|--port-type|--cpu|--maxcpus|--vars)
       [ $# -ge 2 ] || die "$1 needs a value" ;;
   esac
   case "$1" in
@@ -127,6 +127,7 @@ while [ $# -gt 0 ]; do
     --capture) capture=$2; shift 2 ;;
     --hotplug) hotplug=$2; shift 2 ;;
     --console-port) cport=$2; shift 2 ;;
+    --vars) varsfile=$2; shift 2 ;;
     --port-type) port_typing+=("$2"); shift 2 ;;
     --emulator) emulator=$2; shift 2 ;;
     --disk-props) disk_props=$2; shift 2 ;;
@@ -155,7 +156,15 @@ new_run
 
 code=$(firmware_of "$arch" code) || die "no UEFI firmware for $arch (run tools/init.sh)"
 vars=$(firmware_of "$arch" vars) || die "no UEFI variable store for $arch"
-cp "$vars" "$RUN/vars.fd"
+# --vars <file>: the machine's UEFI variable store is <file>, kept across
+# runs (made from the firmware's empty one the first time): a machine that
+# boots again, as the loader's machine secret needs.
+if [ -n "$varsfile" ]; then
+  [ -f "$varsfile" ] || cp "$vars" "$varsfile" || die "cannot make the variable store $varsfile"
+  ln -sf "$(realpath "$varsfile")" "$RUN/vars.fd"
+else
+  cp "$vars" "$RUN/vars.fd"
+fi
 # The monitor socket is addressed relative to $RUN (QEMU and socat run there):
 # a unix socket path is limited to about 100 bytes and deep run directories exceed it.
 mon=monitor.sock

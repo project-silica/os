@@ -695,11 +695,67 @@ run_partitions() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded; do
+  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded holders_apart windows_kept connections_bounded reclaimed_with_inner device_list; do
     if grep -qx "TEST partitions.$name PASS" <<<"$text"; then record pass "$suite" "partitions_$name"
     else record fail "$suite" "partitions_$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
 }
+
+# run_partitions_peers <arch> <suite>: two programs holding partitions of
+# one disk through the block server, each its own at the driver. partcheck,
+# after its checks, opens one partition with a notice of its driver's end,
+# then holds all of the disk its share allows (partcheck.hold); the shell's
+# `trace`, typed at the console port, opens a partition of the same disk,
+# connects, reads and asks for the trace; the shell starts the disk's driver
+# again (`restart-driver`), and partcheck must hear of it; then the machine
+# is turned off. Before, every client of the block server was the block
+# server's at the driver: one holding 16 connected partitions left every
+# other no connection, and each client's notice of its driver's end was
+# replaced by the next client's open.
+run_partitions_peers() {
+  local arch=$1 suite=$2 name=partitions_peers log img serial port text
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=partitions partcheck.hold=1") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  port=$serial.port
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" \
+    --console-port "$port" --port-type '^partcheck: holding [0-9]+ partitions=trace\rrestart-driver 00:01.0\r' \
+    --port-type "^partcheck: heard its partition's driver end=shutdown\r" >"$serial.qemu" 2>&1
+  text=$(tr -d '\r\0' <"$serial")
+  if ! grep -q '^partcheck: holding [0-9]* partitions' <<<"$text"; then
+    record fail "$suite" "$name" "partcheck did not hold the disk: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"
+  elif ! tr -d '\r' <"$port" 2>/dev/null | grep -aq 'accepted by the device'; then
+    record fail "$suite" "$name" "the shell's trace of a partition failed while another program held its share: $(tr -d '\r' <"$port" 2>/dev/null | grep -am1 '^trace' | cut -c1-120) (port: $port)"
+  elif ! grep -q "^partcheck: heard its partition's driver end" <<<"$text"; then
+    record fail "$suite" "$name" "partcheck did not hear its partition's driver end after another program opened the disk (serial: $serial)"
+  else
+    record pass "$suite" "$name"
+  fi
+}
+
+# run_partitions_delegator <arch> <suite>: a block server that abuses
+# `delegate` (a test image's hook, partitions.hostile_delegate) opens the
+# disk for 40 clients it makes up and holds every connection and frame it is
+# let; partcheck (partcheck.direct) then opens the disk through the device
+# manager, its own share, connects, registers memory and reads. Before,
+# each made-up client was a share of its own and they filled the driver's
+# capability space for every program.
+run_partitions_delegator() {
+  local arch=$1 suite=$2 name=partitions_delegator log img serial text
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=partitions partitions.hostile_delegate=1 partcheck.direct=1") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  text=$(tr -d '\r\0' <"$serial")
+  if ! grep -q '^partitions: a hostile delegator holds' <<<"$text"; then
+    record fail "$suite" "$name" "the hostile block server did not run (serial: $serial)"
+  elif grep -qx "TEST partitions.direct PASS" <<<"$text"; then
+    record pass "$suite" "$name"
+  else
+    record fail "$suite" "$name" "$(grep -m1 -aE "^(ERROR|PANIC|partitions: a hostile)" <<<"$text" | cut -c1-160) (serial: $serial)"
+  fi
+}
+
 
 # run_partitions_full_table <arch> <suite>: a second disk whose GPT is full
 # (128 partitions, host-tools' gptdisk). The block server's list is answered
@@ -1117,8 +1173,9 @@ run_http_quit() {
 
 # run_remote <arch> <suite>: remote management (M4: "accepts a remote
 # management session that can inspect, restart and update any service").
-# The image is provisioned as an installer would: a machine key and one
-# owner (remote.key, remote.owners); the system stays up and the host's
+# The image is provisioned as an installer would, with one owner
+# (remote.owners; the machine's key is made on the machine, which says
+# it, and the owner's client checks it); the system stays up and the host's
 # silica-remote, holding the owner's key, does everything over QEMU's
 # user-mode network: lists the services, describes one, reads a log,
 # restarts the log service; starts httpd, updates it while it serves to a
@@ -1132,10 +1189,10 @@ run_remote() {
   log=$(logfile "$suite" build.remote)
   rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") && probe=$(host_tool remoteprobe "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
   dir=${UNIT_DIR:-$RUN}/remote; rm -rf "$dir"; mkdir -p "$dir"
-  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") && scoped=$("$rmt" keygen "$dir/scoped.key") && upd=$("$rmt" keygen "$dir/updater.key") \
+  owner=$("$rmt" keygen "$dir/owner.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") && scoped=$("$rmt" keygen "$dir/scoped.key") && upd=$("$rmt" keygen "$dir/updater.key") \
     || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
   printf '# who may manage this machine\n%s test-owner observe+control+update+power controls=*,remote idle=6\n%s watcher observe\n%s scoped observe+control controls=httpd\n%s updater observe+update controls=*\n' "$owner" "$watcher" "$scoped" "$upd" >"$dir/owners"
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed httpd.fail_after=11") \
+  img=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed httpd.fail_after=11") \
     && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   # Two new programs for httpd: the same code with bytes after it (an ELF
   # file's loader reads only what its headers name), and one whose entry
@@ -1161,6 +1218,13 @@ run_remote() {
     kill $qemu 2>/dev/null; wait $qemu
     record fail "$suite" remote "the remote service never listened: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC|remote)' | cut -c1-140) (serial: $serial)"
     return 1
+  fi
+  # The machine's key is made on the machine (the loader's secret, `key`):
+  # its owner learns it from the machine, as from a new machine's console.
+  machine=$(tr -d '\r' <"$serial" | sed -n 's/^remote: listening on port 22 .*this machine.s key is \([0-9a-f]\{64\}\)$/\1/p' | head -n 1)
+  if [ -z "$machine" ]; then
+    kill $qemu 2>/dev/null; wait $qemu
+    record fail "$suite" remote "the remote service did not say this machine's key (serial: $serial)"; return 1
   fi
   R() { "$rmt" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" "$@" 2>&1; }
   # until <pattern> [<n>]: wait (at most 30 s) for the serial line to appear
@@ -1412,9 +1476,9 @@ run_interop() {
   # The remote service listens too (a key and an owner of this run's own):
   # a second listener, for the flood on one that must not cost the other.
   dir=${UNIT_DIR:-$RUN}/interop; rm -rf "$dir"; mkdir -p "$dir"
-  rmt=$(host_tool silica-remote "$log") && "$rmt" keygen "$dir/machine.key" >/dev/null && printf '%s interop observe\n' "$("$rmt" keygen "$dir/owner.key")" >"$dir/owners" \
+  rmt=$(host_tool silica-remote "$log") && printf '%s interop observe\n' "$("$rmt" keygen "$dir/owner.key")" >"$dir/owners" \
     || { record fail "$suite" interop "silica-remote did not build or make keys: $(first_error "$log") (log: $log)"; return 1; }
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
+  img=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
     || { record fail "$suite" interop "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   iop_down() {
     sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
@@ -1659,6 +1723,118 @@ run_shutdown() {
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_secrets <arch> <suite>: the machine's secrets are on no disk and in
+# nothing the device manager can read of what it is lent: its memory, and
+# the firmware's flash where the variable store is (other device registers
+# are not read: reading one is an act). The review of 2026-11-26 (H3) and
+# the two reviews of its fix: a key provisioned in the boot archive was a
+# file on the boot disk; the firmware's runtime memory and its flash hold
+# its copy of the variables; a seed of jitter alone must not make a secret
+# that lasts. One machine boots four times on one UEFI variable store:
+# 1. the machine's secret is made (the loader's, kept by the firmware for
+#    its loader alone), and the remote service's key from it; the secret,
+#    read from the store on the host, is nowhere in the boot disk's image,
+#    and the device manager (its test-only find=) does not find bytes of a
+#    program of the archive that is no driver (`hello`: what it would see
+#    were it lent the archive again);
+# 2. the key is the same (it lasts), and the device manager finds the
+#    secret neither in what it is lent nor in the firmware's flash;
+# 3. an archive that brings its own machine.secret: the loader drops it,
+#    says so, and the key is still the machine's;
+# 4. the variable's record set to runtime access (as a running system could
+#    have set one): the loader replaces it, and the key changes.
+# And a second machine with no source of randomness the loader trusts
+# (entropy=accept): the loader says so, and keeps no secret.
+run_secrets() {
+  local arch=$1 suite=$2 log img img2 img3 serial rc dir rmt owner secret hello hex key1 key2 key3 key4 why="" code vars flash at name
+  log=$(logfile "$suite" build.secrets)
+  rmt=$(host_tool silica-remote "$log") || { record fail "$suite" secrets "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
+  dir=${UNIT_DIR:-$RUN}/secrets; rm -rf "$dir"; mkdir -p "$dir"
+  owner=$("$rmt" keygen "$dir/owner.key") || { record fail "$suite" secrets "silica-remote keygen failed"; return 1; }
+  printf '%s test-owner observe\n' "$owner" >"$dir/owners"
+  hello=$(system_program "$arch" hello "$log") || { record fail "$suite" secrets "no hello program (log: $log)"; return 1; }
+  hex=$(dd if="$hello" bs=1 skip=4096 count=32 status=none | od -An -tx1 -v | tr -d ' \n')
+  # The firmware's flash on q35: code and variables, ending at 4 GiB.
+  code=$(firmware_of "$arch" code) && vars=$(firmware_of "$arch" vars) || { record fail "$suite" secrets "no UEFI firmware for $arch"; return 1; }
+  flash=$(printf "%x+%x" $(((1 << 32) - $(stat -Lc %s "$code") - $(stat -Lc %s "$vars"))) $(($(stat -Lc %s "$code") + $(stat -Lc %s "$vars"))))
+  img=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$hex") \
+    || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  # boot <n> <image> <variable store> [qemu.sh arguments]: one boot; its serial's path.
+  boot() {
+    local n=$1 image=$2 store=$3; shift 3
+    serial=$(logfile "$suite" "secrets.$n")
+    "$TOOLS/qemu.sh" --arch "$arch" --image "$image" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user \
+      --vars "$store" --until '^remote: listening on port' "$@" >"$serial.qemu" 2>&1
+  }
+  key_of() { tr -d '\r' <"$1" | sed -n 's/^remote: listening on port .*this machine.s key is \([0-9a-f]\{64\}\)$/\1/p' | head -n 1; }
+  # The variable's record in use in the store: the offset of its name (in
+  # UCS-2; the record's header, 60 bytes, before it: state at 2, attributes
+  # at 4), whose data follows it.
+  name=$(printf 'SilicaMachineSecret' | sed 's/./&\\x00/g')'\x00\x00'
+  record_of() {
+    for at in $(LC_ALL=C grep -obUaP "$name" "$1" | cut -d: -f1); do
+      [ "$(dd if="$1" bs=1 skip=$((at - 58)) count=1 status=none | od -An -tx1 | tr -d ' ')" = 3f ] && { echo "$at"; return 0; }
+    done
+    return 1
+  }
+  secret_of() { local at; at=$(record_of "$1") && dd if="$1" bs=1 skip=$((at + 40)) count=32 status=none | od -An -tx1 -v | tr -d ' \n'; }
+  attrs_of() { local at; at=$(record_of "$1") && dd if="$1" bs=1 skip=$((at - 56)) count=1 status=none | od -An -tx1 | tr -d ' '; }
+  on_disk() { LC_ALL=C grep -qaP "$(sed 's/../\\x&/g' <<<"$1")" "$2"; }
+  found() { serial_has "$serial" "^devmgr: find: $1 is in what"; }
+  told() { serial_has "$serial" "^devmgr: find: $1 is not in what"; }
+  boot 1 "$img" "$dir/vars.fd"; rc=$?
+  key1=$(key_of "$serial")
+  if [ $rc != 0 ] || [ -z "$key1" ]; then why="the first boot's remote service did not listen with a key (exit status $rc; serial: $serial)"
+  elif found "$hex"; then why="the device manager can read the boot archive's programs that are no driver: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: find:' | cut -c1-140) (serial: $serial)"
+  elif ! told "$hex"; then why="the device manager did not say what it was lent (serial: $serial)"
+  elif ! secret=$(secret_of "$dir/vars.fd") || [ ${#secret} != 64 ]; then why="the firmware's variable store holds no machine secret ($dir/vars.fd; serial: $serial)"
+  elif [ "$(attrs_of "$dir/vars.fd")" != 03 ]; then why="the machine secret's variable is not non-volatile and boot-services-only (attributes $(attrs_of "$dir/vars.fd"); $dir/vars.fd)"
+  elif on_disk "$secret" "$img"; then why="the machine's secret is on the boot disk ($img)"
+  fi
+  if [ -z "$why" ]; then
+    img2=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$secret devmgr.find_device=$flash") \
+      || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+    boot 2 "$img2" "$dir/vars.fd"; rc=$?
+    key2=$(key_of "$serial")
+    if [ $rc != 0 ] || [ -z "$key2" ]; then why="the second boot's remote service did not listen with a key (exit status $rc; serial: $serial)"
+    elif [ "$key2" != "$key1" ]; then why="the machine's key did not last: $key1 at the first boot, $key2 at the second (serial: $serial)"
+    elif found "$secret"; then why="the device manager can read the machine's secret: $(tr -d '\r' <"$serial" | grep -m1 -a "^devmgr: find: $secret is in" | cut -c1-200) (serial: $serial)"
+    elif ! serial_has "$serial" "^devmgr: find: of the device memory at $flash, this program can read 0 pages"; then why="the device manager can read the firmware's flash, where the variable store is: $(tr -d '\r' <"$serial" | grep -m1 -a "^devmgr: find: of the device memory" | cut -c1-140) (serial: $serial)"
+    elif ! told "$secret"; then why="the device manager did not say what it was lent (serial: $serial)"
+    elif on_disk "$secret" "$img2"; then why="the machine's secret is on the boot disk ($img2)"
+    elif serial_has "$serial" '^ERROR'; then why="$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
+    fi
+  fi
+  if [ -z "$why" ]; then
+    head -c 32 /dev/urandom >"$dir/planted"
+    img3=$(SYSTEM_FILES="remote.owners=$dir/owners machine.secret=$dir/planted" build_system_image "$arch" "$log" "checks=") \
+      || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+    boot 3 "$img3" "$dir/vars.fd"; rc=$?
+    key3=$(key_of "$serial")
+    if ! serial_has "$serial" "^WARNING: loader: the boot volume's archive has its own machine.secret, which is not used"; then why="the loader did not refuse the boot disk's machine.secret (exit status $rc; serial: $serial)"
+    elif [ "$key3" != "$key1" ]; then why="a machine.secret on the boot disk changed the machine's key: $key1, then $key3 (serial: $serial)"
+    fi
+  fi
+  if [ -z "$why" ]; then
+    at=$(record_of "$dir/vars.fd") && printf '\007' | dd of="$dir/vars.fd" bs=1 seek=$((at - 56)) conv=notrunc status=none
+    boot 4 "$img" "$dir/vars.fd"; rc=$?
+    key4=$(key_of "$serial")
+    if ! serial_has "$serial" "^loader: made this machine's secret"; then why="the loader kept a machine secret a running system could have set or read (runtime access; serial: $serial)"
+    elif [ -z "$key4" ] || [ "$key4" = "$key1" ]; then why="the machine's key did not change with the secret the loader made anew: $key1, then $key4 (serial: $serial)"
+    elif [ "$(attrs_of "$dir/vars.fd")" != 03 ]; then why="the replaced secret's variable is not non-volatile and boot-services-only (attributes $(attrs_of "$dir/vars.fd"))"
+    fi
+  fi
+  if [ -z "$why" ]; then
+    img=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= entropy=accept") \
+      || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+    boot untrusted "$img" "$dir/vars-untrusted.fd" --cpu EPYC,+x2apic,+tsc-deadline,+invtsc,+xsave,+xgetbv1,-rdrand,-rdseed; rc=$?
+    if ! serial_has "$serial" "^WARNING: loader: no source of randomness the loader trusts: this machine's secret is not made to last"; then why="the loader did not say it keeps no secret made without a trusted source (exit status $rc; serial: $serial)"
+    elif secret_of "$dir/vars-untrusted.fd" >/dev/null; then why="a secret made without a trusted source of randomness was kept for good ($dir/vars-untrusted.fd)"
+    fi
+  fi
+  if [ -z "$why" ]; then record pass "$suite" secrets; else record fail "$suite" secrets "$why"; fi
+}
+
 # run_shutdown_flush <arch> <suite>: turning the machine off ends the disks'
 # drivers in order (the review of 2026-11-25: every driver was destroyed where
 # it stood, a power cut for the devices' write caches). With an NVMe
@@ -1757,14 +1933,20 @@ run_rogue_end() {
 #   words whose obeying fails this test belong here (never one that would
 #   make a broken image pass, as `checks=` would).
 # A package that gains a hook adds its words to both.
-HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ')
+HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ' 'is off, as the command line asks' 'which no service is declared for' 'every driver started here is trusted with all of memory' 'devmgr: find: ' 'a hostile delegator')
 # The kernel's panic word, and the device manager's: a fault for the
 # network driver to commit on purpose and another program in that driver's
 # place, each as a bare word and as the device manager's own option (the
 # 2026-11-24 audit: production drivers obeyed fault-injection hooks from the
 # boot string, and `driver=` gave any program in the archive a device's
 # authority).
-HOOK_CMDLINE='panic=test inject=virtio-net:reset@1 devmgr.inject=virtio-net:reset@1 driver=1af4:1041=logd devmgr.driver=1af4:1041=logd'
+# And the words that configure a service from the line (the 2026-11-26
+# review, H2: nothing signs the line, and a test image's init alone gives a
+# service its `<service>.<word>` words or keeps one `off=`): the network
+# stack kept off, or given an address, router, name server and time server
+# on a network that is not there, keeps the machine off the network.
+HOOK_SERVICES='devmgr.inject=virtio-net:reset@1 devmgr.driver=1af4:1041=logd off=netd netd.address=10.9.9.9/24 netd.router=10.9.9.1 netd.dns=10.9.9.53 netd.ntp=10.9.9.123 partitions.hostile_delegate=1'
+HOOK_CMDLINE="panic=test inject=virtio-net:reset@1 driver=1af4:1041=logd $HOOK_SERVICES"
 run_server_image() {
   local arch=$1 suite=$2 log img serial rc sys want got extra w f
   log=$(logfile "$suite" build.server_image)
@@ -1796,8 +1978,60 @@ run_server_image() {
   elif [ $rc != 0 ] || ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping' || ! serial_has "$serial" '^init: shutting down'; then
     record fail "$suite" server_image "it did not come up on the network and turn off in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   elif serial_has "$serial" '^init: hello|passed$'; then record fail "$suite" server_image "a check ran on the server image (serial: $serial)"
+  elif ! serial_has "$serial" -Fx "init: the boot command line configures no service on this image; not obeyed: $HOOK_SERVICES"; then
+    record fail "$suite" server_image "the service manager did not say it obeyed none of the line's words for services (serial: $serial)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" server_image "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
   else record pass "$suite" server_image; fi
+}
+
+# run_server_unconfined <arch> <suite>: the server image on a machine without
+# an IOMMU starts no driver that does DMA: one would be trusted with all of
+# memory, and a machine's image refuses a promise of confinement it cannot
+# keep by name (spec/ARCHITECTURE.md, invariant 7; the 2026-11-26 review,
+# N5: it said so and started them). Whether a device is confined is the
+# kernel's to say, device by device (the device manager attaches it to no
+# address space: `Unsupported` where no IOMMU unit it drives covers it). The
+# device manager must say it starts no driver that does DMA and refuse the
+# disk's and the network card's by name; a driver that declares it does no
+# DMA (the watchdog's, `dma = false`) still starts, its device without bus
+# mastering, so the machine is still watched; and the machine must turn off
+# in order on the power button. (A test image on the same machine runs them
+# all unconfined and says so: `unconfined`.)
+run_server_unconfined() {
+  local arch=$1 suite=$2 log img serial rc text bad=""
+  log=$(logfile "$suite" build.server_unconfined)
+  # Exercise the remaining devmgr options on this boot so both command lines
+  # fit in the 256 bytes the kernel gives init.
+  local probes='devmgr.find=ff devmgr.find_device=0+0'
+  img=$(build_server_image "$arch" "$log" "$probes") || { record fail "$suite" server_unconfined "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" server_unconfined)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --no-exit-device --no-iommu \
+    --device i6300esb --trace pci_cfg_write --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  grep -Fxq "init: the boot command line configures no service on this image; not obeyed: $probes" <<<"$text" ||
+    bad="init did not report both devmgr probe options as refused"
+  if grep -q '^devmgr: find:' <<<"$text"; then bad="the production device manager ran the probe"; fi
+  local refused='is not driven: its DMA cannot be confined on this machine, and only a test image trusts a driver with all of memory'
+  grep -qx 'devmgr: this machine cannot confine DMA: no driver that does DMA is started (only a test image runs one unconfined)' <<<"$text" ||
+    bad="the device manager did not say it starts no driver it cannot confine"
+  [ -n "$bad" ] || [ "$(grep -cx "ERROR: devmgr: [0-9a-f:.]* $refused" <<<"$text")" = 2 ] ||
+    bad="the disk's and the network card's drivers were not both refused by name"
+  [ -n "$bad" ] || ! grep -qE '^(virtio-blk|virtio-net|e1000e|nvme): ' <<<"$text" || bad="a driver came up unconfined: $(grep -m1 -E '^(virtio-blk|virtio-net|e1000e|nvme): ' <<<"$text" | cut -c1-120)"
+  [ -n "$bad" ] || grep -q '^watchdog-esb: a watchdog resets this machine' <<<"$text" || bad="the watchdog's driver, which does no DMA, did not start"
+  # A refused device keeps no bus mastering the firmware left on (it booted
+  # from the disk): the device manager's last write to each one's command
+  # register, as the device saw it, has bus mastering (bit 2) off.
+  local a last
+  for a in $(sed -n "s/^ERROR: devmgr: \([0-9a-f:.]*\) $refused\$/\1/p" <<<"$text"); do
+    [ -n "$bad" ] && break
+    last=$(grep -a "^pci_cfg_write .* ${a#0000:} @0x4 <- " "$serial.trace" 2>/dev/null | tail -1 | sed 's/.*<- //')
+    if [ -z "$last" ]; then bad="$a was refused and its bus mastering left as the firmware left it (never written; QEMU trace: $serial.trace)"
+    elif [ $((last & 4)) != 0 ]; then bad="$a was refused and left with bus mastering on (its command register last written $last; QEMU trace: $serial.trace)"; fi
+  done
+  [ -n "$bad" ] || { [ $rc = 0 ] && grep -q '^init: shutting down' <<<"$text"; } || bad="the machine did not turn off in order (exit status $rc)"
+  if [ -z "$bad" ]; then record pass "$suite" server_unconfined
+  else record fail "$suite" server_unconfined "$bad (serial: $serial)"; fi
 }
 
 # run_console <arch> <suite>: someone at the machine. It boots with a

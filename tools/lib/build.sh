@@ -124,10 +124,13 @@ build_system() {
   # The drivers list the device manager reads: "<match> <program>" for each
   # match a package declares ([package.metadata.silica] drivers), its program
   # being the package's binary, then "config=<offset>:<bytes>:<value>,..." when
-  # the package declares configuration writes (`config`, hexadecimal).
+  # the package declares configuration writes (`config`, hexadecimal), then
+  # "nodma" when it declares `dma = false` (its device is left without bus
+  # mastering, and it starts where DMA cannot be confined).
   jq -r '.packages[] | select(.metadata.silica.drivers) | . as $p
     | ($p.targets[] | select(.kind[] == "bin") | .name) as $bin | $p.metadata.silica.drivers[]
-    | "\(.) \($bin)" + (if $p.metadata.silica.config then " config=" + ($p.metadata.silica.config | join(",")) else "" end)' <<<"$meta" >"$out/drivers.list" || return 1
+    | "\(.) \($bin)" + (if $p.metadata.silica.config then " config=" + ($p.metadata.silica.config | join(",")) else "" end)
+      + (if $p.metadata.silica.dma == false then " nodma" else "" end)' <<<"$meta" >"$out/drivers.list" || return 1
   # The services list the service manager reads (init's manifest module):
   # one line per package declaring [package.metadata.silica.service].
   jq -r '.packages[] | select(.metadata.silica.service) | . as $p | .metadata.silica.service as $s
@@ -148,7 +151,15 @@ build_system() {
       + (if $s.secrets then ["secrets"] else [] end)
       + (if ($s.files // []) != [] then ["files=\($s.files | join(","))"] else [] end)
       + (if ($s.controls // []) != [] then ["controls=\($s.controls | join(","))"] else [] end)
+      + (if $s.key then ["key"] else [] end)
     | join(" ")' <<<"$meta" >"$out/services.list" || return 1
+  # A block driver's share of each program that may reach it is sized for at
+  # most eight (silica_protocols::driver_badge::BLOCK_PROGRAMS): an image that
+  # lets more reach one is not built (the service manager refuses it too).
+  if [ "$(grep -cE 'needs=([^ ]*,)?silica\.device\.Manager:[^ ,]*\bblock\b' "$out/services.list")" -gt 8 ]; then
+    echo "error: more than 8 services are given the device manager's block scope (a block driver has 8 shares)" >>"$log"
+    return 1
+  fi
   # A server image holds what a machine runs and nothing that tests it
   # (IMAGE_PROFILE=server, build_server_image): the services that start at
   # boot and the drivers, never a `check:` service, a test program or a
