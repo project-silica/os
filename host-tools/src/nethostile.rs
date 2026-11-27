@@ -15,7 +15,9 @@
 //! - `synflood`: 300 SYNs to port 80 from addresses on the link that do not
 //!   exist (they never answer the SYN-ACK; addresses off the link would be
 //!   forwarded by the host). A guest that keeps every unfinished handshake
-//!   until its backlog is full refuses the host's connection.
+//!   until its backlog is full refuses the host's connection; one that
+//!   evicts an unfinished handshake for the host's SYN must give the SYN
+//!   that place at once, as the first connection is asked for only once.
 //!
 //! - `timewait`: 400 short connections in a row, each answered and closed
 //!   by the guest first, so each stays in TIME-WAIT there for a minute. A
@@ -169,6 +171,25 @@ fn answer(guest: Ipv4Addr, within: Duration) -> Result<(), String> {
     Err(last)
 }
 
+/// One HTTP answer from the guest, from one connection: no retry.
+fn answer_once(guest: Ipv4Addr) -> Result<(), String> {
+    let mut s = TcpStream::connect_timeout(&SocketAddr::from((guest, 80)), Duration::from_secs(3))
+        .map_err(|e| format!("connect: {e}"))?;
+    let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+    s.write_all(b"GET /16 HTTP/1.1\r\nHost: guest\r\nConnection: close\r\n\r\n")
+        .map_err(|e| format!("write: {e}"))?;
+    let mut got = Vec::new();
+    let _ = s.read_to_end(&mut got);
+    if got.starts_with(b"HTTP/1.1 200") {
+        Ok(())
+    } else {
+        Err(format!(
+            "an answer that is not 200: {:?}",
+            String::from_utf8_lossy(&got[..got.len().min(40)])
+        ))
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let (Some(relay), Some(guest), Some(host), Some(case)) = (
@@ -223,6 +244,17 @@ fn main() {
                 link.send(&ether(guest_mac, src_mac, 0x0800, &packet));
             }
             std::thread::sleep(Duration::from_millis(100));
+            // The host's first connection is taken, not refused: the flood
+            // has every place httpd paid for, so a guest that resets the
+            // SYN that evicts an unfinished handshake (the evicted one
+            // holding its place until its own reset is sent) refuses the
+            // host until a retry. A client that does not retry (the
+            // interop test's `quit`) was refused for good.
+            if let Err(e) = answer_once(guest) {
+                fail(format!(
+                    "after 300 SYNs from addresses that never answer, the guest refuses the host's first connection: {e}"
+                ));
+            }
             if let Err(e) = answer(guest, Duration::from_secs(5)) {
                 fail(format!(
                     "after 300 SYNs from addresses that never answer, the guest does not take the host's connection: {e}"
