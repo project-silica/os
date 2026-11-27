@@ -268,9 +268,10 @@ fn main() {
             );
         }
         ["shutdown"] | ["reboot"] => match mgr.shutdown(command[0] == "reboot") {
-            // Answered only if it cannot be done; otherwise the machine goes.
-            Ok(_) => {}
-            Err(CallError::Transport(TransportError::PeerGone)) => println!("the machine is going down"),
+            // Answered once accepted; the machine then goes down (and the
+            // session with it). An older machine answered only a refusal,
+            // and the session ended as it went: the same news.
+            Ok(_) | Err(CallError::Transport(TransportError::PeerGone)) => println!("the machine is going down"),
             Err(e) => fail(format!("{}: {e:?}", command[0])),
         },
         _ => usage(),
