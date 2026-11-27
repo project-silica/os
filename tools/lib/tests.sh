@@ -695,11 +695,67 @@ run_partitions() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded; do
+  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded holders_apart windows_kept connections_bounded reclaimed_with_inner device_list; do
     if grep -qx "TEST partitions.$name PASS" <<<"$text"; then record pass "$suite" "partitions_$name"
     else record fail "$suite" "partitions_$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
 }
+
+# run_partitions_peers <arch> <suite>: two programs holding partitions of
+# one disk through the block server, each its own at the driver. partcheck,
+# after its checks, opens one partition with a notice of its driver's end,
+# then holds all of the disk its share allows (partcheck.hold); the shell's
+# `trace`, typed at the console port, opens a partition of the same disk,
+# connects, reads and asks for the trace; the shell starts the disk's driver
+# again (`restart-driver`), and partcheck must hear of it; then the machine
+# is turned off. Before, every client of the block server was the block
+# server's at the driver: one holding 16 connected partitions left every
+# other no connection, and each client's notice of its driver's end was
+# replaced by the next client's open.
+run_partitions_peers() {
+  local arch=$1 suite=$2 name=partitions_peers log img serial port text
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=partitions partcheck.hold=1") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  port=$serial.port
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" \
+    --console-port "$port" --port-type '^partcheck: holding [0-9]+ partitions=trace\rrestart-driver 00:01.0\r' \
+    --port-type "^partcheck: heard its partition's driver end=shutdown\r" >"$serial.qemu" 2>&1
+  text=$(tr -d '\r\0' <"$serial")
+  if ! grep -q '^partcheck: holding [0-9]* partitions' <<<"$text"; then
+    record fail "$suite" "$name" "partcheck did not hold the disk: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"
+  elif ! tr -d '\r' <"$port" 2>/dev/null | grep -aq 'accepted by the device'; then
+    record fail "$suite" "$name" "the shell's trace of a partition failed while another program held its share: $(tr -d '\r' <"$port" 2>/dev/null | grep -am1 '^trace' | cut -c1-120) (port: $port)"
+  elif ! grep -q "^partcheck: heard its partition's driver end" <<<"$text"; then
+    record fail "$suite" "$name" "partcheck did not hear its partition's driver end after another program opened the disk (serial: $serial)"
+  else
+    record pass "$suite" "$name"
+  fi
+}
+
+# run_partitions_delegator <arch> <suite>: a block server that abuses
+# `delegate` (a test image's hook, partitions.hostile_delegate) opens the
+# disk for 40 clients it makes up and holds every connection and frame it is
+# let; partcheck (partcheck.direct) then opens the disk through the device
+# manager, its own share, connects, registers memory and reads. Before,
+# each made-up client was a share of its own and they filled the driver's
+# capability space for every program.
+run_partitions_delegator() {
+  local arch=$1 suite=$2 name=partitions_delegator log img serial text
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=partitions partitions.hostile_delegate=1 partcheck.direct=1") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
+  text=$(tr -d '\r\0' <"$serial")
+  if ! grep -q '^partitions: a hostile delegator holds' <<<"$text"; then
+    record fail "$suite" "$name" "the hostile block server did not run (serial: $serial)"
+  elif grep -qx "TEST partitions.direct PASS" <<<"$text"; then
+    record pass "$suite" "$name"
+  else
+    record fail "$suite" "$name" "$(grep -m1 -aE "^(ERROR|PANIC|partitions: a hostile)" <<<"$text" | cut -c1-160) (serial: $serial)"
+  fi
+}
+
 
 # run_partitions_full_table <arch> <suite>: a second disk whose GPT is full
 # (128 partitions, host-tools' gptdisk). The block server's list is answered
@@ -1877,7 +1933,7 @@ run_rogue_end() {
 #   words whose obeying fails this test belong here (never one that would
 #   make a broken image pass, as `checks=` would).
 # A package that gains a hook adds its words to both.
-HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ' 'is off, as the command line asks' 'which no service is declared for' 'every driver started here is trusted with all of memory' 'devmgr: find: ')
+HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ' 'is off, as the command line asks' 'which no service is declared for' 'every driver started here is trusted with all of memory' 'devmgr: find: ' 'a hostile delegator')
 # The kernel's panic word, and the device manager's: a fault for the
 # network driver to commit on purpose and another program in that driver's
 # place, each as a bare word and as the device manager's own option (the
@@ -1890,7 +1946,7 @@ HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ' 'is 
 # stack kept off, or given an address, router, name server and time server
 # on a network that is not there, keeps the machine off the network.
 HOOK_SERVICES='off=netd netd.address=10.9.9.9/24 netd.router=10.9.9.1 netd.dns=10.9.9.53 netd.ntp=10.9.9.123'
-HOOK_CMDLINE="panic=test inject=virtio-net:reset@1 devmgr.inject=virtio-net:reset@1 driver=1af4:1041=logd devmgr.driver=1af4:1041=logd $HOOK_SERVICES"
+HOOK_CMDLINE="panic=test inject=virtio-net:reset@1 devmgr.inject=virtio-net:reset@1 driver=1af4:1041=logd devmgr.driver=1af4:1041=logd $HOOK_SERVICES partitions.hostile_delegate=1"
 run_server_image() {
   local arch=$1 suite=$2 log img serial rc sys want got extra w f
   log=$(logfile "$suite" build.server_image)

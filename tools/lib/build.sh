@@ -153,6 +153,13 @@ build_system() {
       + (if ($s.controls // []) != [] then ["controls=\($s.controls | join(","))"] else [] end)
       + (if $s.key then ["key"] else [] end)
     | join(" ")' <<<"$meta" >"$out/services.list" || return 1
+  # A block driver's share of each program that may reach it is sized for at
+  # most eight (silica_protocols::driver_badge::BLOCK_PROGRAMS): an image that
+  # lets more reach one is not built (the service manager refuses it too).
+  if [ "$(grep -cE 'needs=([^ ]*,)?silica\.device\.Manager:[^ ,]*\bblock\b' "$out/services.list")" -gt 8 ]; then
+    echo "error: more than 8 services are given the device manager's block scope (a block driver has 8 shares)" >>"$log"
+    return 1
+  fi
   # A server image holds what a machine runs and nothing that tests it
   # (IMAGE_PROFILE=server, build_server_image): the services that start at
   # boot and the drivers, never a `check:` service, a test program or a
