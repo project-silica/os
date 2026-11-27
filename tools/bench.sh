@@ -120,6 +120,7 @@ insns_null_syscall insns lower none 0 2
 insns_ipc_roundtrip insns lower none 0 2
 insns_ctx_switch insns lower none 0 2
 insns_page_fault insns lower none 0 2
+insns_notify_roundtrip insns lower none 0 2
 blk_read4k_qd1 ns lower le 1 3
 blk_read4k_qd1_p99 ns lower le 1 3
 blk_read4k_qd32 ops/s higher le 1 3
@@ -429,7 +430,7 @@ boot_server() {
 # first: a benchmark of few operations (2048 page faults) takes four more,
 # so that what the boot itself varies by is spread over as many operations
 # as the others have.
-COUNT_SPECS=("null null_syscall 22000 1" "ipc ipc_roundtrip 22000 1" "ctx ctx_switch 44000 1" "fault page_fault 2048 16")
+COUNT_SPECS=("null null_syscall 22000 1" "ipc ipc_roundtrip 22000 1" "ctx ctx_switch 44000 1" "notify notify_roundtrip 22000 1" "fault page_fault 2048 16")
 # count_start <label>: builds the counting images of the kernel selected now
 # (the working tree, or SRC[kernel] and SILICA_TUNE_*: a variant) and starts
 # their boots, as many at once as the host has processors; `wait`, then
