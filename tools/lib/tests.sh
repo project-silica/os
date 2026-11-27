@@ -1693,14 +1693,20 @@ run_shutdown_flush() {
 #   words whose obeying fails this test belong here (never one that would
 #   make a broken image pass, as `checks=` would).
 # A package that gains a hook adds its words to both.
-HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ')
+HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ' 'is off, as the command line asks' 'every driver started here is trusted with all of memory')
 # The kernel's panic word, and the device manager's: a fault for the
 # network driver to commit on purpose and another program in that driver's
 # place, each as a bare word and as the device manager's own option (the
 # 2026-11-24 audit: production drivers obeyed fault-injection hooks from the
 # boot string, and `driver=` gave any program in the archive a device's
 # authority).
-HOOK_CMDLINE='panic=test inject=virtio-net:reset@1 devmgr.inject=virtio-net:reset@1 driver=1af4:1041=logd devmgr.driver=1af4:1041=logd'
+# And the words that configure a service from the line (the 2026-11-26
+# review, H2: nothing signs the line, and a test image's init alone gives a
+# service its `<service>.<word>` words or keeps one `off=`): the network
+# stack kept off, or given an address, router, name server and time server
+# on a network that is not there, keeps the machine off the network.
+HOOK_SERVICES='off=netd netd.address=10.9.9.9/24 netd.router=10.9.9.1 netd.dns=10.9.9.53 netd.ntp=10.9.9.123'
+HOOK_CMDLINE="panic=test inject=virtio-net:reset@1 devmgr.inject=virtio-net:reset@1 driver=1af4:1041=logd devmgr.driver=1af4:1041=logd $HOOK_SERVICES"
 run_server_image() {
   local arch=$1 suite=$2 log img serial rc sys want got extra w f
   log=$(logfile "$suite" build.server_image)
@@ -1732,8 +1738,37 @@ run_server_image() {
   elif [ $rc != 0 ] || ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping' || ! serial_has "$serial" '^init: shutting down'; then
     record fail "$suite" server_image "it did not come up on the network and turn off in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   elif serial_has "$serial" '^init: hello|passed$'; then record fail "$suite" server_image "a check ran on the server image (serial: $serial)"
+  elif ! serial_has "$serial" -x "init: the boot command line configures no service on this image; not obeyed: .*$HOOK_SERVICES"; then
+    record fail "$suite" server_image "the service manager did not say it obeyed none of the line's words for services (serial: $serial)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" server_image "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
   else record pass "$suite" server_image; fi
+}
+
+# run_server_unconfined <arch> <suite>: the server image on a machine without
+# an IOMMU starts no driver: one would be trusted with all of memory, and a
+# machine's image refuses a promise of confinement it cannot keep by name
+# (spec/ARCHITECTURE.md, invariant 7; the 2026-11-26 review, H2: it said so
+# and started them). The device manager must say it starts none and refuse
+# each device's driver by name, no driver may come up, and the machine must
+# still turn off in order on the power button. (A test image on the same
+# machine runs them unconfined and says so: `unconfined`.)
+run_server_unconfined() {
+  local arch=$1 suite=$2 log img serial rc text bad=""
+  log=$(logfile "$suite" build.server_image)
+  img=$(build_server_image "$arch" "$log") || { record fail "$suite" server_unconfined "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" server_unconfined)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --no-exit-device --no-iommu \
+    --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
+  rc=$?
+  text=$(tr -d '\r\0' <"$serial")
+  grep -qx 'devmgr: this machine cannot confine DMA: no driver is started (only a test image runs one unconfined)' <<<"$text" ||
+    bad="the device manager did not say it starts no driver it cannot confine"
+  [ -n "$bad" ] || grep -qx 'ERROR: devmgr: [0-9a-f:.]* is not driven: this machine cannot confine its DMA, and only a test image trusts a driver with all of memory' <<<"$text" ||
+    bad="no driver was refused by name"
+  [ -n "$bad" ] || ! grep -qE '^(virtio-blk|virtio-net|e1000e|nvme): ' <<<"$text" || bad="a driver came up unconfined: $(grep -m1 -E '^(virtio-blk|virtio-net|e1000e|nvme): ' <<<"$text" | cut -c1-120)"
+  [ -n "$bad" ] || { [ $rc = 0 ] && grep -q '^init: shutting down' <<<"$text"; } || bad="the machine did not turn off in order (exit status $rc)"
+  if [ -z "$bad" ]; then record pass "$suite" server_unconfined
+  else record fail "$suite" server_unconfined "$bad (serial: $serial)"; fi
 }
 
 # run_console <arch> <suite>: someone at the machine. It boots with a
