@@ -1679,6 +1679,34 @@ run_shutdown_flush() {
   if [ -z "$why" ]; then record pass "$suite" "$name"; else record fail "$suite" "$name" "$why (serial: $serial)"; fi
 }
 
+# run_rogue_end <arch> <suite>: a disk driver that keeps faulting once it is
+# asked to end does not hold the device manager past its time for ending
+# drivers. The disk is driven by the hostile driver with `end_faults`: it
+# waits until it is asked to end, then reads a page a peer took back, a new
+# one each time, for ever (each fault answered with a page of zeros, as for
+# any driver whose client went). The power button is pressed once it waits;
+# the device manager must end it where it stands after its time
+# (END_NS: "did not end within ... ended where it stood"), end in order
+# itself, and the machine must turn off. Before 2026-11-27 each answered
+# fault kept the device manager's wait going past its deadline, until the
+# service manager gave up on it and ended it where it stood.
+run_rogue_end() {
+  local arch=$1 suite=$2 log img serial rc why=""
+  log=$(logfile "$suite" build.rogue_end)
+  img=$(SYSTEM_DRIVERS="pci 1af4:1042 virtio-rogue" build_system_image "$arch" "$log" "checks= devmgr.inject=virtio-rogue:end_faults@1") ||
+    { record fail "$suite" rogue_end "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" rogue_end)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" \
+    --on '^virtio-rogue: waiting to be asked to end$=system_powerdown' >"$serial.qemu" 2>&1
+  rc=$?
+  if [ $rc != 0 ] || ! serial_has "$serial" '^init: shutting down'; then why="the machine did not turn off in order (exit status $rc)"
+  elif ! serial_has "$serial" '^virtio-rogue: asked to end; reading pages'; then why="the hostile driver was never asked to end"
+  elif ! serial_has "$serial" -E '^devmgr: virtio-rogue did not end within [0-9]+ ms; ended where it stood$'; then why="the device manager did not end the faulting driver on its time"
+  elif ! serial_has "$serial" '^init: devmgr ended in order'; then why="the device manager did not end in order: $(tr -d '\r' <"$serial" | grep -m1 -a '^init: devmgr' | cut -c1-120)"
+  fi
+  if [ -z "$why" ]; then record pass "$suite" rogue_end; else record fail "$suite" rogue_end "$why (serial: $serial)"; fi
+}
+
 # run_server_image <arch> <suite>: the minimal server image (build_server_image)
 # holds what a server runs and nothing that tests it (the 2026-11-24 audit:
 # every image carried the checks, the test programs and a hostile driver,
