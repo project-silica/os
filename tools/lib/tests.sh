@@ -695,7 +695,7 @@ run_partitions() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded; do
+  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded holders_apart windows_kept connections_apart device_list; do
     if grep -qx "TEST partitions.$name PASS" <<<"$text"; then record pass "$suite" "partitions_$name"
     else record fail "$suite" "partitions_$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
