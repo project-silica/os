@@ -1117,8 +1117,9 @@ run_http_quit() {
 
 # run_remote <arch> <suite>: remote management (M4: "accepts a remote
 # management session that can inspect, restart and update any service").
-# The image is provisioned as an installer would: a machine key and one
-# owner (remote.key, remote.owners); the system stays up and the host's
+# The image is provisioned as an installer would, with one owner
+# (remote.owners; the machine's key is made on the machine, which says
+# it, and the owner's client checks it); the system stays up and the host's
 # silica-remote, holding the owner's key, does everything over QEMU's
 # user-mode network: lists the services, describes one, reads a log,
 # restarts the log service; starts httpd, updates it while it serves to a
@@ -1132,10 +1133,10 @@ run_remote() {
   log=$(logfile "$suite" build.remote)
   rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") && probe=$(host_tool remoteprobe "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
   dir=${UNIT_DIR:-$RUN}/remote; rm -rf "$dir"; mkdir -p "$dir"
-  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") && scoped=$("$rmt" keygen "$dir/scoped.key") && upd=$("$rmt" keygen "$dir/updater.key") \
+  owner=$("$rmt" keygen "$dir/owner.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") && scoped=$("$rmt" keygen "$dir/scoped.key") && upd=$("$rmt" keygen "$dir/updater.key") \
     || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
   printf '# who may manage this machine\n%s test-owner observe+control+update+power controls=*,remote idle=6\n%s watcher observe\n%s scoped observe+control controls=httpd\n%s updater observe+update controls=*\n' "$owner" "$watcher" "$scoped" "$upd" >"$dir/owners"
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed httpd.fail_after=11") \
+  img=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed httpd.fail_after=11") \
     && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   # Two new programs for httpd: the same code with bytes after it (an ELF
   # file's loader reads only what its headers name), and one whose entry
@@ -1161,6 +1162,13 @@ run_remote() {
     kill $qemu 2>/dev/null; wait $qemu
     record fail "$suite" remote "the remote service never listened: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC|remote)' | cut -c1-140) (serial: $serial)"
     return 1
+  fi
+  # The machine's key is made on the machine (the loader's secret, `key`):
+  # its owner learns it from the machine, as from a new machine's console.
+  machine=$(tr -d '\r' <"$serial" | sed -n 's/^remote: listening on port 22 .*this machine.s key is \([0-9a-f]\{64\}\)$/\1/p' | head -n 1)
+  if [ -z "$machine" ]; then
+    kill $qemu 2>/dev/null; wait $qemu
+    record fail "$suite" remote "the remote service did not say this machine's key (serial: $serial)"; return 1
   fi
   R() { "$rmt" -i "$dir/owner.key" -m "$machine" "127.0.0.1:$port" "$@" 2>&1; }
   # until <pattern> [<n>]: wait (at most 30 s) for the serial line to appear
@@ -1412,9 +1420,9 @@ run_interop() {
   # The remote service listens too (a key and an owner of this run's own):
   # a second listener, for the flood on one that must not cost the other.
   dir=${UNIT_DIR:-$RUN}/interop; rm -rf "$dir"; mkdir -p "$dir"
-  rmt=$(host_tool silica-remote "$log") && "$rmt" keygen "$dir/machine.key" >/dev/null && printf '%s interop observe\n' "$("$rmt" keygen "$dir/owner.key")" >"$dir/owners" \
+  rmt=$(host_tool silica-remote "$log") && printf '%s interop observe\n' "$("$rmt" keygen "$dir/owner.key")" >"$dir/owners" \
     || { record fail "$suite" interop "silica-remote did not build or make keys: $(first_error "$log") (log: $log)"; return 1; }
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
+  img=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
     || { record fail "$suite" interop "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   iop_down() {
     sudo -n tc qdisc del dev "$tap" root 2>/dev/null; sudo -n tc qdisc del dev "$tap" ingress 2>/dev/null
@@ -1653,39 +1661,72 @@ run_shutdown() {
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
-# run_secrets <arch> <suite>: a file provisioned for one service (`files=`:
-# the remote service's machine key) is that service's alone. The image is
-# provisioned with a machine key and an owner, as for the remote test; the
-# device manager, which parses what hostile devices say, is asked (its
-# test-only `find=`) whether 32 characters of the key's text are anywhere
-# in the boot archive as it is lent it. They must not be (before
-# 2026-11-27 every `machine` service was lent the whole archive, the key
-# in it, and the service manager kept the archive's copy for ever: the
-# review of 2026-11-26, H3), and the remote service must still have its
-# key and listen.
+# run_secrets <arch> <suite>: the machine's secrets are on no disk and in
+# nothing the device manager is lent (the review of 2026-11-26, H3, and the
+# review of its fix: a key provisioned in the boot archive was a file on
+# the boot disk, which every program that reaches the disk's blocks could
+# read). The machine boots twice on one UEFI variable store:
+# - the first boot makes the machine's secret (the loader's, kept by the
+#   firmware for its loader alone), and the remote service its key from it;
+# - the secret, read from the variable store on the host, must be nowhere
+#   in the boot disk's image;
+# - the second boot must give the remote service the same key (it lasts),
+#   and the device manager, which parses what hostile devices say, asked
+#   (its test-only find=) for the secret and for bytes of a program of the
+#   boot archive that is no driver (`hello`: what it would see if it were
+#   lent the archive again), must find neither in what it can read.
 run_secrets() {
-  local arch=$1 suite=$2 log img serial rc dir rmt owner needle
+  local arch=$1 suite=$2 log img1 img2 serial rc dir rmt owner secret hello hex key1 key2 why=""
   log=$(logfile "$suite" build.secrets)
   rmt=$(host_tool silica-remote "$log") || { record fail "$suite" secrets "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
   dir=${UNIT_DIR:-$RUN}/secrets; rm -rf "$dir"; mkdir -p "$dir"
-  owner=$("$rmt" keygen "$dir/owner.key") && "$rmt" keygen "$dir/machine.key" >/dev/null || { record fail "$suite" secrets "silica-remote keygen failed"; return 1; }
+  owner=$("$rmt" keygen "$dir/owner.key") || { record fail "$suite" secrets "silica-remote keygen failed"; return 1; }
   printf '%s test-owner\n' "$owner" >"$dir/owners"
-  needle=$(grep -aoE '[0-9a-f]{64}' "$dir/machine.key" | head -n 1 | cut -c1-32)
-  [ ${#needle} = 32 ] || { record fail "$suite" secrets "the machine key file holds no 64 hexadecimal digits ($dir/machine.key)"; return 1; }
-  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$needle") \
+  hello=$(system_program "$arch" hello "$log") || { record fail "$suite" secrets "no hello program (log: $log)"; return 1; }
+  hex=$(dd if="$hello" bs=1 skip=4096 count=32 status=none | od -An -tx1 -v | tr -d ' \n')
+  img1=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$hex") \
     || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  serial=$(logfile "$suite" secrets)
-  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user \
-    --until '^remote: listening on port' >"$serial.qemu" 2>&1
-  rc=$?
-  if serial_has "$serial" "^devmgr: find: $needle is in what"; then
-    record fail "$suite" secrets "the device manager can read the remote service's machine key: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: find:' | cut -c1-140) (serial: $serial)"
-  elif ! serial_has "$serial" "^devmgr: find: $needle is not in what"; then
-    record fail "$suite" secrets "the device manager did not say what it was lent (exit status $rc; serial: $serial)"
-  elif [ $rc != 0 ] || ! serial_has "$serial" '^remote: listening on port'; then
-    record fail "$suite" secrets "the remote service did not get its key and listen (exit status $rc; serial: $serial)"
-  elif serial_has "$serial" '^ERROR'; then record fail "$suite" secrets "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
-  else record pass "$suite" secrets; fi
+  # boot <n> <image>: one boot, the variable store kept; its serial's path.
+  boot() {
+    serial=$(logfile "$suite" "secrets.$1")
+    "$TOOLS/qemu.sh" --arch "$arch" --image "$2" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user \
+      --vars "$dir/vars.fd" --until '^remote: listening on port' >"$serial.qemu" 2>&1
+  }
+  key_of() { tr -d '\r' <"$1" | sed -n 's/^remote: listening on port .*this machine.s key is \([0-9a-f]\{64\}\)$/\1/p' | head -n 1; }
+  # The secret's 32 bytes, from the variable store: the variable's record
+  # in use (state 0x3f, 60 bytes before its name), its name in UCS-2, then
+  # its data.
+  secret_of() {
+    local name at
+    name=$(printf 'SilicaMachineSecret' | sed 's/./&\\x00/g')'\x00\x00'
+    for at in $(LC_ALL=C grep -obUaP "$name" "$1" | cut -d: -f1); do
+      [ "$(dd if="$1" bs=1 skip=$((at - 58)) count=1 status=none | od -An -tx1 | tr -d ' ')" = 3f ] || continue
+      dd if="$1" bs=1 skip=$((at + 40)) count=32 status=none | od -An -tx1 -v | tr -d ' \n'; return 0
+    done
+    return 1
+  }
+  boot 1 "$img1"; rc=$?
+  key1=$(key_of "$serial")
+  if [ $rc != 0 ] || [ -z "$key1" ]; then why="the first boot's remote service did not listen with a key (exit status $rc; serial: $serial)"
+  elif serial_has "$serial" "^devmgr: find: $hex is in what"; then why="the device manager can read the boot archive's programs that are no driver: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: find:' | cut -c1-140) (serial: $serial)"
+  elif ! serial_has "$serial" "^devmgr: find: $hex is not in what"; then why="the device manager did not say what it was lent (serial: $serial)"
+  elif ! secret=$(secret_of "$dir/vars.fd") || [ ${#secret} != 64 ]; then why="the firmware's variable store holds no machine secret ($dir/vars.fd; serial: $serial)"
+  elif LC_ALL=C grep -qaP "$(sed 's/../\\x&/g' <<<"$secret")" "$img1"; then why="the machine's secret is on the boot disk ($img1)"
+  fi
+  if [ -z "$why" ]; then
+    img2=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$secret") \
+      || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+    boot 2 "$img2"; rc=$?
+    key2=$(key_of "$serial")
+    if [ $rc != 0 ] || [ -z "$key2" ]; then why="the second boot's remote service did not listen with a key (exit status $rc; serial: $serial)"
+    elif [ "$key2" != "$key1" ]; then why="the machine's key did not last: $key1 at the first boot, $key2 at the second (serial: $serial)"
+    elif serial_has "$serial" "^devmgr: find: $secret is in what"; then why="the device manager can read the machine's secret: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: find:' | cut -c1-140) (serial: $serial)"
+    elif ! serial_has "$serial" "^devmgr: find: $secret is not in what"; then why="the device manager did not say what it was lent (serial: $serial)"
+    elif LC_ALL=C grep -qaP "$(sed 's/../\\x&/g' <<<"$secret")" "$img2"; then why="the machine's secret is on the boot disk ($img2)"
+    elif serial_has "$serial" '^ERROR'; then why="$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
+    fi
+  fi
+  if [ -z "$why" ]; then record pass "$suite" secrets; else record fail "$suite" secrets "$why"; fi
 }
 
 # run_shutdown_flush <arch> <suite>: turning the machine off ends the disks'
