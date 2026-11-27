@@ -695,11 +695,40 @@ run_partitions() {
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded holders_apart windows_kept connections_apart device_list; do
+  for name in listed_whole size offset confined write scopes opens_bounded narrowing_bounded flush_bounded holders_apart windows_kept connections_bounded reclaimed_with_inner device_list; do
     if grep -qx "TEST partitions.$name PASS" <<<"$text"; then record pass "$suite" "partitions_$name"
     else record fail "$suite" "partitions_$name" "no PASS line: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"; fi
   done
 }
+
+# run_partitions_peers <arch> <suite>: two programs holding partitions of
+# one disk through the block server, each its own at the driver. partcheck,
+# after its checks, holds all of the disk its share allows (partitions
+# opened, connected and with memory, windows narrowed: partcheck.hold); then
+# the shell's `trace`, typed at the console port, opens a partition of the
+# same disk, connects, reads and asks for the trace, and the machine is
+# turned off (`shutdown`). Before, every client of the block server was the
+# block server's at the driver: one holding 16 connected partitions left
+# every other no connection, and the driver's capability space held less
+# than one program's bounds.
+run_partitions_peers() {
+  local arch=$1 suite=$2 name=partitions_peers log img serial port text
+  log=$(logfile "$suite" "build.$name")
+  img=$(build_system_image "$arch" "$log" "checks=partitions partcheck.hold=1") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" "$name")
+  port=$serial.port
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" \
+    --console-port "$port" --port-type '^partcheck: holding [0-9]+ partitions=trace\rshutdown\r' >"$serial.qemu" 2>&1
+  text=$(tr -d '\r\0' <"$serial")
+  if ! grep -q '^partcheck: holding [0-9]* partitions' <<<"$text"; then
+    record fail "$suite" "$name" "partcheck did not hold the disk: $(grep -m1 -aE "^(ERROR|PANIC)" <<<"$text" | cut -c1-140) (serial: $serial)"
+  elif ! tr -d '\r' <"$port" 2>/dev/null | grep -aq 'accepted by the device'; then
+    record fail "$suite" "$name" "the shell's trace of a partition failed while another program held its share: $(tr -d '\r' <"$port" 2>/dev/null | grep -am1 '^trace' | cut -c1-120) (port: $port)"
+  else
+    record pass "$suite" "$name"
+  fi
+}
+
 
 # run_partitions_full_table <arch> <suite>: a second disk whose GPT is full
 # (128 partitions, host-tools' gptdisk). The block server's list is answered
