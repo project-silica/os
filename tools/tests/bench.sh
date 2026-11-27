@@ -70,7 +70,7 @@ reset() {
   locked "${LINUX[@]}"
   transcript "$SER/silica.img" "${GOOD[@]}"; transcript "$SER/linux.img" "${LINUX[@]}"
   echo 600 >"$SER/silica.img.boot"; echo 800 >"$SER/linux.img.boot"
-  printf 'insns_null_syscall 140.0 insns\ninsns_ipc_roundtrip 977.5 insns\ninsns_ctx_switch 315.0 insns\ninsns_page_fault 1400.0 insns\n' >"$FX/counts"
+  printf 'insns_null_syscall 140.0 insns\ninsns_ipc_roundtrip 977.5 insns\ninsns_ctx_switch 315.0 insns\ninsns_page_fault 1400.0 insns\ninsns_notify_roundtrip 1500.0 insns\n' >"$FX/counts"
 }
 # run <milestone> [bench.sh args]: sets OUT and RC. Silica measured whatever
 # is kept (the checks below change the transcripts, which are not the
@@ -96,7 +96,7 @@ has '^bench: behind Linux' && bad "good run: nothing is slower than Linux (a sca
 # four, come from the system image, and the four server metrics from its
 # httpd, which a stubbed run does not boot: before their milestones they are
 # SKIP.
-has '^RESULT: pass=19 fail=0 skipped=20 ' || bad "good run: RESULT wrong: $OUT"
+has '^RESULT: pass=20 fail=0 skipped=20 ' || bad "good run: RESULT wrong: $OUT"
 [ "$(tr '\n' ' ' <"$FX/calls")" = "silica.img silica.img " ] || bad "Linux is locked, not booted: only Silica's boots, got: $(tr '\n' ' ' <"$FX/calls")"
 jq -e '.schema == 2 and .metrics.ipc_roundtrip.ratio < 0.34 and .metrics.ipc_scaling.linux == null' "$WS/target/logs/bench/results.json" >/dev/null 2>&1 ||
   bad "good run: results.json wrong"
@@ -214,7 +214,7 @@ rm -f "$FX/calls"; transcript "$SER/silica.img" "${GOOD[@]/400/700}"; kept 2 --r
 [ "$RC" = 0 ] && [ -z "$(calls)" ] || bad "kept: an unchanged tree must boot nothing: $(calls): $OUT"
 [ "$(grep '^bench: ipc_roundtrip' <<<"$OUT")" = "$first" ] || bad "kept: a run that measures nothing reports what was measured: $OUT"
 has '^bench: not measured again.* kernel .* counts ' || bad "kept: a run must say what it did not measure again: $OUT"
-has '^RESULT: pass=19 fail=0 skipped=20 ' || bad "kept: the kept results are judged like measured ones: $OUT"
+has '^RESULT: pass=20 fail=0 skipped=20 ' || bad "kept: the kept results are judged like measured ones: $OUT"
 echo changed >"$FX/silica.img"; transcript "$SER/silica.img" "${GOOD[@]/400/410}"; kept 2 --runs 2
 [ "$(calls)" = "silica.img silica.img " ] || bad "kept: a changed Silica is measured again: $(calls)"
 has '^bench: ipc_roundtrip: silica 410 ns .*linux 1200 ns' || bad "kept: Silica's new value beside the locked Linux: $OUT"
@@ -251,7 +251,7 @@ reset; transcript "$SER/silica.img" "${GOOD[@]/505/700}"
 printf '# metric\tkind\tbound\thost\twhy\npage_fault\tlinux\t1.17\t-\tknown\n' >"$OS/bench/open.tsv"
 run 2 --runs 1
 [ "$RC" = 0 ] && has '^OPEN: bench: page_fault: .*ratio 1\.167.*recorded at 1\.17' && has '^bench: open gaps.* page_fault$' || bad "open gap: a miss no worse than its recorded bound is OPEN and the run passes: exit $RC: $OUT"
-has '^RESULT: pass=18 fail=0 skipped=21 ' || bad "open gap: counted apart from passes: $OUT"
+has '^RESULT: pass=19 fail=0 skipped=21 ' || bad "open gap: counted apart from passes: $OUT"
 transcript "$SER/silica.img" "${GOOD[@]/505/730}"; run 2 --runs 1
 [ "$RC" = 1 ] && has '^ERROR: bench::page_fault: .*now worse' || bad "open gap: worse than its bound must fail: exit $RC: $OUT"
 transcript "$SER/silica.img" "${GOOD[@]/505/700}"
