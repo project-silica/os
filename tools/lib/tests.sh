@@ -953,7 +953,7 @@ run_entropy() {
     --device virtio-rng-pci,disable-legacy=on,iommu_platform=on >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
-  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing; do
+  for name in seeded_from_the_device answers_are_not_lopsided_and_never_repeat a_large_request_gets_the_most_there_is a_restarted_service_repeats_nothing control_reaches_only_the_services_declared; do
     if grep -qx "TEST entropy.$name PASS" <<<"$text"; then record pass "$suite" "entropy_$name"
     else record fail "$suite" "entropy_$name" "$(grep -m1 -a '^ERROR' <<<"$text" | cut -c1-140) (no PASS line; serial: $serial)"; fi
   done
@@ -1128,13 +1128,13 @@ run_http_quit() {
 # reverts it to the boot archive's; a stranger's key and a wrong machine key
 # get nothing. Then it shuts the machine down. Each step's failure is said.
 run_remote() {
-  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i probe watcher prober n0 free0 free1
+  local arch=$1 suite=$2 log img serial rc port web qemu dir rmt owner machine stranger httpd out why="" i probe watcher scoped prober n0 free0 free1
   log=$(logfile "$suite" build.remote)
   rmt=$(host_tool silica-remote "$log") && httpload=$(host_tool httpload "$log") && probe=$(host_tool remoteprobe "$log") || { record fail "$suite" remote "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
   dir=${UNIT_DIR:-$RUN}/remote; rm -rf "$dir"; mkdir -p "$dir"
-  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") \
+  owner=$("$rmt" keygen "$dir/owner.key") && machine=$("$rmt" keygen "$dir/machine.key") && stranger=$("$rmt" keygen "$dir/stranger.key") && watcher=$("$rmt" keygen "$dir/watcher.key") && scoped=$("$rmt" keygen "$dir/scoped.key") \
     || { record fail "$suite" remote "silica-remote keygen failed"; return 1; }
-  printf '# who may manage this machine\n%s test-owner idle=6\n%s watcher observe\n' "$owner" "$watcher" >"$dir/owners"
+  printf '# who may manage this machine\n%s test-owner observe+control+update+power controls=* idle=6\n%s watcher observe\n%s scoped observe+control controls=httpd\n' "$owner" "$watcher" "$scoped" >"$dir/owners"
   img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= httpd.quit=allowed httpd.fail_after=11") \
     && httpd=$(system_program "$arch" httpd "$log") || { record fail "$suite" remote "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   # Two new programs for httpd: the same code with bytes after it (an ELF
@@ -1223,6 +1223,19 @@ run_remote() {
   out=$(W restart logd) && step "an owner who may only observe restarted logd: $out"
   grep -q 'Refused' <<<"$out" || step "an owner who may only observe was refused a restart, but not as refused: $out"
   until_seen '^remote: watcher may not make call' || step "the machine did not say it refused the watcher's call"
+  # Authority over services names them (the audit's M1, M3): an owner whose
+  # line reaches httpd alone (controls=httpd) restarts nothing else, and no
+  # owner's program is given the machine (devmgr, `machine`) or a service
+  # holding secrets that the remote service's declaration does not name
+  # (entropy: its `controls=*` does not reach one). Before, every service
+  # was reached by name, and both updates were run.
+  S() { "$rmt" -i "$dir/scoped.key" -m "$machine" "127.0.0.1:$port" "$@" 2>&1; }
+  out=$(S restart logd) && step "an owner whose controls= names httpd alone restarted logd: $out"
+  until_seen '^remote: scoped may not control the service logd' || step "the machine did not say it refused the scoped owner's restart of logd"
+  out=$(R update devmgr "$dir/httpd-new.elf") && step "update devmgr (the machine's service) was not refused: $out"
+  grep -q 'Refused' <<<"$out" || step "update devmgr was refused, but not as refused: $out"
+  out=$(R update entropy "$dir/httpd-new.elf") && step "update entropy (it holds secrets the remote service does not name) was not refused: $out"
+  grep -q 'Refused' <<<"$out" || step "update entropy was refused, but not as refused: $out"
   # Connections that never say a word, nine of them, and an owner's own
   # session that, once proven, starts a frame it never finishes: the owner
   # is still served, and the machine closes each (the silent ones within the
@@ -1381,7 +1394,7 @@ run_interop() {
   # The remote service listens too (a key and an owner of this run's own):
   # a second listener, for the flood on one that must not cost the other.
   dir=${UNIT_DIR:-$RUN}/interop; rm -rf "$dir"; mkdir -p "$dir"
-  rmt=$(host_tool silica-remote "$log") && "$rmt" keygen "$dir/machine.key" >/dev/null && printf '%s interop\n' "$("$rmt" keygen "$dir/owner.key")" >"$dir/owners" \
+  rmt=$(host_tool silica-remote "$log") && "$rmt" keygen "$dir/machine.key" >/dev/null && printf '%s interop observe\n' "$("$rmt" keygen "$dir/owner.key")" >"$dir/owners" \
     || { record fail "$suite" interop "silica-remote did not build or make keys: $(first_error "$log") (log: $log)"; return 1; }
   img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks=http httpd.quit=allowed netd.address=$guest/24 netd.router=$host") \
     || { record fail "$suite" interop "image build failed: $(first_error "$log") (log: $log)"; return 1; }
