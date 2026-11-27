@@ -1945,8 +1945,8 @@ HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ' 'is 
 # service its `<service>.<word>` words or keeps one `off=`): the network
 # stack kept off, or given an address, router, name server and time server
 # on a network that is not there, keeps the machine off the network.
-HOOK_SERVICES='off=netd netd.address=10.9.9.9/24 netd.router=10.9.9.1 netd.dns=10.9.9.53 netd.ntp=10.9.9.123'
-HOOK_CMDLINE="panic=test inject=virtio-net:reset@1 devmgr.inject=virtio-net:reset@1 driver=1af4:1041=logd devmgr.driver=1af4:1041=logd $HOOK_SERVICES partitions.hostile_delegate=1"
+HOOK_SERVICES='devmgr.inject=virtio-net:reset@1 devmgr.driver=1af4:1041=logd off=netd netd.address=10.9.9.9/24 netd.router=10.9.9.1 netd.dns=10.9.9.53 netd.ntp=10.9.9.123 partitions.hostile_delegate=1'
+HOOK_CMDLINE="panic=test inject=virtio-net:reset@1 driver=1af4:1041=logd $HOOK_SERVICES"
 run_server_image() {
   local arch=$1 suite=$2 log img serial rc sys want got extra w f
   log=$(logfile "$suite" build.server_image)
@@ -1978,7 +1978,7 @@ run_server_image() {
   elif [ $rc != 0 ] || ! serial_has "$serial" '^netd: the router 10\.0\.2\.2 answers a ping' || ! serial_has "$serial" '^init: shutting down'; then
     record fail "$suite" server_image "it did not come up on the network and turn off in order: $(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"
   elif serial_has "$serial" '^init: hello|passed$'; then record fail "$suite" server_image "a check ran on the server image (serial: $serial)"
-  elif ! serial_has "$serial" -x "init: the boot command line configures no service on this image; not obeyed: .*$HOOK_SERVICES"; then
+  elif ! serial_has "$serial" -Fx "init: the boot command line configures no service on this image; not obeyed: $HOOK_SERVICES"; then
     record fail "$suite" server_image "the service manager did not say it obeyed none of the line's words for services (serial: $serial)"
   elif serial_has "$serial" '^ERROR'; then record fail "$suite" server_image "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
   else record pass "$suite" server_image; fi
@@ -1999,13 +1999,19 @@ run_server_image() {
 # all unconfined and says so: `unconfined`.)
 run_server_unconfined() {
   local arch=$1 suite=$2 log img serial rc text bad=""
-  log=$(logfile "$suite" build.server_image)
-  img=$(build_server_image "$arch" "$log") || { record fail "$suite" server_unconfined "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  log=$(logfile "$suite" build.server_unconfined)
+  # Exercise the remaining devmgr options on this boot so both command lines
+  # fit in the 256 bytes the kernel gives init.
+  local probes='devmgr.find=ff devmgr.find_device=0+0'
+  img=$(build_server_image "$arch" "$log" "$probes") || { record fail "$suite" server_unconfined "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" server_unconfined)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --no-exit-device --no-iommu \
     --device i6300esb --trace pci_cfg_write --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
+  grep -Fxq "init: the boot command line configures no service on this image; not obeyed: $probes" <<<"$text" ||
+    bad="init did not report both devmgr probe options as refused"
+  if grep -q '^devmgr: find:' <<<"$text"; then bad="the production device manager ran the probe"; fi
   local refused='is not driven: its DMA cannot be confined on this machine, and only a test image trusts a driver with all of memory'
   grep -qx 'devmgr: this machine cannot confine DMA: no driver that does DMA is started (only a test image runs one unconfined)' <<<"$text" ||
     bad="the device manager did not say it starts no driver it cannot confine"
