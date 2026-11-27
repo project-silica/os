@@ -1763,7 +1763,7 @@ run_server_unconfined() {
   img=$(build_server_image "$arch" "$log") || { record fail "$suite" server_unconfined "image build failed: $(first_error "$log") (log: $log)"; return 1; }
   serial=$(logfile "$suite" server_unconfined)
   "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-60}" --net user --no-exit-device --no-iommu \
-    --device i6300esb --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
+    --device i6300esb --trace pci_cfg_write --on '^devmgr: the power button is armed$=system_powerdown' >"$serial.qemu" 2>&1
   rc=$?
   text=$(tr -d '\r\0' <"$serial")
   local refused='is not driven: its DMA cannot be confined on this machine, and only a test image trusts a driver with all of memory'
@@ -1773,6 +1773,16 @@ run_server_unconfined() {
     bad="the disk's and the network card's drivers were not both refused by name"
   [ -n "$bad" ] || ! grep -qE '^(virtio-blk|virtio-net|e1000e|nvme): ' <<<"$text" || bad="a driver came up unconfined: $(grep -m1 -E '^(virtio-blk|virtio-net|e1000e|nvme): ' <<<"$text" | cut -c1-120)"
   [ -n "$bad" ] || grep -q '^watchdog-esb: a watchdog resets this machine' <<<"$text" || bad="the watchdog's driver, which does no DMA, did not start"
+  # A refused device keeps no bus mastering the firmware left on (it booted
+  # from the disk): the device manager's last write to each one's command
+  # register, as the device saw it, has bus mastering (bit 2) off.
+  local a last
+  for a in $(sed -n "s/^ERROR: devmgr: \([0-9a-f:.]*\) $refused\$/\1/p" <<<"$text"); do
+    [ -n "$bad" ] && break
+    last=$(grep -a "^pci_cfg_write .* ${a#0000:} @0x4 <- " "$serial.trace" 2>/dev/null | tail -1 | sed 's/.*<- //')
+    if [ -z "$last" ]; then bad="$a was refused and its bus mastering left as the firmware left it (never written; QEMU trace: $serial.trace)"
+    elif [ $((last & 4)) != 0 ]; then bad="$a was refused and left with bus mastering on (its command register last written $last; QEMU trace: $serial.trace)"; fi
+  done
   [ -n "$bad" ] || { [ $rc = 0 ] && grep -q '^init: shutting down' <<<"$text"; } || bad="the machine did not turn off in order (exit status $rc)"
   if [ -z "$bad" ]; then record pass "$suite" server_unconfined
   else record fail "$suite" server_unconfined "$bad (serial: $serial)"; fi
