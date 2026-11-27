@@ -150,6 +150,7 @@ build_system() {
       + (if $s.sets_time then ["sets_time"] else [] end)
       + (if $s.secrets then ["secrets"] else [] end)
       + (if ($s.files // []) != [] then ["files=\($s.files | join(","))"] else [] end)
+      + (if ($s.controls // []) != [] then ["controls=\($s.controls | join(","))"] else [] end)
     | join(" ")' <<<"$meta" >"$out/services.list" || return 1
   # A server image holds what a machine runs and nothing that tests it
   # (IMAGE_PROFILE=server, build_server_image): the services that start at
