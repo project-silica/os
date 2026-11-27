@@ -20,7 +20,7 @@ insns_null_syscall	91.2	value
 insns_ipc_roundtrip	796.9	value
 insns_ctx_switch	343.8	value
 insns_page_fault	1720.9	value
-insns_notify_roundtrip	1236.8	value
+insns_notify_roundtrip	1302.9	value
 blk_read4k_qd1	0.700971	vs-linux	3610	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 blk_read4k_qd1_p99	0.731569	vs-linux	4118	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
 blk_read4k_qd32	0.779656	vs-linux	541745	12th_Gen_Intel(R)_Core(TM)_i9-12900K+tuned
