@@ -1639,7 +1639,15 @@ run_shutdown() {
 run_shutdown_flush_owner() { run_shutdown_flush "$1" "$2" owner; }
 run_shutdown_flush() {
   local arch=$1 suite=$2 mode=${3:-power} name=shutdown_flush log img serial rc why=""
-  local -a how=(--on '^inject: SlowStart committed$=system_powerdown')
+  # While the device manager waits for its disks' drivers to end (the NVMe
+  # driver's bring-up holds it 3 s), the shell asks it for its devices at the
+  # console port: the answer must come, naming the disk still there. Before
+  # 2026-11-27 a call taken in that wait was dropped and its caller heard
+  # PeerGone from a device manager still running (netd ended in error in a
+  # shutdown on a hosted runner).
+  local port
+  port=$(logfile "$suite" shutdown_flush).port
+  local -a how=(--on '^inject: SlowStart committed$=system_powerdown' --console-port "$port" --port-type '^devmgr: 2 disk drivers asked to end=devices\r')
   local cmdline="checks= devmgr.inject=nvme:slow_start@1"
   # The owner's way: `shutdown` typed at the shell, the service manager then
   # asking the device manager to end (the power button's way, the device
@@ -1659,6 +1667,7 @@ run_shutdown_flush() {
   elif [ "$mode" = power ] && ! serial_has "$serial" '^nvme: the controller shut down in order'; then why="the NVMe controller did not report its shutdown complete"
   elif [ "$mode" = power ] && [ "$(tr -d '\r' <"$serial" | grep -ac '^block: the driver ended in order, its write cache flushed')" -lt 2 ]; then why="the two disks' drivers did not both flush and end in order"
   elif [ "$mode" = power ] && [ "$(tr -d '\r' <"$serial" | grep -ac '^devmgr: .* ended in order')" -lt 2 ]; then why="the device manager did not see both disks' drivers end in order"
+  elif [ "$mode" = power ] && ! tr -d '\r' <"$port" 2>/dev/null | grep -aqE '^ +[0-9a-f:.]+ +block +nvme'; then why="the device manager did not answer the shell while its drivers ended (console port: $port)"
   elif [ "$mode" = owner ] && ! serial_has "$serial" '^init: devmgr ended in order'; then why="the device manager was not asked to end, or did not end in order"
   elif serial_has "$serial" '^ERROR'; then why="$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
   fi
