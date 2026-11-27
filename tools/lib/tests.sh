@@ -1653,6 +1653,41 @@ run_shutdown() {
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
 }
 
+# run_secrets <arch> <suite>: a file provisioned for one service (`files=`:
+# the remote service's machine key) is that service's alone. The image is
+# provisioned with a machine key and an owner, as for the remote test; the
+# device manager, which parses what hostile devices say, is asked (its
+# test-only `find=`) whether 32 characters of the key's text are anywhere
+# in the boot archive as it is lent it. They must not be (before
+# 2026-11-27 every `machine` service was lent the whole archive, the key
+# in it, and the service manager kept the archive's copy for ever: the
+# review of 2026-11-26, H3), and the remote service must still have its
+# key and listen.
+run_secrets() {
+  local arch=$1 suite=$2 log img serial rc dir rmt owner needle
+  log=$(logfile "$suite" build.secrets)
+  rmt=$(host_tool silica-remote "$log") || { record fail "$suite" secrets "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
+  dir=${UNIT_DIR:-$RUN}/secrets; rm -rf "$dir"; mkdir -p "$dir"
+  owner=$("$rmt" keygen "$dir/owner.key") && "$rmt" keygen "$dir/machine.key" >/dev/null || { record fail "$suite" secrets "silica-remote keygen failed"; return 1; }
+  printf '%s test-owner\n' "$owner" >"$dir/owners"
+  needle=$(grep -aoE '[0-9a-f]{64}' "$dir/machine.key" | head -n 1 | cut -c1-32)
+  [ ${#needle} = 32 ] || { record fail "$suite" secrets "the machine key file holds no 64 hexadecimal digits ($dir/machine.key)"; return 1; }
+  img=$(SYSTEM_FILES="remote.key=$dir/machine.key remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$needle") \
+    || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+  serial=$(logfile "$suite" secrets)
+  "$TOOLS/qemu.sh" --arch "$arch" --image "$img" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user \
+    --until '^remote: listening on port' >"$serial.qemu" 2>&1
+  rc=$?
+  if serial_has "$serial" "^devmgr: find: $needle is in what"; then
+    record fail "$suite" secrets "the device manager can read the remote service's machine key: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: find:' | cut -c1-140) (serial: $serial)"
+  elif ! serial_has "$serial" "^devmgr: find: $needle is not in what"; then
+    record fail "$suite" secrets "the device manager did not say what it was lent (exit status $rc; serial: $serial)"
+  elif [ $rc != 0 ] || ! serial_has "$serial" '^remote: listening on port'; then
+    record fail "$suite" secrets "the remote service did not get its key and listen (exit status $rc; serial: $serial)"
+  elif serial_has "$serial" '^ERROR'; then record fail "$suite" secrets "$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
+  else record pass "$suite" secrets; fi
+}
+
 # run_shutdown_flush <arch> <suite>: turning the machine off ends the disks'
 # drivers in order (the review of 2026-11-25: every driver was destroyed where
 # it stood, a power cut for the devices' write caches). With an NVMe
@@ -1724,7 +1759,7 @@ run_shutdown_flush() {
 #   words whose obeying fails this test belong here (never one that would
 #   make a broken image pass, as `checks=` would).
 # A package that gains a hook adds its words to both.
-HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ')
+HOOK_WORDS=('panic=' 'exit=port' 'exit=semihosting' 'BENCH DONE' 'inject: ' 'devmgr: find: ')
 # The kernel's panic word, and the device manager's: a fault for the
 # network driver to commit on purpose and another program in that driver's
 # place, each as a bare word and as the device manager's own option (the

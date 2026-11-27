@@ -64,7 +64,7 @@ evidence_init
 SYSTEM_TESTS=(system unconfined rogue rogue_tcg rogue_net dhcp ntp http http_quit power recovery entropy console_port shutdown shutdown_flush shutdown_flush_owner server_image console typeahead nvme net net_mac net_e1000e net_unplug_e1000e
   dhcp_e1000e ntp_e1000e http_e1000e net_recovery net_recovery_e1000e hotplug hotplug_cycle partitions partitions_full_table partitions_backup_gpt partitions_small_transfer
   recovery_nvme nvme_one_vector nvme_4k nvme_namespaces nvme_unservable nvme_admin_missed hostile_clients unstartable_driver entropy_broken_device hotplug_nvme_one_vector hotplug_nvme_4k hotplug_nvme_namespaces
-  remote)
+  remote secrets)
 QUIET_SYSTEM=" recovery recovery_nvme net_recovery net_recovery_e1000e svcload http_restart "
 # unit <quiet|any> <unit> <input>... -- <command>: a guest test. The run has
 # two phases: the units that judge a time, one after another with nothing
