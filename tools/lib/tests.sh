@@ -1662,68 +1662,112 @@ run_shutdown() {
 }
 
 # run_secrets <arch> <suite>: the machine's secrets are on no disk and in
-# nothing the device manager is lent (the review of 2026-11-26, H3, and the
-# review of its fix: a key provisioned in the boot archive was a file on
-# the boot disk, which every program that reaches the disk's blocks could
-# read). The machine boots twice on one UEFI variable store:
-# - the first boot makes the machine's secret (the loader's, kept by the
-#   firmware for its loader alone), and the remote service its key from it;
-# - the secret, read from the variable store on the host, must be nowhere
-#   in the boot disk's image;
-# - the second boot must give the remote service the same key (it lasts),
-#   and the device manager, which parses what hostile devices say, asked
-#   (its test-only find=) for the secret and for bytes of a program of the
-#   boot archive that is no driver (`hello`: what it would see if it were
-#   lent the archive again), must find neither in what it can read.
+# nothing the device manager can read of what it is lent: its memory, and
+# the firmware's flash where the variable store is (other device registers
+# are not read: reading one is an act). The review of 2026-11-26 (H3) and
+# the two reviews of its fix: a key provisioned in the boot archive was a
+# file on the boot disk; the firmware's runtime memory and its flash hold
+# its copy of the variables; a seed of jitter alone must not make a secret
+# that lasts. One machine boots four times on one UEFI variable store:
+# 1. the machine's secret is made (the loader's, kept by the firmware for
+#    its loader alone), and the remote service's key from it; the secret,
+#    read from the store on the host, is nowhere in the boot disk's image,
+#    and the device manager (its test-only find=) does not find bytes of a
+#    program of the archive that is no driver (`hello`: what it would see
+#    were it lent the archive again);
+# 2. the key is the same (it lasts), and the device manager finds the
+#    secret neither in what it is lent nor in the firmware's flash;
+# 3. an archive that brings its own machine.secret: the loader drops it,
+#    says so, and the key is still the machine's;
+# 4. the variable's record set to runtime access (as a running system could
+#    have set one): the loader replaces it, and the key changes.
+# And a second machine with no source of randomness the loader trusts
+# (entropy=accept): the loader says so, and keeps no secret.
 run_secrets() {
-  local arch=$1 suite=$2 log img1 img2 serial rc dir rmt owner secret hello hex key1 key2 why=""
+  local arch=$1 suite=$2 log img img2 img3 serial rc dir rmt owner secret hello hex key1 key2 key3 key4 why="" code vars flash at name
   log=$(logfile "$suite" build.secrets)
   rmt=$(host_tool silica-remote "$log") || { record fail "$suite" secrets "the host's tools did not build: $(first_error "$log") (log: $log)"; return 1; }
   dir=${UNIT_DIR:-$RUN}/secrets; rm -rf "$dir"; mkdir -p "$dir"
   owner=$("$rmt" keygen "$dir/owner.key") || { record fail "$suite" secrets "silica-remote keygen failed"; return 1; }
-  printf '%s test-owner\n' "$owner" >"$dir/owners"
+  printf '%s test-owner observe\n' "$owner" >"$dir/owners"
   hello=$(system_program "$arch" hello "$log") || { record fail "$suite" secrets "no hello program (log: $log)"; return 1; }
   hex=$(dd if="$hello" bs=1 skip=4096 count=32 status=none | od -An -tx1 -v | tr -d ' \n')
-  img1=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$hex") \
+  # The firmware's flash on q35: code and variables, ending at 4 GiB.
+  code=$(firmware_of "$arch" code) && vars=$(firmware_of "$arch" vars) || { record fail "$suite" secrets "no UEFI firmware for $arch"; return 1; }
+  flash=$(printf "%x+%x" $(((1 << 32) - $(stat -Lc %s "$code") - $(stat -Lc %s "$vars"))) $(($(stat -Lc %s "$code") + $(stat -Lc %s "$vars"))))
+  img=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$hex") \
     || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-  # boot <n> <image>: one boot, the variable store kept; its serial's path.
+  # boot <n> <image> <variable store> [qemu.sh arguments]: one boot; its serial's path.
   boot() {
-    serial=$(logfile "$suite" "secrets.$1")
-    "$TOOLS/qemu.sh" --arch "$arch" --image "$2" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user \
-      --vars "$dir/vars.fd" --until '^remote: listening on port' >"$serial.qemu" 2>&1
+    local n=$1 image=$2 store=$3; shift 3
+    serial=$(logfile "$suite" "secrets.$n")
+    "$TOOLS/qemu.sh" --arch "$arch" --image "$image" --serial "$serial" --smp 2 --timeout "${SILICA_QEMU_TIMEOUT:-90}" --net user \
+      --vars "$store" --until '^remote: listening on port' "$@" >"$serial.qemu" 2>&1
   }
   key_of() { tr -d '\r' <"$1" | sed -n 's/^remote: listening on port .*this machine.s key is \([0-9a-f]\{64\}\)$/\1/p' | head -n 1; }
-  # The secret's 32 bytes, from the variable store: the variable's record
-  # in use (state 0x3f, 60 bytes before its name), its name in UCS-2, then
-  # its data.
-  secret_of() {
-    local name at
-    name=$(printf 'SilicaMachineSecret' | sed 's/./&\\x00/g')'\x00\x00'
+  # The variable's record in use in the store: the offset of its name (in
+  # UCS-2; the record's header, 60 bytes, before it: state at 2, attributes
+  # at 4), whose data follows it.
+  name=$(printf 'SilicaMachineSecret' | sed 's/./&\\x00/g')'\x00\x00'
+  record_of() {
     for at in $(LC_ALL=C grep -obUaP "$name" "$1" | cut -d: -f1); do
-      [ "$(dd if="$1" bs=1 skip=$((at - 58)) count=1 status=none | od -An -tx1 | tr -d ' ')" = 3f ] || continue
-      dd if="$1" bs=1 skip=$((at + 40)) count=32 status=none | od -An -tx1 -v | tr -d ' \n'; return 0
+      [ "$(dd if="$1" bs=1 skip=$((at - 58)) count=1 status=none | od -An -tx1 | tr -d ' ')" = 3f ] && { echo "$at"; return 0; }
     done
     return 1
   }
-  boot 1 "$img1"; rc=$?
+  secret_of() { local at; at=$(record_of "$1") && dd if="$1" bs=1 skip=$((at + 40)) count=32 status=none | od -An -tx1 -v | tr -d ' \n'; }
+  attrs_of() { local at; at=$(record_of "$1") && dd if="$1" bs=1 skip=$((at - 56)) count=1 status=none | od -An -tx1 | tr -d ' '; }
+  on_disk() { LC_ALL=C grep -qaP "$(sed 's/../\\x&/g' <<<"$1")" "$2"; }
+  found() { serial_has "$serial" "^devmgr: find: $1 is in what"; }
+  told() { serial_has "$serial" "^devmgr: find: $1 is not in what"; }
+  boot 1 "$img" "$dir/vars.fd"; rc=$?
   key1=$(key_of "$serial")
   if [ $rc != 0 ] || [ -z "$key1" ]; then why="the first boot's remote service did not listen with a key (exit status $rc; serial: $serial)"
-  elif serial_has "$serial" "^devmgr: find: $hex is in what"; then why="the device manager can read the boot archive's programs that are no driver: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: find:' | cut -c1-140) (serial: $serial)"
-  elif ! serial_has "$serial" "^devmgr: find: $hex is not in what"; then why="the device manager did not say what it was lent (serial: $serial)"
+  elif found "$hex"; then why="the device manager can read the boot archive's programs that are no driver: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: find:' | cut -c1-140) (serial: $serial)"
+  elif ! told "$hex"; then why="the device manager did not say what it was lent (serial: $serial)"
   elif ! secret=$(secret_of "$dir/vars.fd") || [ ${#secret} != 64 ]; then why="the firmware's variable store holds no machine secret ($dir/vars.fd; serial: $serial)"
-  elif LC_ALL=C grep -qaP "$(sed 's/../\\x&/g' <<<"$secret")" "$img1"; then why="the machine's secret is on the boot disk ($img1)"
+  elif [ "$(attrs_of "$dir/vars.fd")" != 03 ]; then why="the machine secret's variable is not non-volatile and boot-services-only (attributes $(attrs_of "$dir/vars.fd"); $dir/vars.fd)"
+  elif on_disk "$secret" "$img"; then why="the machine's secret is on the boot disk ($img)"
   fi
   if [ -z "$why" ]; then
-    img2=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$secret") \
+    img2=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= devmgr.find=$secret devmgr.find_device=$flash") \
       || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
-    boot 2 "$img2"; rc=$?
+    boot 2 "$img2" "$dir/vars.fd"; rc=$?
     key2=$(key_of "$serial")
     if [ $rc != 0 ] || [ -z "$key2" ]; then why="the second boot's remote service did not listen with a key (exit status $rc; serial: $serial)"
     elif [ "$key2" != "$key1" ]; then why="the machine's key did not last: $key1 at the first boot, $key2 at the second (serial: $serial)"
-    elif serial_has "$serial" "^devmgr: find: $secret is in what"; then why="the device manager can read the machine's secret: $(tr -d '\r' <"$serial" | grep -m1 -a '^devmgr: find:' | cut -c1-140) (serial: $serial)"
-    elif ! serial_has "$serial" "^devmgr: find: $secret is not in what"; then why="the device manager did not say what it was lent (serial: $serial)"
-    elif LC_ALL=C grep -qaP "$(sed 's/../\\x&/g' <<<"$secret")" "$img2"; then why="the machine's secret is on the boot disk ($img2)"
+    elif found "$secret"; then why="the device manager can read the machine's secret: $(tr -d '\r' <"$serial" | grep -m1 -a "^devmgr: find: $secret is in" | cut -c1-200) (serial: $serial)"
+    elif ! serial_has "$serial" "^devmgr: find: of the device memory at $flash, this program can read 0 pages"; then why="the device manager can read the firmware's flash, where the variable store is: $(tr -d '\r' <"$serial" | grep -m1 -a "^devmgr: find: of the device memory" | cut -c1-140) (serial: $serial)"
+    elif ! told "$secret"; then why="the device manager did not say what it was lent (serial: $serial)"
+    elif on_disk "$secret" "$img2"; then why="the machine's secret is on the boot disk ($img2)"
     elif serial_has "$serial" '^ERROR'; then why="$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140) (serial: $serial)"
+    fi
+  fi
+  if [ -z "$why" ]; then
+    head -c 32 /dev/urandom >"$dir/planted"
+    img3=$(SYSTEM_FILES="remote.owners=$dir/owners machine.secret=$dir/planted" build_system_image "$arch" "$log" "checks=") \
+      || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+    boot 3 "$img3" "$dir/vars.fd"; rc=$?
+    key3=$(key_of "$serial")
+    if ! serial_has "$serial" "^WARNING: loader: the boot volume's archive has its own machine.secret, which is not used"; then why="the loader did not refuse the boot disk's machine.secret (exit status $rc; serial: $serial)"
+    elif [ "$key3" != "$key1" ]; then why="a machine.secret on the boot disk changed the machine's key: $key1, then $key3 (serial: $serial)"
+    fi
+  fi
+  if [ -z "$why" ]; then
+    at=$(record_of "$dir/vars.fd") && printf '\007' | dd of="$dir/vars.fd" bs=1 seek=$((at - 56)) conv=notrunc status=none
+    boot 4 "$img" "$dir/vars.fd"; rc=$?
+    key4=$(key_of "$serial")
+    if ! serial_has "$serial" "^loader: made this machine's secret"; then why="the loader kept a machine secret a running system could have set or read (runtime access; serial: $serial)"
+    elif [ -z "$key4" ] || [ "$key4" = "$key1" ]; then why="the machine's key did not change with the secret the loader made anew: $key1, then $key4 (serial: $serial)"
+    elif [ "$(attrs_of "$dir/vars.fd")" != 03 ]; then why="the replaced secret's variable is not non-volatile and boot-services-only (attributes $(attrs_of "$dir/vars.fd"))"
+    fi
+  fi
+  if [ -z "$why" ]; then
+    img=$(SYSTEM_FILES="remote.owners=$dir/owners" build_system_image "$arch" "$log" "checks= entropy=accept") \
+      || { record fail "$suite" secrets "image build failed: $(first_error "$log") (log: $log)"; return 1; }
+    boot untrusted "$img" "$dir/vars-untrusted.fd" --cpu EPYC,+x2apic,+tsc-deadline,+invtsc,+xsave,+xgetbv1,-rdrand,-rdseed; rc=$?
+    if ! serial_has "$serial" "^WARNING: loader: no source of randomness the loader trusts: this machine's secret is not made to last"; then why="the loader did not say it keeps no secret made without a trusted source (exit status $rc; serial: $serial)"
+    elif secret_of "$dir/vars-untrusted.fd" >/dev/null; then why="a secret made without a trusted source of randomness was kept for good ($dir/vars-untrusted.fd)"
     fi
   fi
   if [ -z "$why" ]; then record pass "$suite" secrets; else record fail "$suite" secrets "$why"; fi
