@@ -1600,7 +1600,11 @@ run_watchdog() {
 # fixed event; a press before that is cleared with the button's old status,
 # as a machine keeps the press that turned it on); the
 # device manager hears it and asks the service manager to shut down, which
-# stops the services last-started first and turns the machine off.
+# answers at once, stops the services last-started first, asks the device
+# manager to end like every service with something to finish (it ends its
+# drivers in order and exits: before 2026-11-27 it waited in its call
+# instead, answering nobody, and was stopped where it stood) and turns the
+# machine off.
 run_shutdown() {
   local arch=$1 suite=$2 log img serial rc
   log=$(logfile "$suite" build.shutdown)
@@ -1617,6 +1621,8 @@ run_shutdown() {
   # whose drivers had ended and the service manager did not answer it).
   if ! serial_has "$serial" '^init: logd ended in order'; then
     record fail "$suite" shutdown "the log service did not end in order: $(tr -d '\r' <"$serial" | grep -m1 -a '^init: logd' | cut -c1-120) (serial: $serial)"
+  elif ! serial_has "$serial" '^init: devmgr ended in order'; then
+    record fail "$suite" shutdown "the device manager was not asked to end, or did not end in order (serial: $serial)"
   elif [ $rc = 0 ] && serial_has "$serial" '^init: shutting down' && serial_has "$serial" '^init: devmgr stopped' \
       && ! serial_has "$serial" '^ERROR'; then record pass "$suite" shutdown
   else record fail "$suite" shutdown "$(tr -d '\r' <"$serial" | grep -m1 -aE '^(ERROR|PANIC)' | cut -c1-140) (exit status $rc; serial: $serial)"; fi
@@ -1639,19 +1645,18 @@ run_shutdown() {
 run_shutdown_flush_owner() { run_shutdown_flush "$1" "$2" owner; }
 run_shutdown_flush() {
   local arch=$1 suite=$2 mode=${3:-power} name=shutdown_flush log img serial rc why=""
-  # While the device manager waits for its disks' drivers to end (the NVMe
-  # driver's bring-up holds it 3 s), the shell asks it for its devices at the
-  # console port: the answer must come, naming the disk still there. Before
-  # 2026-11-27 a call taken in that wait was dropped and its caller heard
-  # PeerGone from a device manager still running (netd ended in error in a
-  # shutdown on a hosted runner).
-  local port
-  port=$(logfile "$suite" shutdown_flush).port
-  local -a how=(--on '^inject: SlowStart committed$=system_powerdown' --console-port "$port" --port-type '^devmgr: 2 disk drivers asked to end=devices\r')
+  local -a how=(--on '^inject: SlowStart committed$=system_powerdown')
   local cmdline="checks= devmgr.inject=nvme:slow_start@1"
-  # The owner's way: `shutdown` typed at the shell, the service manager then
-  # asking the device manager to end (the power button's way, the device
-  # manager ends its drivers before it asks).
+  # The owner's way: `shutdown` typed at the shell. Either way the service
+  # manager answers the call that asks for the shutdown at once and then
+  # asks the device manager to end like any service with something to
+  # finish: the device manager ends its drivers in order, answering its
+  # clients meanwhile, and exits (`init: devmgr ended in order`). Before
+  # 2026-11-27 the power button's way ended the drivers first and then waited
+  # in its call to the service manager, answering nobody until it was
+  # destroyed (a hosted runner: a client's call never answered); and a
+  # driver touching memory its stopped client had lent it was taken for
+  # its end before it flushed (`nvme ... did not end in order`).
   [ "$mode" = owner ] && name=shutdown_flush_owner how=(--console-port "$(logfile "$suite" shutdown_flush_owner).port" --port-type '^console: .* and the console port=shutdown\r') cmdline="checks="
   log=$(logfile "$suite" build.$name)
   img=$(build_system_image "$arch" "$log" "$cmdline") || { record fail "$suite" "$name" "image build failed: $(first_error "$log") (log: $log)"; return 1; }
@@ -1664,11 +1669,11 @@ run_shutdown_flush() {
   if [ $rc != 0 ] || ! serial_has "$serial" '^init: shutting down'; then why="the machine did not turn off in order (exit status $rc)"
   elif ! grep -q '^pci_nvme_flush_ns' "$serial.trace" 2>/dev/null; then why="the NVMe controller was never told to flush (QEMU trace: $serial.trace)"
   elif ! grep -q '^pci_nvme_mmio_shutdown_set' "$serial.trace" 2>/dev/null; then why="the NVMe controller was never shut down (CC.SHN; QEMU trace: $serial.trace)"
-  elif [ "$mode" = power ] && ! serial_has "$serial" '^nvme: the controller shut down in order'; then why="the NVMe controller did not report its shutdown complete"
-  elif [ "$mode" = power ] && [ "$(tr -d '\r' <"$serial" | grep -ac '^block: the driver ended in order, its write cache flushed')" -lt 2 ]; then why="the two disks' drivers did not both flush and end in order"
-  elif [ "$mode" = power ] && [ "$(tr -d '\r' <"$serial" | grep -ac '^devmgr: .* ended in order')" -lt 2 ]; then why="the device manager did not see both disks' drivers end in order"
-  elif [ "$mode" = power ] && ! tr -d '\r' <"$port" 2>/dev/null | grep -aqE '^ +[0-9a-f:.]+ +block +nvme'; then why="the device manager did not answer the shell while its drivers ended (console port: $port)"
-  elif [ "$mode" = owner ] && ! serial_has "$serial" '^init: devmgr ended in order'; then why="the device manager was not asked to end, or did not end in order"
+  elif ! serial_has "$serial" '^nvme: the controller shut down in order'; then why="the NVMe controller did not report its shutdown complete"
+  elif [ "$(tr -d '\r' <"$serial" | grep -ac '^block: the driver ended in order, its write cache flushed')" -lt 2 ]; then why="the two disks' drivers did not both flush and end in order"
+  elif [ "$(tr -d '\r' <"$serial" | grep -ac '^devmgr: .* ended in order')" -lt 2 ]; then why="the device manager did not see both disks' drivers end in order"
+  elif serial_has "$serial" 'PeerGone'; then why="a service heard the device manager gone while it ran: $(tr -d '\r' <"$serial" | grep -m1 -a PeerGone | cut -c1-140)"
+  elif ! serial_has "$serial" '^init: devmgr ended in order'; then why="the device manager was not asked to end, or did not end in order"
   elif serial_has "$serial" '^ERROR'; then why="$(tr -d '\r' <"$serial" | grep -m1 -a '^ERROR' | cut -c1-140)"
   fi
   if [ -z "$why" ]; then record pass "$suite" "$name"; else record fail "$suite" "$name" "$why (serial: $serial)"; fi
